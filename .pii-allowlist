@@ -1,0 +1,10 @@
+# Tracked binary files a human has LOOKED AT and confirmed carry no personal data.
+#
+# scripts/check_no_pii.py cannot read text baked into raster images, so it must
+# not pretend to. Instead it refuses to pass while any tracked binary document
+# is unaccounted for. Adding a line here is a human asserting they opened the
+# file and saw no real names, addresses, amounts or corporate classification
+# markings. Do not add a line to make the build green.
+#
+# format:  <path>  # <who checked, what they saw>
+how_to_vote.png   # reviewed 2026-09-21: synthetic placeholders only ("Your Event Name", "[Confirm-EventID]"), no real recipients

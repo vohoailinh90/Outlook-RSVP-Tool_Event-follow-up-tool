@@ -1,0 +1,4 @@
+# Runtime dependencies. Windows only — see CLAUDE.md.
+pywin32>=306        # Outlook COM automation (outlook_com.py). Windows-only.
+openpyxl>=3.1       # Excel import/export and the one-time history migration
+tkcalendar>=1.6     # optional: date pickers degrade gracefully if absent
