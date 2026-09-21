@@ -72,6 +72,23 @@ requires the guard to notice**. A guard that passes on a clean tree proves nothi
 own — it would also pass if it were blind. When you add a guard, add its negative test in
 the same change. When you fix a bug, add the mutation that would have caught it.
 
+### What these guards cannot see
+
+Stated plainly, because a guard's blind spots are where your judgement is still required.
+All five of these were found by attacking the guards and are now caught; the limits below
+are what remains after that.
+
+- **Names without an address.** A name is personal data and no pattern recognises one. The
+  guard does not pretend to: it refuses to pass while a tracked `.csv`/`.tsv` or binary
+  document is unaccounted for, and makes a person say what is in it. A name sitting in a
+  `.md` or `.txt` file still gets through.
+- **A computed module name.** `importlib.import_module(name)` with a variable is beyond
+  static analysis. Constant arguments are checked.
+- **A message table built at runtime** rather than written as a dict literal is invisible
+  to the AST check.
+- **A wrong translation.** The matrix check proves a language is *present*, never that it
+  is correct.
+
 ## Personal data
 
 Recipients are real colleagues; the repository is public. Real names, email addresses and

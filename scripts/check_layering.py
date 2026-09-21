@@ -87,6 +87,23 @@ def imported_roots(path: Path) -> tuple[set[str], set[str]]:
 
     top: set[str] = set()
     local: set[str] = set()
+
+    # importlib.import_module("tkinter") and __import__("tkinter") are imports
+    # that ast.Import never sees. Only a constant argument can be resolved
+    # statically - a computed module name is beyond any static check, and this
+    # guard does not pretend otherwise.
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        fn = node.func
+        name = (fn.attr if isinstance(fn, ast.Attribute)
+                else fn.id if isinstance(fn, ast.Name) else None)
+        if name not in {"import_module", "__import__"}:
+            continue
+        arg = node.args[0]
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            local.add(arg.value.split(".")[0])
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             names = {a.name.split(".")[0] for a in node.names}

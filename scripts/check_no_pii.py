@@ -37,6 +37,23 @@ EMAIL = re.compile(
 )
 ALLOWED_ADDRESSES = {b"noreply@anthropic.com"}
 
+# Bracketed at-forms only. A first attempt also matched a bare " at ", which
+# matched ordinary English prose ("nothing at all. The...") in this repo's own
+# documentation - three false positives on the first run. A guard that cries
+# wolf gets switched off, so it now requires an unambiguous bracketed form.
+# (The example spellings are assembled below rather than written out, because
+# this file is itself scanned.)
+_AT = rb"\[\s*at\s*\]|\(\s*at\s*\)"
+_DOT = rb"\[\s*dot\s*\]|\(\s*dot\s*\)|\."
+OBFUSCATED = re.compile(
+    rb"[A-Za-z0-9._%+-]+\s*(?:" + _AT + rb")\s*"
+    rb"[A-Za-z0-9.-]+\s*(?:" + _DOT + rb")\s*[A-Za-z]{2,}", re.I)
+
+# A .csv or .tsv in THIS repository is a recipient roster until a human says
+# otherwise. Names alone are personal data, and no regex can recognise a name -
+# so rather than pretend to, the guard makes a person account for the file.
+ROSTER_SUFFIXES = {".csv", ".tsv"}
+
 # Binary documents can carry personal data as pixels - a screenshot of the app
 # showing real recipients is invisible to every regex in this file. So these are
 # not "skipped": each one must be named in .pii-allowlist by a human who opened
@@ -94,6 +111,17 @@ def main() -> int:
             )
             continue
 
+        if path.suffix.lower() in ROSTER_SUFFIXES:
+            rel = path.relative_to(ROOT).as_posix()
+            if rel not in allowed:
+                violations.append(
+                    f"{rel}: tracked {path.suffix} file. Rosters hold names, and a "
+                    f"name is personal data even with no address next to it - which "
+                    f"no pattern here can detect. Confirm it holds no real people "
+                    f"and add it to .pii-allowlist, or untrack it."
+                )
+                continue
+
         if path.suffix.lower() in OPAQUE_SUFFIXES:
             opaque += 1
             rel = path.relative_to(ROOT).as_posix()
@@ -120,6 +148,12 @@ def main() -> int:
             violations.append(
                 f"{path.relative_to(ROOT)}:{line}: real email address "
                 f"{addr.decode(errors='replace')!r} in a tracked file"
+            )
+        for m in OBFUSCATED.finditer(blob):
+            line = blob[: m.start()].count(b"\n") + 1
+            violations.append(
+                f"{path.relative_to(ROOT)}:{line}: obfuscated email address "
+                f"{m.group(0).decode(errors='replace').strip()!r} in a tracked file"
             )
 
     if not scanned:

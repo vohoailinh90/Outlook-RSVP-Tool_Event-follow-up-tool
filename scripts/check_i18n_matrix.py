@@ -22,19 +22,29 @@ import sys
 from pathlib import Path
 
 REQUIRED = {"en", "ja", "vi"}
+# "bilingual" is composed from en+ja at build time rather than stored, so it is
+# a legal key but never a required one.
+KNOWN_LANGS = REQUIRED | {"bilingual"}
 ROOT = Path(__file__).resolve().parents[1]
 TARGET = ROOT / "rsvp_app.py"
 
-# A dict literal is a language table when its keys are all short lowercase
-# strings and it contains at least "en" and one other required language. That
-# is narrow enough not to catch LANG_LABELS-style maps by accident and wide
-# enough to catch every real message table.
+# A dict literal is a language table when every one of its keys is a language
+# code we recognise and at least one is a required language.
+#
+# An earlier version demanded TWO required languages before it would look at a
+# table. That made the guard blind to the most likely real mistake: adding a
+# new message and writing only the English line. A table of {"en": ...} alone
+# was not "incomplete", it was invisible. Keys being a SUBSET of the known
+# codes is what makes this both narrow (LANG_LABELS-style maps have other keys,
+# so they are skipped) and complete (an en-only table is caught).
 def _is_lang_table(node: ast.Dict) -> bool:
+    if not node.keys:
+        return False
     keys = [k.value for k in node.keys
             if isinstance(k, ast.Constant) and isinstance(k.value, str)]
     if len(keys) != len(node.keys):
         return False
-    return "en" in keys and len(REQUIRED.intersection(keys)) >= 2
+    return set(keys) <= KNOWN_LANGS and bool(REQUIRED.intersection(keys))
 
 
 def main() -> int:
