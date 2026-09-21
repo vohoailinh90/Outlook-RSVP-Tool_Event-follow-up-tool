@@ -89,9 +89,37 @@ The payoff is concrete: `tests/test_message_builders.py` used to import `rsvp_ap
 skipped on any machine without a display and Outlook — a skipping test protects nothing.
 It now imports `rsvp.i18n` and runs everywhere. CI stays on Windows regardless.
 
-**Phase 2 — extract `domain/`.** Money, roster building, vote resolution. This is where
-U3 and U4 below get fixed, because fixing them changes behavior and needs the tests Phase 1
-establishes. Move the Excel migration out of `db.py` and delete its `LAZY_ALLOWED` entry.
+**Phase 2 — extract `domain/` (done).** `rsvp/domain/` now holds `money.py` (amount
+parsing plus the arithmetic behind the totals) and `roster.py` (group expansion and
+de-duplication, with the Outlook expander injected rather than imported). The Excel
+migration moved from `db.py` to `rsvp/export/legacy_excel.py`, so `db.py` is stdlib-only
+(581 → 406 lines) and `check_layering.py`'s `LAZY_ALLOWED` is empty rather than
+grandfathering an exemption forever.
+
+The suite no longer skips anything: 72 tests run identically on Linux and on Windows CI,
+where before phase 1 six of them skipped off Windows.
+
+**Money behaviour changed here, deliberately.** `parse_amount_from_text` took the first
+number in the string. Every case below silently produced a wrong figure that the UI then
+displayed with full confidence:
+
+| Input | Was | Now | Why it was wrong |
+|---|---|---|---|
+| `2026 year-end party, 3000 JPY` | `2026.0` | `3000.0` | took the year |
+| `5 people x 3000 JPY` | `5.0` | `3000.0` | took the headcount |
+| `3.000` | `3.0` | `3000.0` | read a Vietnamese/European thousands separator as a decimal point — a thousand-fold understatement |
+| `1.234.567` | `0.0` | `1234567.0` | `float()` raised and the handler returned zero |
+| `approx 3000-4000 JPY` | `3000.0` | `4000.0` | ambiguous range; now follows the stated rule |
+
+The rule is now written down rather than emergent: **a number next to a currency marker
+wins over one that is not**, and with no marker anywhere the first number is still used, so
+a plain `3000` behaves exactly as before. `tests/test_domain_money.py` splits the cases into
+unchanged, deliberately changed, and still-wrong-on-purpose (negatives lose their sign;
+amounts are floats, not `Decimal`).
+
+U4 is fixed too: `_on_amount_paid_changed` swallowed every exception, so a locked or
+unwritable database lost the figure while the UI still showed it as entered. It now warns —
+once per run, because it fires on every keystroke.
 
 **Phase 3 — `ports/` + the adapter seam.** Define `OutlookPort`, make `outlook_com.py`
 implement it, and give the tests a fake. This is what finally makes code above the seam
@@ -101,6 +129,24 @@ bought nothing.
 
 **Phase 4 — split `ui/`.** Seven tabs, seven modules, out of the 4,673-line class. Largest
 and last, because it is worth least until the layers beneath it are real.
+
+### What phase 2 taught the guards
+
+`scripts/check_names_resolve.py` is new, and it exists because of a gap phase 1's review
+found rather than a rule anyone wrote up front. The staged extraction leaves re-export
+shims behind, and **no test constructs `RSVPApp`** — doing so needs a display and a
+signed-in Outlook. So a name dropped from a shim passes the entire suite and surfaces as a
+`NameError` in front of a user, mid-send. Demonstrated: with `build_subject` removed from
+the shim, all 30 tests passed and the guard failed immediately.
+
+It then caught a real defect within the hour — `rsvp/export/legacy_excel.py` was moved out
+of `db.py` without carrying `from datetime import datetime` with it. That is a crash in the
+migration path, introduced and caught inside the same change.
+
+`check_no_pii.py` also changed twice here. It excluded `example.com` case-sensitively, so
+`Alice@Example.com` in a new test read as a real person; and it scanned only *tracked*
+files, meaning a new file full of addresses passed right up until the commit that
+introduced the leak. It now scans what `git add -A` would stage.
 
 ### What phase 1 taught the guards
 

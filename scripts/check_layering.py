@@ -43,11 +43,9 @@ HEAVY = {
 # fails exactly like a module-level import. This is a ratchet: the existing
 # case is grandfathered visibly, new ones are not.
 LAZY_ALLOWED: dict[tuple[str, str], str] = {
-    ("db.py", "openpyxl"): (
-        "one-time Excel->SQLite migration (migrate_from_excel_if_needed). "
-        "db.py mixes storage and export concerns; phase 2 moves this out, "
-        "after which this entry must be deleted."
-    ),
+    # Empty by design. db.py's lazy openpyxl import was the only entry; phase 2
+    # moved that code to rsvp/export/legacy_excel.py, so the storage layer is
+    # stdlib-only and the exemption is gone rather than grandfathered forever.
 }
 
 # path glob -> set of top-level module names it may NOT import.

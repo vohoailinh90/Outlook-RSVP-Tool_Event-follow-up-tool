@@ -62,34 +62,5 @@ def test_fixed_block_mentions_every_event_field(app, lang):
     for field in ("Year End Party", "Hall A", "3000 JPY"):
         assert field in block, f"{lang}: {field!r} missing from the fixed block"
 
-
-class TestParseAmountFromText:
-    """parse_amount_from_text feeds the gift/attendance money totals.
-
-    Still in rsvp_app.py: it is money/domain code, not i18n, so phase 1
-    deliberately left it behind. Phase 2 extracts rsvp/domain/ and it moves
-    there. Until then these reach it through the `monolith` fixture, which
-    resolves on Windows CI and skips elsewhere - so the known defect below
-    stays covered where the suite can actually reach it, rather than being
-    silently dropped for the duration of the refactor.
-    """
-
-    @pytest.mark.parametrize("text,expected", [
-        ("3,000 JPY / person", 3000.0),
-        ("3000", 3000.0),
-        ("", 0.0),
-        (None, 0.0),
-        ("no digits here", 0.0),
-    ])
-    def test_documented_cases(self, monolith, text, expected):
-        assert monolith.parse_amount_from_text(text) == expected
-
-    def test_grabs_the_first_number_not_the_amount(self, monolith):
-        """KNOWN DEFECT, characterized so a refactor cannot hide it.
-
-        The regex takes the first numeric run in the string, so a year or any
-        other leading number wins over the real amount. Tracked as U3 in
-        docs/agentic/ARCHITECTURE.md; fixing it is a behavior change that
-        belongs to the domain-extraction phase, not to a scaffolding pass.
-        """
-        assert monolith.parse_amount_from_text("2026 year-end party, 3000 JPY") == 2026.0
+# parse_amount_from_text moved to rsvp/domain/money.py in phase 2.
+# Its tests moved with it, to tests/test_domain_money.py.

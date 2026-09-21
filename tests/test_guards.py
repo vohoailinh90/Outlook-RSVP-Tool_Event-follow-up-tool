@@ -229,3 +229,73 @@ class TestGuardsResistEvasion:
         assert run_guard("check_no_pii.py", sandbox).returncode == 1, (
             "GUARD IS BLIND: a tracked roster of names passed unreviewed."
         )
+
+
+class TestNameResolutionGuard:
+    """The staged extraction leaves shims behind; a missing one is a crash.
+
+    No test constructs RSVPApp - doing so needs a display and a signed-in
+    Outlook - so a name dropped from the re-export shim passes the entire
+    suite and fails in front of a user, mid-send, on Windows. That is the gap
+    scripts/check_names_resolve.py exists to close, and these prove it is
+    actually closed.
+    """
+
+    def test_passes_on_clean_tree(self, sandbox):
+        assert run_guard("check_names_resolve.py", sandbox).returncode == 0
+
+    def test_fails_when_a_name_is_dropped_from_the_shim(self, sandbox):
+        app = sandbox / "rsvp_app.py"
+        text = app.read_text(encoding="utf-8")
+        mutated = text.replace("    build_subject,\n", "", 1)
+        assert mutated != text, "mutation did not apply - the shim's shape moved"
+        app.write_text(mutated, encoding="utf-8")
+
+        result = run_guard("check_names_resolve.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: build_subject was dropped from the re-export shim "
+            "and nothing noticed. rsvp_app.py still calls it, so this is a "
+            "NameError waiting to happen on Windows."
+        )
+        assert "build_subject" in result.stderr
+
+    def test_fails_when_a_moved_module_loses_an_import(self, sandbox):
+        """The real bug this caught: rsvp/export/legacy_excel.py was moved out
+        of db.py without carrying `from datetime import datetime` with it."""
+        target = sandbox / "rsvp" / "export" / "legacy_excel.py"
+        text = target.read_text(encoding="utf-8")
+        mutated = text.replace("from datetime import datetime\n", "", 1)
+        assert mutated != text, "mutation did not apply"
+        target.write_text(mutated, encoding="utf-8")
+
+        result = run_guard("check_names_resolve.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: a moved module lost an import and still passed."
+        )
+        assert "datetime" in result.stderr
+
+    def test_does_not_false_positive_on_normal_scoping(self, sandbox):
+        """Comprehensions, `except X as e`, `with ... as f`, lambda params and
+        walrus bindings are all real names. Flagging them would make the guard
+        useless noise."""
+        (sandbox / "rsvp" / "domain" / "_scoping_probe.py").write_text(
+            "import contextlib\n"
+            "def f(items, default=1):\n"
+            "    squares = [x * x for x in items if x]\n"
+            "    pairs = {k: v for k, v in enumerate(squares)}\n"
+            "    g = lambda y, z=default: y + z\n"
+            "    with contextlib.suppress(ValueError) as ctx:\n"
+            "        pass\n"
+            "    try:\n"
+            "        pass\n"
+            "    except ValueError as exc:\n"
+            "        print(exc)\n"
+            "    if (n := len(pairs)) > 0:\n"
+            "        print(n, g(1), ctx)\n"
+            "    for i, item in enumerate(items):\n"
+            "        print(i, item)\n"
+            "    return squares\n",
+            encoding="utf-8")
+        result = run_guard("check_names_resolve.py", sandbox)
+        assert result.returncode == 0, (
+            f"FALSE POSITIVE on ordinary Python scoping:\n{result.stderr}")

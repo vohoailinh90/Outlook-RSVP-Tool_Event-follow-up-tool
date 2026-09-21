@@ -37,6 +37,11 @@ jobs:
       - name: Layer boundaries hold
         run: python scripts/check_layering.py
 
+      - name: Every global name resolves
+        # Catches a name dropped from a re-export shim during the staged
+        # extraction. No test constructs RSVPApp, so the suite cannot see it.
+        run: python scripts/check_names_resolve.py
+
   tests:
     name: Characterization tests
     runs-on: windows-latest

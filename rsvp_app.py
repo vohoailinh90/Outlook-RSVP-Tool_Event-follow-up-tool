@@ -52,6 +52,7 @@ from openpyxl.utils import get_column_letter
 import history
 import db
 import outlook_com
+from rsvp.export import legacy_excel
 
 APP_TITLE = "Outlook RSVP Tool"
 
@@ -73,6 +74,14 @@ APP_TITLE = "Outlook RSVP Tool"
 # these names; that package imports without tkinter or Outlook, which is
 # what makes it testable anywhere.
 # ══════════════════════════════════════════════════════════════════════════
+from rsvp.domain import (  # noqa: F401
+    count_actual_attendees,
+    merge_expanded_roster,
+    format_amount,
+    parse_amount_from_text,
+    remaining_amount,
+    sum_contributions,
+)
 from rsvp.i18n import (  # noqa: F401
     BILINGUAL_SEPARATOR,
     CALENDAR_LABELS,
@@ -163,24 +172,6 @@ def set_date_str(widget, date_str):
             widget.insert(0, f"{d:02d}/{m:02d}/{y}")
     except Exception:
         pass  # không parse được (định dạng lạ) — giữ nguyên giá trị đang có trên ô
-
-
-def parse_amount_from_text(text):
-    """Extracts the first numeric amount found in a free-text string, e.g.
-    the "Expected gift budget" field on Tab 1 is usually typed as something
-    like "3,000 JPY / person" — this pulls out 3000.0 so Tab 6 can auto-fill
-    and total the per-person contribution amount. Returns 0.0 if no number
-    is found (e.g. the field is still empty)."""
-    if not text:
-        return 0.0
-    m = re.search(r"[\d][\d,\.]*", str(text))
-    if not m:
-        return 0.0
-    raw = m.group(0).replace(",", "")
-    try:
-        return float(raw)
-    except ValueError:
-        return 0.0
 
 
 def read_gift_contribution_rows(path):
@@ -358,7 +349,7 @@ class RSVPApp(tk.Tk):
         # quả cho user biết SAU KHI cửa sổ chính đã hiện ra (self.after),
         # tránh popup chặn trước khi app kịp vẽ xong.
         try:
-            migrated, event_count, migrate_notes = db.migrate_from_excel_if_needed(
+            migrated, event_count, migrate_notes = legacy_excel.migrate_from_excel_if_needed(
                 db_path=self.history_path.get(), history_xlsx=history.HISTORY_FILE_DEFAULT)
         except Exception:
             migrated, event_count, migrate_notes = False, 0, []
@@ -2635,29 +2626,14 @@ class RSVPApp(tk.Tk):
         if not hasattr(self, "_group_expansion_cache"):
             self._group_expansion_cache = {}  # email.lower() -> list[(name,email)] hoặc None
 
-        roster = []
-        seen = set()
-        for name, email in self.recipients:
-            key = email.lower()
-            if key not in self._group_expansion_cache:
-                try:
-                    self._group_expansion_cache[key] = outlook_com.expand_group_members(email)
-                except Exception:
-                    self._group_expansion_cache[key] = None  # lỗi COM/không resolve được -> coi như người thường
-
-            members = self._group_expansion_cache[key]
-            if members is None:
-                # Không phải group (hoặc không resolve được) -> giữ nguyên dòng gốc
-                if key not in seen:
-                    seen.add(key)
-                    roster.append((name, email))
-            else:
-                for m_name, m_email in members:
-                    mk = m_email.lower()
-                    if mk not in seen:
-                        seen.add(mk)
-                        roster.append((m_name, m_email))
-        return roster
+        # The merge and de-duplication rules live in rsvp/domain/roster.py,
+        # which is testable without Outlook. Expansion itself needs the
+        # address book, so it is passed in rather than imported there.
+        return merge_expanded_roster(
+            self.recipients,
+            outlook_com.expand_group_members,
+            cache=self._group_expansion_cache,
+        )
 
     def _refresh_response_tree(self, skipped=0, roster=None):
         roster = roster if roster is not None else self.recipients
@@ -4315,13 +4291,9 @@ class RSVPApp(tk.Tk):
         return "break"
 
     def _update_attendance_totals(self):
-        total_attend = sum(
-            1 for info in self._attendance_roster.values()
-            if (info.get("actual_attend") or "").strip().lower() == "yes"
-        )
-        total_amount = sum(info.get("amount", 0.0) for info in self._attendance_roster.values())
-        self.var_total_actual_attend.set(str(total_attend))
-        self.var_total_collected_amount.set(f"{total_amount:,.0f}")
+        rows = self._attendance_roster.values()
+        self.var_total_actual_attend.set(str(count_actual_attendees(rows)))
+        self.var_total_collected_amount.set(format_amount(sum_contributions(rows)))
         self._refresh_remaining_amount()
 
     def _refresh_remaining_amount(self):
@@ -4334,14 +4306,19 @@ class RSVPApp(tk.Tk):
             return
         total_collected = parse_amount_from_text(self.var_total_collected_amount.get())
         amount_paid = parse_amount_from_text(self.var_amount_paid.get())
-        self.var_remaining_amount.set(f"{(total_collected - amount_paid):,.0f}")
+        self.var_remaining_amount.set(
+            format_amount(remaining_amount(total_collected, amount_paid)))
 
     def _on_amount_paid_changed(self):
         """Recomputes Remaining amount and auto-saves "Amount paid" to the
         database (events table, "AmountPaid" column) as the user types —
         same auto-save-on-every-edit pattern as the rest of the Attendance
-        & Payment tab, best-effort/silent so a stray keystroke before an
-        Event ID exists doesn't pop up an error."""
+        & Payment tab. Typing before an Event ID exists is not an error and
+        stays silent, but a save that actually FAILS is reported: this field
+        is money, and it used to swallow every exception, so a locked or
+        unwritable database lost the figure with the UI still showing it as
+        entered. Reported once per run rather than on every keystroke, since
+        this fires from a trace_add on each character typed."""
         self._refresh_remaining_amount()
         event_id = self.var_event_id.get().strip()
         if not event_id:
@@ -4350,8 +4327,15 @@ class RSVPApp(tk.Tk):
             db.save_event_record(
                 {"EventID": event_id, "AmountPaid": self.var_amount_paid.get()},
                 self.history_path.get())
-        except Exception:
-            pass  # best-effort silent auto-save, same as _save_attendance_sheet_to_file()
+            self._amount_paid_save_failed = False
+        except Exception as exc:
+            if not getattr(self, "_amount_paid_save_failed", False):
+                self._amount_paid_save_failed = True
+                messagebox.showwarning(
+                    "Amount paid not saved",
+                    f"'Amount paid' could not be written to the database:\n\n{exc}\n\n"
+                    f"The value on screen is NOT saved. Check that {self.history_path.get()} "
+                    f"is writable and not open in another program, then re-enter it.")
 
     # ── Attendance & Payment / Responded result — lưu vào database ──
     # MỚI: đã đổi từ file Excel Attendance_Payment_{EventID}.xlsx (2 sheet)

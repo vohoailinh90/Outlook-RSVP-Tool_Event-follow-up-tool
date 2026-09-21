@@ -20,13 +20,20 @@ PASTE = [
     "Line one\nLine one\nLine two\nLine two\nLine three",
     "日本語のテキスト\n日本語のテキスト", "Tiếng Việt có dấu\n\nvà xuống dòng",
     "A" * 200 + "\n" + "A" * 200,
+    # Emoji inputs exercise EMOJI_PATTERN, which the cleanup functions use as
+    # an anchor when repairing lost line breaks. Without one of these the
+    # pattern is exported but never executed, so a corrupted character range
+    # would survive the move undetected. Found in review of phase 1.
+    "⏰ 18:00📍 Hall A💰 3,000 JPY",
+    "Hello everyone,⏰ Please reply by Friday📋 Bring your badge👥 12 people",
+    "⚠️ Updated:⏰ new time📍 new room",
 ]
 
 CONSTANTS = [
     "LANG_LABELS", "LANG_LABEL_TO_CODE", "TRANSLATE_TARGETS", "BILINGUAL_SEPARATOR",
     "NOT_TRANSLATED_FLAG", "GREETING", "UPDATE_NOTICE", "REMINDER_LABELS",
     "CALENDAR_LABELS", "THANKYOU_LABELS", "GIFT_LABELS", "GIFT_REPORT_LABELS",
-    "DEFAULT_PROMPT_SINGLE", "DEFAULT_PROMPT_BILINGUAL",
+    "DEFAULT_PROMPT_SINGLE", "DEFAULT_PROMPT_BILINGUAL", "EMOJI_PATTERN",
 ]
 
 

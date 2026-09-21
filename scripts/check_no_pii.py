@@ -31,9 +31,14 @@ SQLITE_MAGIC = b"SQLite format 3\x00"
 
 # Deliberately not "any email": the docs legitimately contain example.com and
 # noreply@ addresses. This matches a real person at a real company domain.
+# re.I matters: "Alice@Example.com" is as much a documentation address as
+# "alice@example.com", and a case-sensitive exclusion flagged the first one as
+# a real person. A guard that fires on RFC 2606 example domains trains people
+# to ignore it.
 EMAIL = re.compile(
-    rb"[A-Za-z0-9._%+-]+@(?!example\.|test\.|localhost)"
-    rb"[A-Za-z0-9.-]+\.(?:com|net|org|jp|vn|de|co\.[a-z]{2})\b"
+    rb"[A-Za-z0-9._%+-]+@(?!example\.|test\.|invalid\b|localhost)"
+    rb"[A-Za-z0-9.-]+\.(?:com|net|org|jp|vn|de|co\.[a-z]{2})\b",
+    re.I,
 )
 ALLOWED_ADDRESSES = {b"noreply@anthropic.com"}
 
@@ -76,8 +81,16 @@ def load_allowlist() -> set[str]:
 
 
 def tracked_files() -> list[Path]:
+    """Tracked files PLUS untracked ones that are not gitignored.
+
+    Tracked-only meant a brand-new file full of addresses passed this check
+    right up until it was committed - the guard cleared the commit that
+    introduced the leak. This is the set `git add -A` would stage, so the
+    leak is caught while it is still uncommitted.
+    """
     out = subprocess.run(
-        ["git", "-C", str(ROOT), "ls-files", "-z"],
+        ["git", "-C", str(ROOT), "ls-files", "-z", "--cached", "--others",
+         "--exclude-standard"],
         capture_output=True, check=True,
     ).stdout
     return [ROOT / n.decode() for n in out.split(b"\0") if n]
