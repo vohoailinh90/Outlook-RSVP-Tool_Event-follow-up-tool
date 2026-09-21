@@ -130,6 +130,33 @@ bought nothing.
 **Phase 4 — split `ui/`.** Seven tabs, seven modules, out of the 4,673-line class. Largest
 and last, because it is worth least until the layers beneath it are real.
 
+### What the Codex review taught the tests
+
+An external review of phase 1 found four real defects, three of them in the *evidence*
+rather than in the code — the tests were claiming more than they checked:
+
+- **The golden file was not reproducible.** It and its harness both first appear in the
+  extraction commit, and the harness imports the extracted package, so regenerating it from
+  the new code would have recorded a regression as the expected result. Fixed by
+  `scripts/verify_golden_baseline.py`, which reconstructs the builders from `rsvp_app.py`
+  at the parent commit, straight from git, and re-derives every entry. All 162 reproduce
+  exactly. The fixture is now checkable rather than assertable.
+- **A truncated golden file passed.** The parity test subtracted key sets one way only, so a
+  101-entry subset of a 152-entry snapshot cleared both the length check and every
+  comparison. Up to 51 cases could vanish in silence. Now exact equality, both directions.
+- **The isolation test asserted nothing.** It read
+  `assert forbidden not in sys.modules or True` — unconditionally true. It also could not
+  have worked in-process, since another test importing tkinter first would poison
+  `sys.modules`, and on Windows CI every forbidden module is installed. It now runs in a
+  fresh interpreter and inspects the real module graph.
+- **The lazy-import exemption was keyed on (file, module).** An exemption justified for one
+  function licensed that import anywhere in the file — the laundering path the surrounding
+  comment claimed to close. Now keyed on the enclosing function too.
+
+The pattern worth keeping: every one of these was a check that passed while measuring less
+than it appeared to. That is the failure mode this repository keeps finding, and the reason
+each guard ships with a test that breaks the thing it defends.
+
 ### What phase 2 taught the guards
 
 `scripts/check_names_resolve.py` is new, and it exists because of a gap phase 1's review

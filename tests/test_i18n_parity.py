@@ -42,8 +42,20 @@ def test_golden_file_is_not_empty(golden):
 def test_every_builder_output_matches_the_snapshot(golden):
     current = build_snapshot()
 
+    # Exact key-set equality, in BOTH directions. Subtracting only one way
+    # let a truncated golden pass: a 101-entry subset of a 152-entry snapshot
+    # has no `golden - current` keys, cleared the length check, and every
+    # surviving comparison matched - so up to 51 cases could vanish in
+    # silence. Reported by Codex review of 194af3c.
     missing = sorted(set(golden) - set(current))
     assert not missing, f"builder output disappeared: {missing[:5]}"
+
+    untracked = sorted(set(current) - set(golden))
+    assert not untracked, (
+        f"{len(untracked)} builder output(s) are not in the golden file, so "
+        f"nothing is comparing them: {untracked[:5]}. Regenerate the golden "
+        f"deliberately if the new coverage is intended."
+    )
 
     changed = [k for k in golden if current[k] != golden[k]]
     if changed:
@@ -59,20 +71,40 @@ def test_every_builder_output_matches_the_snapshot(golden):
         )
 
 
-def test_the_package_needs_no_display_and_no_outlook():
-    """The point of phase 1: this layer imports without tkinter or pywin32.
+FORBIDDEN = ("tkinter", "tkcalendar", "pythoncom", "win32com", "openpyxl")
 
-    Before the extraction these builders lived in a module whose line 54 read
-    `import outlook_com`, so exercising them required Windows and Outlook.
+
+@pytest.mark.parametrize("package", ["rsvp.i18n", "rsvp.domain"])
+def test_the_pure_layers_need_no_display_and_no_outlook(package):
+    """The point of the extraction: these layers import without tkinter,
+    Outlook or openpyxl.
+
+    Runs in a FRESH interpreter. The first version of this test asserted
+    `forbidden not in sys.modules or True`, which is unconditionally true -
+    a test advertising isolation while checking nothing. It also could not
+    have worked in-process: another test importing tkinter first would have
+    poisoned sys.modules, and on Windows CI every forbidden module is
+    installed and importable. Reported by Codex review of 194af3c.
     """
+    import json
+    import subprocess
     import sys
 
-    import rsvp.i18n  # noqa: F401
+    probe = (
+        "import json, sys;"
+        f"__import__({package!r});"
+        f"print(json.dumps([m for m in {FORBIDDEN!r} if m in sys.modules]))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True, text=True,
+        cwd=str(Path(__file__).resolve().parents[1]),
+    )
+    assert result.returncode == 0, (
+        f"{package} failed to import in a clean interpreter:\n{result.stderr}")
 
-    for forbidden in ("tkinter", "pythoncom", "win32com", "openpyxl"):
-        assert forbidden not in sys.modules or True  # may be loaded by another test
-    # The real assertion: the package's own module graph is clean.
-    import rsvp.i18n.cleanup
-    import rsvp.i18n.langs
-    import rsvp.i18n.messages
-    import rsvp.i18n.prompts
+    loaded = json.loads(result.stdout.strip().splitlines()[-1])
+    assert loaded == [], (
+        f"{package} pulled in {loaded} - it is no longer importable without "
+        f"a display or Outlook, so the seam this layer exists for is gone."
+    )

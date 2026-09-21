@@ -42,11 +42,17 @@ HEAVY = {
 # So each one must be declared here, with a reason, and anything undeclared
 # fails exactly like a module-level import. This is a ratchet: the existing
 # case is grandfathered visibly, new ones are not.
-LAZY_ALLOWED: dict[tuple[str, str], str] = {
-    # Empty by design. db.py's lazy openpyxl import was the only entry; phase 2
-    # moved that code to rsvp/export/legacy_excel.py, so the storage layer is
-    # stdlib-only and the exemption is gone rather than grandfathered forever.
-}
+# Keyed on (path, ENCLOSING FUNCTION, module). An earlier version keyed only on
+# (path, module), so an exemption written for one function silently licensed
+# that import anywhere in the file - adding `import openpyxl` to load_history
+# would have been accepted by an exemption justified for the migration routine.
+# That is the laundering path the comment above claims to close. Reported by
+# Codex review of 194af3c.
+#
+# Empty by design right now: db.py's lazy openpyxl import was the only entry,
+# and phase 2 moved that code to rsvp/export/legacy_excel.py, so the storage
+# layer is stdlib-only and the exemption is gone rather than grandfathered.
+LAZY_ALLOWED: dict[tuple[str, str, str], str] = {}
 
 # path glob -> set of top-level module names it may NOT import.
 # Phase 1 adds "rsvp/i18n/**", phase 2 "rsvp/domain/**", and so on.
@@ -76,15 +82,32 @@ def imported_roots(path: Path) -> tuple[set[str], set[str]]:
     except (SyntaxError, OSError):
         return set(), set()
 
-    nested: set[int] = set()
+    # id(import node) -> name of the function it sits in (innermost wins)
+    nested: dict[int, str] = {}
     for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             for child in ast.walk(node):
                 if isinstance(child, (ast.Import, ast.ImportFrom)):
-                    nested.add(id(child))
+                    nested[id(child)] = node.name
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            for child in ast.walk(node):
+                if isinstance(child, (ast.Import, ast.ImportFrom)):
+                    nested.setdefault(id(child), node.name)
+
+    # Same attribution for importlib/__import__ calls.
+    call_scope: dict[int, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for child in ast.walk(node):
+                if isinstance(child, ast.Call):
+                    call_scope[id(child)] = node.name
 
     top: set[str] = set()
-    local: set[str] = set()
+    local: set[tuple[str, str]] = set()   # (enclosing function, module)
+
+    def enclosing_of(node) -> str | None:
+        return nested.get(id(node))
 
     # importlib.import_module("tkinter") and __import__("tkinter") are imports
     # that ast.Import never sees. Only a constant argument can be resolved
@@ -100,7 +123,8 @@ def imported_roots(path: Path) -> tuple[set[str], set[str]]:
             continue
         arg = node.args[0]
         if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-            local.add(arg.value.split(".")[0])
+            local.add((call_scope.get(id(node), "<module>"),
+                       arg.value.split(".")[0]))
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -109,7 +133,11 @@ def imported_roots(path: Path) -> tuple[set[str], set[str]]:
             names = {node.module.split(".")[0]}
         else:
             continue
-        (local if id(node) in nested else top).update(names)
+        enclosing = enclosing_of(node)
+        if enclosing is None:
+            top.update(names)
+        else:
+            local.update((enclosing, n) for n in names)
     return top, local
 
 
@@ -130,17 +158,20 @@ def main() -> int:
                     f"without it - move it inside the function that needs it."
                 )
             rel = path.relative_to(ROOT).as_posix()
-            for lazy in sorted(local & forbidden):
-                reason = LAZY_ALLOWED.get((rel, lazy))
+            for func, lazy in sorted(local):
+                if lazy not in forbidden:
+                    continue
+                reason = LAZY_ALLOWED.get((rel, func, lazy))
                 if reason is None:
                     violations.append(
-                        f"{rel}: lazily imports {lazy!r} inside a function. "
-                        f"Deferring the import keeps the module importable but the "
-                        f"layer still needs {HEAVY[lazy]} at runtime. Declare it in "
-                        f"LAZY_ALLOWED with a reason, or move it out of this layer."
+                        f"{rel}: {func}() lazily imports {lazy!r}. Deferring the "
+                        f"import keeps the module importable but the layer still "
+                        f"needs {HEAVY[lazy]} at runtime. Declare it in "
+                        f"LAZY_ALLOWED as ({rel!r}, {func!r}, {lazy!r}) with a "
+                        f"reason, or move it out of this layer."
                     )
                 else:
-                    notes.append(f"{rel}: lazy {lazy!r} allowed - {reason}")
+                    notes.append(f"{rel}: {func}() lazy {lazy!r} allowed - {reason}")
 
     if not checked:
         print("layering: FAIL - matched no files; LAYERS has drifted from the tree",

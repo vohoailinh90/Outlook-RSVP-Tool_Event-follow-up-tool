@@ -80,12 +80,19 @@ def _calls():
             yield fn, fn, (text,), {}
 
 
-def build_snapshot() -> dict[str, str]:
-    """Render everything. Keys match the golden file exactly."""
+def build_snapshot(module=None) -> dict[str, str]:
+    """Render everything. Keys match the golden file exactly.
+
+    `module` defaults to rsvp.i18n. scripts/verify_golden_baseline.py passes
+    the PRE-EXTRACTION rsvp_app.py instead, reconstructed from git history, so
+    the golden file can be re-derived from the parent commit rather than taken
+    on trust. Both must produce identical output; that is the whole claim.
+    """
+    module = module or i18n
     out: dict[str, str] = {}
     for label, fn_name, args, kw in _calls():
         key = f"{label}({args!r},{sorted(kw.items())!r})"
-        fn = getattr(i18n, fn_name, None)
+        fn = getattr(module, fn_name, None)
         if fn is None:
             out[key] = "!!MISSING"
             continue
@@ -94,5 +101,5 @@ def build_snapshot() -> dict[str, str]:
         except Exception as exc:
             out[key] = f"!!RAISED {type(exc).__name__}: {exc}"
     for name in CONSTANTS:
-        out[f"CONST:{name}"] = repr(getattr(i18n, name, "!!MISSING"))
+        out[f"CONST:{name}"] = repr(getattr(module, name, "!!MISSING"))
     return out
