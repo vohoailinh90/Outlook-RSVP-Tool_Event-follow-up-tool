@@ -82,6 +82,14 @@ class TestBehaviourChangedInPhase2:
 class TestStillWrongOnPurpose:
     """Known remaining limits, characterized so they are not mistaken for fixed."""
 
+    def test_a_leading_zero_is_a_decimal_not_grouping(self):
+        """Found by an exhaustive old-vs-new diff over 1,998 inputs: the
+        three-digit rule turned 0.5 into 500, wrong by 1000x UPWARD, which is
+        a worse failure than the understatement the rule exists to fix.
+        Nobody writes "0.500" to mean five hundred."""
+        assert parse_amount_from_text("0.500") == 0.5
+        assert parse_amount_from_text("0,500") == 0.5
+
     def test_negative_amounts_lose_their_sign(self):
         """Out of scope for phase 2: allowing negatives changes what the
         totals and the `,.0f` displays can show, which is a wider change than
@@ -93,6 +101,41 @@ class TestStillWrongOnPurpose:
         with `,.0f`. Not the right type for money in general; converting
         would change every call site and the database column."""
         assert isinstance(parse_amount_from_text("3000"), float)
+
+
+class TestKnownAmbiguousCases:
+    """Inputs where no reading is objectively right, pinned so the choice is
+    reviewable rather than accidental.
+
+    Raised by review of 727a0fd: the thousands rule is locale-blind, so a USD
+    amount written with a trailing zero reads as thousands. These assertions
+    exist to make that a decision on the record - if someone later decides the
+    other reading is correct, they change a test that says why, instead of
+    discovering the behaviour from a wrong invoice.
+    """
+
+    @pytest.mark.parametrize("text,parsed,note", [
+        ("$3.500 per head", 3500.0,
+         "right for JPY/VND, wrong if the author meant three dollars fifty"),
+        ("3.500 USD", 3500.0, "same ambiguity with an explicit ISO code"),
+        ("3.500 JPY", 3500.0, "unambiguous: JPY has no minor unit in practice"),
+        ("3.500 VND", 3500.0, "unambiguous: VND likewise"),
+        ("1.234", 1234.0, "no currency at all; thousands is the likelier intent"),
+    ])
+    def test_three_trailing_digits_reads_as_thousands(self, text, parsed, note):
+        assert parse_amount_from_text(text) == parsed, note
+
+    def test_two_trailing_digits_stays_a_decimal(self):
+        """The standard way to write a minor unit is unaffected, which is why
+        the ambiguity above is narrow rather than general."""
+        assert parse_amount_from_text("$3.50") == 3.5
+        assert parse_amount_from_text("3.50 USD") == 3.5
+
+    def test_a_distant_currency_marker_does_not_win(self):
+        """Adjacency is required. Widening it would let a marker in one clause
+        capture a number from another - the same error in reverse."""
+        assert parse_amount_from_text("JPY quota is 10 max, paid 3000") == 10.0
+        assert parse_amount_from_text("cost is 3000 (JPY)") == 3000.0
 
 
 class TestArithmetic:

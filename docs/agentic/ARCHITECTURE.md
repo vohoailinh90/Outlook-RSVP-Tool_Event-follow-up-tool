@@ -130,6 +130,36 @@ bought nothing.
 **Phase 4 — split `ui/`.** Seven tabs, seven modules, out of the 4,673-line class. Largest
 and last, because it is worth least until the layers beneath it are real.
 
+### What the Phase 2 review found
+
+An independent review of the money change, plus an exhaustive old-vs-new diff over 1,998
+generated budget strings, turned up one genuine defect and one overstatement:
+
+- **`0.500` became `500.0`** — wrong by 1000x *upward*, a worse failure than the
+  understatement the thousands rule exists to fix. A leading zero before the separator is a
+  decimal signal; nobody writes `0.500` for five hundred. Fixed.
+- **The rule is locale-blind**, so `$3.500` reads as three thousand five hundred. That is
+  correct for JPY and VND, the two currencies this tool is used for, and wrong for a USD
+  amount written with a trailing zero. Making it currency-dependent would need a currency to
+  be present, and the commonest input of all (`3000`) has none — the ambiguity would just
+  move somewhere less visible. Kept, and pinned by `TestKnownAmbiguousCases` so it is a
+  decision on the record rather than an accident.
+- **The docstring overstated the fix**, claiming the first number is used when no marker
+  appears "anywhere". Adjacency is required, so `JPY quota is 10 max, paid 3000` yields
+  `10.0`. Corrected; widening adjacency is deliberately not done, since a marker in one
+  clause would then capture a number from another.
+
+The diff itself is now `tests/golden/money_snapshot.json`: 2,260 generated inputs and their
+parsed values. Any future change to amount parsing surfaces as a concrete list of figures
+that would be shown differently, rather than as a surprise on someone's screen.
+
+Worth noting how the defect was found. The review agent was originally asked to do the
+old-vs-new diff, which was the wrong instruction: comparing two implementations over a
+corpus is a computation, and this repository's own rule is that computable checks belong in
+a script. Run as a script it took one command and found the `0.500` case immediately. The
+agent's time was better spent on what a script cannot settle — whether the ambiguity is
+acceptable, and whether a modal dialog can re-enter the Tk event loop.
+
 ### What the Codex review taught the tests
 
 An external review of phase 1 found four real defects, three of them in the *evidence*

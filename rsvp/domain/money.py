@@ -53,11 +53,28 @@ def _to_float(token: str) -> float:
     elif has_comma or has_dot:
         sep = "," if has_comma else "."
         head, _, tail = token.rpartition(sep)
-        if len(tail) == 3 and token.count(sep) >= 1 and head:
+        # LOCALE-BLIND ON PURPOSE. Three trailing digits after a single
+        # separator is read as thousands grouping whatever the currency, so
+        # "$3.500" becomes 3500.0 rather than three dollars fifty. That is
+        # correct for JPY and VND - the two currencies this tool is actually
+        # used for, both of which have no minor unit in practice - and wrong
+        # for a USD amount written with a trailing zero. Making the rule
+        # currency-dependent would need a currency to be present, and the
+        # commonest input of all ("3000") has none, so the ambiguity would
+        # just move somewhere less visible. The tradeoff is pinned by
+        # TestKnownAmbiguousCases in tests/test_domain_money.py.
+        #
+        # A leading zero before the separator means a decimal, never grouping:
+        # nobody writes "0.500" for five hundred, but "0.500" for a half is
+        # ordinary. Without this, the three-digit rule turned 0.5 into 500 -
+        # wrong by 1000x UPWARD, which is a worse failure than the
+        # thousand-fold understatement this rule exists to fix.
+        looks_grouped = len(tail) == 3 and head and head.lstrip("+-") != "0"
+        if looks_grouped:
             # Thousands grouping: 3,000 / 3.000 / 1.234.567
             token = token.replace(sep, "")
         else:
-            # Decimal: 12.5 / 12,5
+            # Decimal: 12.5 / 12,5 / 0.500
             token = token.replace(sep, ".")
 
     try:
@@ -76,8 +93,16 @@ def parse_amount_from_text(text) -> float:
     The previous implementation took the FIRST number in the string, which
     read the year out of "2026 year-end party, 3000 JPY" and the headcount
     out of "5 people x 3000 JPY" - both silently, and both into money totals.
-    With no currency marker anywhere, the first number is still used, so a
-    plain "3000" behaves exactly as before.
+
+    "Next to" means adjacent, separated by whitespace at most: "3000 JPY",
+    "JPY 3000", "¥3,000". A marker further away does not count, and the first
+    number is used instead - so "JPY quota is 10 max, paid 3000" yields 10.0,
+    not 3000.0. That limit is deliberate: allowing words in between would let
+    a marker in one clause capture a number from another, which is the same
+    class of error in the opposite direction.
+
+    With no adjacent currency marker, the first number is used, so a plain
+    "3000" behaves exactly as before.
 
     Returns 0.0 when there is no number at all.
     """
