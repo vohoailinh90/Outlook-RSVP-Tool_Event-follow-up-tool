@@ -24,7 +24,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def run_guard(script: str, cwd: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, str(cwd / "scripts" / script)],
-        capture_output=True, text=True, cwd=cwd,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=cwd,
     )
 
 
@@ -135,7 +136,7 @@ class TestPiiGuard:
         # real repository. (It did, the first time this test was written - which
         # is a fair demonstration that the guard works.)
         address = "a.person" + "@" + "jp." + "bosch" + ".com"
-        (sandbox / "roster.txt").write_text(f"Example Person <{address}>\n")
+        (sandbox / "roster.txt").write_text(f"Example Person <{address}>\n", encoding="utf-8")
         subprocess.run(["git", "add", "-A"], cwd=sandbox, check=True)
         result = run_guard("check_no_pii.py", sandbox)
         assert result.returncode == 1, (
@@ -198,7 +199,7 @@ class TestGuardsResistEvasion:
 
     def test_pii_catches_an_obfuscated_address(self, sandbox):
         at = "[" + "at" + "]"
-        (sandbox / "contacts.txt").write_text(f"reach me: a.person {at} jp.bosch.com\n")
+        (sandbox / "contacts.txt").write_text(f"reach me: a.person {at} jp.bosch.com\n", encoding="utf-8")
         subprocess.run(["git", "add", "-A"], cwd=sandbox, check=True)
         assert run_guard("check_no_pii.py", sandbox).returncode == 1, (
             "GUARD IS BLIND: an obfuscated address passed."
@@ -212,7 +213,8 @@ class TestGuardsResistEvasion:
         """
         (sandbox / "notes.md").write_text(
             "There is nothing at all wrong here. Look at the code, at any "
-            "point, at length. Meet at 3pm at the office.\n")
+            "point, at length. Meet at 3pm at the office.\n",
+            encoding="utf-8")
         subprocess.run(["git", "add", "-A"], cwd=sandbox, check=True)
         result = run_guard("check_no_pii.py", sandbox)
         assert result.returncode == 0, (
@@ -224,7 +226,7 @@ class TestGuardsResistEvasion:
         So the guard does not try: it refuses to pass while a tracked .csv is
         unaccounted for, and makes a human say what is in it.
         """
-        (sandbox / "roster.csv").write_text("Name,Dept\nExample Person,EET1-JP\n")
+        (sandbox / "roster.csv").write_text("Name,Dept\nExample Person,EET1-JP\n", encoding="utf-8")
         subprocess.run(["git", "add", "-A"], cwd=sandbox, check=True)
         assert run_guard("check_no_pii.py", sandbox).returncode == 1, (
             "GUARD IS BLIND: a tracked roster of names passed unreviewed."
@@ -299,3 +301,63 @@ class TestNameResolutionGuard:
         result = run_guard("check_names_resolve.py", sandbox)
         assert result.returncode == 0, (
             f"FALSE POSITIVE on ordinary Python scoping:\n{result.stderr}")
+
+
+class TestWindowsEncodingGuard:
+    """Text I/O without an explicit encoding works on Linux and fails on Windows.
+
+    This repository targets Windows, where the default text encoding is
+    cp1252, and it is full of Japanese and Vietnamese. The defect that
+    prompted this guard shipped green through every local check and broke the
+    Windows CI runner with `UnicodeDecodeError: 'charmap' codec can't decode
+    byte 0x90` - a platform the author does not have.
+    """
+
+    def test_passes_on_clean_tree(self, sandbox):
+        assert run_guard("check_windows_encoding.py", sandbox).returncode == 0
+
+    def test_catches_subprocess_text_mode_without_encoding(self, sandbox):
+        """The exact shape of the failure that broke CI."""
+        target = sandbox / "scripts" / "verify_golden_baseline.py"
+        text = target.read_text(encoding="utf-8")
+        mutated = text.replace(
+            'capture_output=True, text=True, encoding="utf-8",',
+            "capture_output=True, text=True,", 1)
+        assert mutated != text, "mutation did not apply"
+        target.write_text(mutated, encoding="utf-8")
+
+        result = run_guard("check_windows_encoding.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: subprocess text mode with no encoding passed. "
+            "This is the defect that broke the Windows runner."
+        )
+        assert "encoding" in result.stderr
+
+    def test_catches_open_and_read_text_without_encoding(self, sandbox):
+        probe = sandbox / "rsvp" / "domain" / "_encoding_probe.py"
+        probe.write_text(
+            "from pathlib import Path\n"
+            "def f(p):\n"
+            "    return open(p).read() + Path(p).read_text()\n",
+            encoding="utf-8")
+        result = run_guard("check_windows_encoding.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: open() and read_text() without encoding passed.")
+
+    def test_does_not_flag_binary_io(self, sandbox):
+        """`path.open("rb")` and `open(p, "rb")` are correct: no decoding
+        happens. An earlier version read the mode from the wrong argument
+        position for Path.open and flagged both - a guard that fires on
+        correct code gets switched off."""
+        probe = sandbox / "rsvp" / "domain" / "_binary_probe.py"
+        probe.write_text(
+            "from pathlib import Path\n"
+            "def f(p):\n"
+            "    a = Path(p).open('rb').read()\n"
+            "    b = open(p, 'rb').read()\n"
+            "    c = Path(p).read_bytes()\n"
+            "    return a + b + c\n",
+            encoding="utf-8")
+        result = run_guard("check_windows_encoding.py", sandbox)
+        assert result.returncode == 0, (
+            f"FALSE POSITIVE on binary I/O:\n{result.stderr}")

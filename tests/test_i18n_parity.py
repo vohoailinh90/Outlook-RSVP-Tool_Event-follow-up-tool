@@ -97,7 +97,7 @@ def test_the_pure_layers_need_no_display_and_no_outlook(package):
     )
     result = subprocess.run(
         [sys.executable, "-c", probe],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
         cwd=str(Path(__file__).resolve().parents[1]),
     )
     assert result.returncode == 0, (

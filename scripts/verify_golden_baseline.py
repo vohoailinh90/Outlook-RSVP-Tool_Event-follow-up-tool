@@ -32,6 +32,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+# Every subprocess in this file pins encoding="utf-8" explicitly. text=True
+# alone decodes with the locale codec, which is cp1252 on Windows, and
+# rsvp_app.py is full of Japanese and Vietnamese - so `git show` blew up with
+# UnicodeDecodeError on the Windows runner while passing on Linux. That is
+# the console-encoding class of defect CLAUDE.md names as in scope.
+
 # The commit before the extraction, and the region of rsvp_app.py that moved.
 BASELINE_COMMIT = "368c279"
 BASELINE_LINES = (58, 895)
@@ -41,7 +47,7 @@ GOLDEN = ROOT / "tests" / "golden" / "i18n_snapshot.json"
 def old_rsvp_app() -> str:
     result = subprocess.run(
         ["git", "-C", str(ROOT), "show", f"{BASELINE_COMMIT}:rsvp_app.py"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     )
     if result.returncode != 0:
         raise SystemExit(
