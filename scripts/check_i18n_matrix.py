@@ -26,7 +26,23 @@ REQUIRED = {"en", "ja", "vi"}
 # a legal key but never a required one.
 KNOWN_LANGS = REQUIRED | {"bilingual"}
 ROOT = Path(__file__).resolve().parents[1]
-TARGET = ROOT / "rsvp_app.py"
+
+# Every application source file, not one hardcoded path. The phase 1 extraction
+# moved 20 of the 24 language tables from rsvp_app.py into rsvp/i18n/messages.py
+# and this check - then pointed at rsvp_app.py alone - reported OK while
+# silently covering only the 4 tables left behind. Coverage that follows the
+# code cannot drift that way. scripts/ and tests/ are excluded: they contain
+# deliberately broken tables as fixtures.
+TARGET_GLOBS = ("rsvp_app.py", "rsvp/**/*.py")
+
+
+def targets() -> list[Path]:
+    seen: list[Path] = []
+    for pattern in TARGET_GLOBS:
+        for path in sorted(ROOT.glob(pattern)):
+            if path.is_file() and path not in seen:
+                seen.append(path)
+    return seen
 
 # A dict literal is a language table when every one of its keys is a language
 # code we recognise and at least one is a required language.
@@ -48,34 +64,42 @@ def _is_lang_table(node: ast.Dict) -> bool:
 
 
 def main() -> int:
-    if not TARGET.exists():
-        print(f"i18n-matrix: {TARGET} not found", file=sys.stderr)
-        return 2
-    try:
-        tree = ast.parse(TARGET.read_text(encoding="utf-8"))
-    except SyntaxError as exc:
-        print(f"i18n-matrix: cannot parse {TARGET.name}: {exc}", file=sys.stderr)
+    paths = targets()
+    if not paths:
+        print("i18n-matrix: FAIL - no application source found", file=sys.stderr)
         return 2
 
     failures = []
     checked = 0
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Dict) or not _is_lang_table(node):
-            continue
-        checked += 1
-        keys = {k.value for k in node.keys}
-        missing = REQUIRED - keys
-        if missing:
-            failures.append((node.lineno, sorted(missing), sorted(keys)))
+    per_file = []
+    for target in paths:
+        try:
+            tree = ast.parse(target.read_text(encoding="utf-8"))
+        except SyntaxError as exc:
+            print(f"i18n-matrix: cannot parse {target.name}: {exc}", file=sys.stderr)
+            return 2
+
+        found = 0
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Dict) or not _is_lang_table(node):
+                continue
+            checked += 1
+            found += 1
+            keys = {k.value for k in node.keys}
+            missing = REQUIRED - keys
+            if missing:
+                failures.append((target, node.lineno, sorted(missing), sorted(keys)))
+        if found:
+            per_file.append((target.relative_to(ROOT), found))
 
     if not checked:
         # A guard that checks nothing must fail loudly, not pass quietly.
-        print("i18n-matrix: FAIL - no language tables found; the detector has "
-              "drifted from the code it guards", file=sys.stderr)
+        print("i18n-matrix: FAIL - no language tables found anywhere; the "
+              "detector has drifted from the code it guards", file=sys.stderr)
         return 1
 
-    for lineno, missing, keys in failures:
-        print(f"{TARGET.name}:{lineno}: language table missing {missing} "
+    for target, lineno, missing, keys in failures:
+        print(f"{target.relative_to(ROOT)}:{lineno}: language table missing {missing} "
               f"(has {keys}) - .get(lang, T['en']) will silently serve English",
               file=sys.stderr)
 
@@ -83,7 +107,10 @@ def main() -> int:
         print(f"\ni18n-matrix: FAIL - {len(failures)} of {checked} tables incomplete",
               file=sys.stderr)
         return 1
-    print(f"i18n-matrix: OK - {checked} language tables, all have {sorted(REQUIRED)}")
+    summary = ", ".join(f"{p} ({n})" for p, n in per_file)
+    print(f"i18n-matrix: OK - {checked} language tables across {len(per_file)} "
+          f"file(s), all have {sorted(REQUIRED)}")
+    print(f"             {summary}")
     return 0
 
 

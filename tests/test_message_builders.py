@@ -4,12 +4,26 @@ These are not a specification. They record current behavior so that the staged
 extraction in docs/agentic/ARCHITECTURE.md can move this code without changing
 it. If one of these fails during a refactor, the refactor changed behavior.
 
-Scope is deliberately the platform-neutral surface: no Outlook, no database,
-no Tkinter widgets.
+They now import rsvp.i18n directly. Before phase 1 they had to import rsvp_app,
+which pulls in tkinter and outlook_com, so they SKIPPED on any machine without
+a display and a signed-in Outlook - a test that skips is a test that is not
+protecting anything. This file is the concrete payoff of the extraction.
 """
 import pytest
 
+import rsvp.i18n as i18n
+
 LANGS = ["en", "ja", "vi"]
+
+
+@pytest.fixture(scope="module")
+def app():
+    """Kept so the test bodies below are unchanged from before the extraction.
+
+    Same names, same assertions, now resolved from the extracted package
+    instead of the monolith - which is exactly the claim phase 1 has to make.
+    """
+    return i18n
 
 
 def test_every_language_produces_a_distinct_subject(app):
@@ -50,7 +64,15 @@ def test_fixed_block_mentions_every_event_field(app, lang):
 
 
 class TestParseAmountFromText:
-    """parse_amount_from_text feeds the gift/attendance money totals."""
+    """parse_amount_from_text feeds the gift/attendance money totals.
+
+    Still in rsvp_app.py: it is money/domain code, not i18n, so phase 1
+    deliberately left it behind. Phase 2 extracts rsvp/domain/ and it moves
+    there. Until then these reach it through the `monolith` fixture, which
+    resolves on Windows CI and skips elsewhere - so the known defect below
+    stays covered where the suite can actually reach it, rather than being
+    silently dropped for the duration of the refactor.
+    """
 
     @pytest.mark.parametrize("text,expected", [
         ("3,000 JPY / person", 3000.0),
@@ -59,10 +81,10 @@ class TestParseAmountFromText:
         (None, 0.0),
         ("no digits here", 0.0),
     ])
-    def test_documented_cases(self, app, text, expected):
-        assert app.parse_amount_from_text(text) == expected
+    def test_documented_cases(self, monolith, text, expected):
+        assert monolith.parse_amount_from_text(text) == expected
 
-    def test_grabs_the_first_number_not_the_amount(self, app):
+    def test_grabs_the_first_number_not_the_amount(self, monolith):
         """KNOWN DEFECT, characterized so a refactor cannot hide it.
 
         The regex takes the first numeric run in the string, so a year or any
@@ -70,4 +92,4 @@ class TestParseAmountFromText:
         docs/agentic/ARCHITECTURE.md; fixing it is a behavior change that
         belongs to the domain-extraction phase, not to a scaffolding pass.
         """
-        assert app.parse_amount_from_text("2026 year-end party, 3000 JPY") == 2026.0
+        assert monolith.parse_amount_from_text("2026 year-end party, 3000 JPY") == 2026.0

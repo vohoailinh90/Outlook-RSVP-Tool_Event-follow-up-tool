@@ -65,13 +65,29 @@ Each phase is independently shippable and leaves CI green.
 negative tests, dependency manifests, CI on `windows-latest`, the characterization harness,
 the agent roster, this document. No application code changed.
 
-**Phase 1 — extract `i18n/`.** The 766 lines. Zero Tkinter coupling, and every
-`outlook_com.*` call site in `rsvp_app.py` is already confined to `RSVPApp` methods, so the
-only thing blocking extraction is the top-level import — not functional coupling. Highest
-leverage per unit of risk in the repository, and the characterization tests in
-`tests/test_message_builders.py` already lock in current behavior so the move can be proven
-to change nothing. After this phase the message builders are testable on any machine, which
-shortens the local edit-test loop; CI itself stays on Windows either way.
+**Phase 1 — extract `i18n/` (done).** 797 lines left `rsvp_app.py` (5,779 → 4,995) for
+`rsvp/i18n/`: `langs.py`, `prompts.py`, `cleanup.py`, `messages.py`. The code was moved by
+exact line range rather than retyped, so the function bodies are byte-identical.
+
+The scope was the *message* code, not all 766 lines that happen to be Tkinter-free:
+`parse_amount_from_text` is money and `read_gift_contribution_rows` needs openpyxl, so both
+stayed behind for Phase 2. i18n is a layer, not a bucket for whatever compiles without a
+display.
+
+`rsvp_app.py` re-exports all 34 public names, so none of the 108 methods that call them
+changed. That is a compatibility shim, not the destination: new code should import
+`rsvp.i18n` directly.
+
+Proof the move changed nothing: `tests/golden/i18n_snapshot.json` holds the rendered output
+of 152 builder calls — every builder × every language, plus two fallback codes and eight
+paste-cleanup inputs — captured *before* the extraction. `tests/test_i18n_parity.py` renders
+them again and compares. Both paths reproduce the pre-extraction hash exactly. A
+property-based test can pass while a transposed line changes what a recipient receives; a
+full-output comparison cannot.
+
+The payoff is concrete: `tests/test_message_builders.py` used to import `rsvp_app`, so it
+skipped on any machine without a display and Outlook — a skipping test protects nothing.
+It now imports `rsvp.i18n` and runs everywhere. CI stays on Windows regardless.
 
 **Phase 2 — extract `domain/`.** Money, roster building, vote resolution. This is where
 U3 and U4 below get fixed, because fixing them changes behavior and needs the tests Phase 1
@@ -85,6 +101,23 @@ bought nothing.
 
 **Phase 4 — split `ui/`.** Seven tabs, seven modules, out of the 4,673-line class. Largest
 and last, because it is worth least until the layers beneath it are real.
+
+### What phase 1 taught the guards
+
+Two guards were wrong in ways only a real move could expose, and both were the same class
+of fault — a check that kept passing while its coverage quietly fell away:
+
+- `check_i18n_matrix.py` pointed at `rsvp_app.py`. When 20 of the 24 language tables moved
+  into `rsvp/i18n/`, it reported OK while checking only the 4 left behind. It now scans the
+  whole application tree, and prints per-file counts so a drop is visible.
+- `tests/test_guards.py` mutated `GREETING` in `rsvp_app.py` to prove the matrix guard
+  fires. After the move that mutation applied to nothing — caught only because the test
+  asserts its own mutation took effect. A mutation test that silently mutates nothing is
+  the purest form of false confidence.
+
+Neither was found by reading the diff. Both were found by running the checks against a tree
+that had actually changed shape, which is the argument for doing the extraction in small
+phases rather than one large one.
 
 ## Personal data (D4)
 

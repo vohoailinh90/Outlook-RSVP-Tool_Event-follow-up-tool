@@ -26,8 +26,13 @@ except Exception as exc:  # pragma: no cover - environment-dependent
 
 
 @pytest.fixture(scope="session")
-def app():
-    """The rsvp_app module, or skip/fail depending on the environment."""
+def monolith():
+    """The rsvp_app module itself, or skip/fail depending on the environment.
+
+    Named `monolith` rather than `app` because most tests no longer need it:
+    after phase 1 the message builders come from rsvp.i18n, which imports
+    anywhere. This fixture is only for code still inside rsvp_app.py.
+    """
     if rsvp_app is not None:
         return rsvp_app
     msg = f"rsvp_app is not importable here: {IMPORT_ERROR!r}"

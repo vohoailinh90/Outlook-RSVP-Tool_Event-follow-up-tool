@@ -40,8 +40,14 @@ def sandbox(tmp_path: Path) -> Path:
     """
     dst = tmp_path / "repo"
     dst.mkdir()
+    # Tracked files PLUS untracked ones that are not gitignored - i.e. exactly
+    # what `git add -A` would stage right now. Tracked-only made these tests
+    # depend on whether the work in progress happened to be committed yet: a
+    # newly added package was invisible to the sandbox and its mutation target
+    # did not exist.
     listing = subprocess.run(
-        ["git", "-C", str(ROOT), "ls-files", "-z"],
+        ["git", "-C", str(ROOT), "ls-files", "-z", "--cached", "--others",
+         "--exclude-standard"],
         capture_output=True, check=True).stdout
     for raw in listing.split(b"\0"):
         if not raw:
@@ -63,7 +69,11 @@ class TestI18nMatrixGuard:
         assert run_guard("check_i18n_matrix.py", sandbox).returncode == 0
 
     def test_fails_when_a_language_is_dropped(self, sandbox):
-        app = sandbox / "rsvp_app.py"
+        # GREETING moved to rsvp/i18n/langs.py in phase 1. The assertion below
+        # that the mutation actually applied is what caught the move: a
+        # mutation test whose target has drifted proves nothing, so it must
+        # fail loudly rather than silently mutate nothing.
+        app = sandbox / "rsvp" / "i18n" / "langs.py"
         text = app.read_text(encoding="utf-8")
         mutated = text.replace('    "vi": "Chào các bạn,",\n', "", 1)
         assert mutated != text, "mutation did not apply - the guard's target moved"
