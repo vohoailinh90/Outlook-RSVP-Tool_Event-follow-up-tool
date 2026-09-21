@@ -73,6 +73,18 @@ class TestBehaviourChangedInPhase2:
          "an ambiguous range: it used to take the first number, it now takes "
          "the one the currency marker is attached to. Neither reading is "
          "obviously right; this one at least follows the stated rule"),
+        # The separator branches below were unlisted until review of 5a8c9c8
+        # pointed out that the suite advertised this class as fully
+        # characterized while two of its branches were not represented at all.
+        ("12,5", 125.0, 12.5,
+         "a European-style comma decimal: the comma used to be stripped as if "
+         "it were grouping, inflating the amount tenfold"),
+        ("1.234,56", 1.23456, 1234.56,
+         "mixed European formatting: the dots were kept as a decimal point and "
+         "the comma stripped, producing a number a thousand times too small"),
+        ("1.000.000,50", 0.0, 1000000.5,
+         "float() raised on the multi-separator form and the handler returned "
+         "zero, so a million became nothing"),
     ])
     def test_defect_is_fixed(self, text, was, now, why):
         assert parse_amount_from_text(text) == now, why
@@ -136,6 +148,75 @@ class TestKnownAmbiguousCases:
         capture a number from another - the same error in reverse."""
         assert parse_amount_from_text("JPY quota is 10 max, paid 3000") == 10.0
         assert parse_amount_from_text("cost is 3000 (JPY)") == 3000.0
+
+
+class TestCurrencyMarkersAreWholeTokens:
+    """A marker must be a whole token, not a prefix of an ordinary word.
+
+    Review of 5a8c9c8 found that "EUR" matched inside "European", "dong"
+    inside "dongles" and "usd" inside "usdollars" - so
+    "Budget 3000 per person for the 2026 European event" returned 2026. That
+    is the first-number bug this function exists to prevent, wearing a
+    disguise, and it beat a real adjacent marker elsewhere in the string.
+    """
+
+    @pytest.mark.parametrize("text", [
+        "Budget 3000 per person for the 2026 European event",
+        "3000 for 12 dongles",
+        "Budget 3000, 50 usdollars extra",
+        "Trip 2026 Europe, budget 3000 JPY",
+        "2026 đại hội, 3000 JPY",
+    ])
+    def test_a_word_containing_a_currency_code_is_not_a_marker(self, text):
+        assert parse_amount_from_text(text) == 3000.0
+
+    @pytest.mark.parametrize("text,expected", [
+        ("khoảng 200000đ/người", 200000.0),   # đ as a suffix, no boundary
+        ("khoảng 200000 đồng", 200000.0),     # the whole word
+        ("予算 3,000円", 3000.0),
+        ("¥3,000", 3000.0),
+        ("3,000 JPY / person", 3000.0),
+    ])
+    def test_real_markers_still_match(self, text, expected):
+        assert parse_amount_from_text(text) == expected
+
+
+class TestLongInputDoesNotStall:
+    """This runs synchronously from a keystroke trace on the amount field.
+
+    The earlier single-alternation pattern matched a whole digit run for every
+    starting digit and then backtracked hunting for a marker - quadratic, and
+    measurably so: 4,000 digits took most of a second, freezing the Tk UI on a
+    paste. Locating markers first makes each digit run be considered once.
+    """
+
+    def test_a_long_pasted_number_parses_promptly(self):
+        import time
+
+        start = time.perf_counter()
+        parse_amount_from_text("1" * 8000)
+        elapsed = time.perf_counter() - start
+        assert elapsed < 0.10, (
+            f"parsing 8,000 digits took {elapsed*1000:.0f} ms. This runs on "
+            f"every keystroke in the amount field; the quadratic version took "
+            f"~750 ms at half that length and stalled the UI."
+        )
+
+    def test_cost_grows_roughly_linearly(self):
+        import time
+
+        def timed(n):
+            s = "1" * n
+            start = time.perf_counter()
+            for _ in range(5):
+                parse_amount_from_text(s)
+            return (time.perf_counter() - start) / 5
+
+        small, large = timed(1000), timed(8000)
+        assert large < small * 40, (
+            f"8x the input cost {large/max(small,1e-9):.0f}x the time - that is "
+            f"superlinear, which is how the original stall happened"
+        )
 
 
 class TestArithmetic:

@@ -91,6 +91,28 @@ def main() -> int:
 
     golden = json.loads(GOLDEN.read_text(encoding="utf-8"))
 
+    # Coverage is measured against the PRE-EXTRACTION public surface, not
+    # against the current harness. The harness is mutable: if a later
+    # extraction dropped a builder and updated the harness and the golden
+    # together, both key sets would shrink in step and this check would pass
+    # while exercising nothing. Asking the old module what it exported closes
+    # that, because git history is not editable by the change under review.
+    module = build_baseline_module()
+    old_surface = {
+        name for name in dir(module)
+        if not name.startswith("_") and callable(getattr(module, name))
+    }
+    exercised = {k.split("(")[0].removesuffix("_upd").removesuffix("_full")
+                 for k in golden if not k.startswith("CONST:")}
+    exercised.discard("build_editable_block_t")
+    exercised.add("build_editable_block")
+    uncovered = sorted(old_surface - exercised)
+    if uncovered:
+        print(f"baseline: FAIL - {len(uncovered)} builder(s) existed before the "
+              f"extraction but are exercised by nothing: {uncovered}",
+              file=sys.stderr)
+        return 1
+
     errors = {k: v for k, v in baseline.items() if v.startswith("!!")}
     if errors:
         print(f"baseline: FAIL - the reconstructed module errored on "

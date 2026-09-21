@@ -19,16 +19,49 @@ import re
 _NUMBER = r"\d[\d.,]*\d|\d"
 
 # Currency markers seen in this tool's event budgets: Japanese, Vietnamese,
-# and the bare ISO codes people type. Used to pick the RIGHT number out of a
-# sentence, not to validate or convert anything.
-_CURRENCY = r"(?:JPY|VND|USD|EUR|yen|円|¥|₫|đ|\$|dong|đồng)"
-
-# A number with a currency marker on either side, e.g. "3000 JPY", "¥3,000".
-_WITH_CURRENCY = re.compile(
-    rf"(?:{_CURRENCY}\s*(?P<before>{_NUMBER}))|(?:(?P<after>{_NUMBER})\s*{_CURRENCY})",
-    re.IGNORECASE,
+# and the bare ISO codes people type.
+#
+# The alphabetic codes are anchored with \b. Without that, "EUR" matched
+# inside "European", "dong" inside "dongles" and "usd" inside "usdollars", so
+# "Budget 3000 per person for the 2026 European event" returned 2026 - the
+# exact first-number bug this function exists to prevent, wearing a disguise.
+#
+# "đ" cannot take a leading \b, because "200000đ" has no boundary between the
+# digit and the letter. It instead requires that no letter FOLLOWS, so it
+# matches the suffix in "200000đ" but not the first letter of "đại hội".
+_CURRENCY = (
+    r"(?:\b(?:JPY|VND|VN\u0110|USD|EUR|yen|dong|\u0111\u1ed3ng)\b"
+    r"|[\u00a5\u20ab$\u5186]"
+    r"|\u0111(?![^\W\d_]))"
 )
+_CURRENCY_RE = re.compile(_CURRENCY, re.IGNORECASE)
+
+# Anchored number patterns, used to look just beside a marker rather than to
+# scan the whole string for a number-then-marker pair.
+_NUMBER_AT_START = re.compile(rf"\s*({_NUMBER})")
+_NUMBER_AT_END = re.compile(rf"({_NUMBER})\s*$")
 _ANY_NUMBER = re.compile(_NUMBER)
+
+
+def _amount_beside_a_currency_marker(text: str) -> str | None:
+    """Return the number adjacent to the first currency marker, if any.
+
+    Markers are located first, then the text immediately beside each one is
+    checked for a number. The earlier form was a single alternation that, for
+    every starting digit, matched a whole digit run and then backtracked
+    looking for a marker - quadratic on a long marker-free number, and this
+    function runs synchronously from a keystroke handler, so pasting a few
+    thousand digits into the amount field stalled the UI for most of a second.
+    Locating markers first makes each digit run be considered once.
+    """
+    for marker in _CURRENCY_RE.finditer(text):
+        after = _NUMBER_AT_START.match(text, marker.end())
+        if after:
+            return after.group(1)
+        before = _NUMBER_AT_END.search(text, 0, marker.start())
+        if before:
+            return before.group(1)
+    return None
 
 
 def _to_float(token: str) -> float:
@@ -110,9 +143,9 @@ def parse_amount_from_text(text) -> float:
         return 0.0
     text = str(text)
 
-    match = _WITH_CURRENCY.search(text)
-    if match:
-        return _to_float(match.group("before") or match.group("after"))
+    beside = _amount_beside_a_currency_marker(text)
+    if beside is not None:
+        return _to_float(beside)
 
     match = _ANY_NUMBER.search(text)
     return _to_float(match.group(0)) if match else 0.0
