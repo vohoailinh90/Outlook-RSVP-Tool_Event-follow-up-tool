@@ -154,6 +154,11 @@ class TestKnownAmbiguousCases:
         ("$3.000 USD", 3000.0, 3.0),
         ("¥ 3.000 USD", 3000.0, 3.0),
         ("USD $3.000", 3000.0, 3.0),
+        # Glued codes: \b saw no boundary between a digit and a letter, so
+        # these fell back to the first number (Codex review of PR #2).
+        ("12.500USD", 12500.0, 12.5),
+        ("USD12.500", 12500.0, 12.5),
+        ("5 people x 12.500USD", 5.0, 12.5),
         ("3.500 USD", 3500.0, 3.5),
         ("12.500 USD", 12500.0, 12.5),
         ("USD 12.500", 12500.0, 12.5),
@@ -204,6 +209,13 @@ class TestCurrencyMarkersAreWholeTokens:
         ("予算 3,000円", 3000.0),
         ("¥3,000", 3000.0),
         ("3,000 JPY / person", 3000.0),
+        # A code glued to the number is still a marker: a digit may touch
+        # it, a letter may not. These used to fall back to the first number,
+        # which here is the year (Codex review of PR #2).
+        ("2026 party, 3000JPY", 3000.0),
+        ("2026 party, JPY3000", 3000.0),
+        ("2026 party, 200000VND", 200000.0),
+        ("2026 party, 3000yen", 3000.0),
     ])
     def test_real_markers_still_match(self, text, expected):
         assert parse_amount_from_text(text) == expected

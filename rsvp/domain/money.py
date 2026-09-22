@@ -21,10 +21,16 @@ _NUMBER = r"\d[\d.,]*\d|\d"
 # Currency markers seen in this tool's event budgets: Japanese, Vietnamese,
 # and the bare ISO codes people type.
 #
-# The alphabetic codes are anchored with \b. Without that, "EUR" matched
-# inside "European", "dong" inside "dongles" and "usd" inside "usdollars", so
-# "Budget 3000 per person for the 2026 European event" returned 2026 - the
-# exact first-number bug this function exists to prevent, wearing a disguise.
+# The alphabetic codes must not touch another LETTER on either side. Without
+# that, "EUR" matched inside "European", "dong" inside "dongles" and "usd"
+# inside "usdollars", so "Budget 3000 per person for the 2026 European event"
+# returned 2026 - the exact first-number bug this function exists to prevent,
+# wearing a disguise.
+#
+# The guard is a letter-excluding lookaround, not \b: digits are word
+# characters too, so \b missed the glued forms "12.500USD" and "USD12.500"
+# and those fell back to the first number in the string (Codex review of
+# PR #2). A digit may touch a code; a letter may not.
 #
 # "đ" cannot take a leading \b, because "200000đ" has no boundary between the
 # digit and the letter. It instead requires that no letter FOLLOWS, so it
@@ -37,7 +43,8 @@ _NUMBER = r"\d[\d.,]*\d|\d"
 # "3000US$" is found while "BUS$" is not.
 _CURRENCY = (
     r"(?:(?<![^\W\d_])US\$"
-    r"|\b(?:JPY|VND|VN\u0110|USD|EUR|yen|dong|\u0111\u1ed3ng)\b"
+    r"|(?<![^\W\d_])(?:JPY|VND|VN\u0110|USD|EUR|yen|dong|\u0111\u1ed3ng)"
+    r"(?![^\W\d_])"
     r"|[\u00a5\u20ab$\u5186]"
     r"|\u0111(?![^\W\d_]))"
 )
@@ -68,9 +75,10 @@ _ANY_NUMBER = re.compile(_NUMBER)
 # review of PR #2). Same adjacency as everywhere else: whitespace at most,
 # except that a bare "$" may sit between a leading "USD" and the number, as in
 # "USD $3.000".
-_USD_RIGHT_AFTER = re.compile(r"\s*(?:US\$|USD\b)", re.IGNORECASE)
+_USD_RIGHT_AFTER = re.compile(r"\s*(?:US\$|USD(?![^\W\d_]))",
+                              re.IGNORECASE)
 _USD_RIGHT_BEFORE = re.compile(
-    r"(?:(?<![^\W\d_])US\$|\bUSD(?:\s*\$)?)\s*$", re.IGNORECASE)
+    r"(?<![^\W\d_])(?:US\$|USD(?:\s*\$)?)\s*$", re.IGNORECASE)
 
 
 def _usd_marker_beside(text: str, start: int, end: int) -> bool:
