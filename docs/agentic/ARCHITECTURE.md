@@ -147,8 +147,13 @@ generated budget strings, turned up one genuine defect and one overstatement:
   else keeps the thousands reading: bare `3.000`, `$3.000`, JPY/VND/¥/円/đ, EUR (European
   formatting uses the dot for grouping), a comma (`3,000 USD`) and a repeated dot
   (`1.234.567 USD`). The cost is the other direction: `3.000 USD` written with Vietnamese
-  grouping now reads as `3.0`. Of the corpus entries that existed before, 39 moved, all of
-  the form `N.NNN USD`; the corpus now also covers `$`, `US$` and ` EUR`. Pinned by
+  grouping now reads as `3.0`. Two refinements came out of later Codex rounds on PR #2: the
+  decision looks at both sides of the chosen number, so `$3.000 USD` and `USD $3.000` read
+  as `3.0`; and alphabetic codes may touch a digit but not a letter, so glued forms
+  (`12.500USD`, `USD12.500`, `3000JPY`) are markers rather than falling back to the first
+  number. Against the 2,260-entry corpus as it stood at `0828e12`, 42 entries moved: 39 of
+  the form `N.NNN USD` and 3 of the form `USDN.NNN`, all from `N×1000` to `N`. The corpus
+  now also covers `$`, `US$` and ` EUR`, for 3,016 entries in total. Pinned by
   `TestKnownAmbiguousCases`.
 - **The docstring overstated the fix**, claiming the first number is used when no marker
   appears "anywhere". Adjacency is required, so `JPY quota is 10 max, paid 3000` yields
