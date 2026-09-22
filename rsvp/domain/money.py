@@ -61,12 +61,27 @@ _ANY_NUMBER = re.compile(_NUMBER)
 # the default thousands reading for bare "$". EUR is not here either:
 # European formatting uses the dot for grouping ("3.000 EUR" is three
 # thousand), so the default rule is already right for it.
-_DOT_DECIMAL_CURRENCY_RE = re.compile(r"(?:USD|US\$)", re.IGNORECASE)
+#
+# The decision looks at BOTH sides of the chosen number, not only at the
+# marker that selected it: in "$3.000 USD" the bare "$" is found first, but
+# the explicit "USD" beside the same number settles the currency (Codex
+# review of PR #2). Same adjacency as everywhere else: whitespace at most,
+# except that a bare "$" may sit between a leading "USD" and the number, as in
+# "USD $3.000".
+_USD_RIGHT_AFTER = re.compile(r"\s*(?:US\$|USD\b)", re.IGNORECASE)
+_USD_RIGHT_BEFORE = re.compile(
+    r"(?:(?<![^\W\d_])US\$|\bUSD(?:\s*\$)?)\s*$", re.IGNORECASE)
 
 
-def _amount_beside_a_currency_marker(text: str) -> tuple[str, str] | None:
-    """Return (number, marker) for the number adjacent to the first currency
-    marker, if any.
+def _usd_marker_beside(text: str, start: int, end: int) -> bool:
+    """True when an explicit USD marker sits beside text[start:end]."""
+    return bool(_USD_RIGHT_AFTER.match(text, end)
+                or _USD_RIGHT_BEFORE.search(text, 0, start))
+
+
+def _amount_beside_a_currency_marker(text: str) -> re.Match | None:
+    """Return the match of the number adjacent to the first currency marker,
+    if any. Its group(1) is the number; its span locates it in `text`.
 
     Markers are located first, then the text immediately beside each one is
     checked for a number. The earlier form was a single alternation that, for
@@ -79,10 +94,10 @@ def _amount_beside_a_currency_marker(text: str) -> tuple[str, str] | None:
     for marker in _CURRENCY_RE.finditer(text):
         after = _NUMBER_AT_START.match(text, marker.end())
         if after:
-            return after.group(1), marker.group(0)
+            return after
         before = _NUMBER_AT_END.search(text, 0, marker.start())
         if before:
-            return before.group(1), marker.group(0)
+            return before
     return None
 
 
@@ -177,10 +192,9 @@ def parse_amount_from_text(text) -> float:
 
     beside = _amount_beside_a_currency_marker(text)
     if beside is not None:
-        number, marker = beside
         return _to_float(
-            number,
-            dot_is_decimal=bool(_DOT_DECIMAL_CURRENCY_RE.fullmatch(marker)))
+            beside.group(1),
+            dot_is_decimal=_usd_marker_beside(text, *beside.span(1)))
 
     match = _ANY_NUMBER.search(text)
     return _to_float(match.group(0)) if match else 0.0

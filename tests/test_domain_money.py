@@ -138,6 +138,9 @@ class TestKnownAmbiguousCases:
          "a bare $ is not an unambiguous USD marker: a Chilean $3.000 is "
          "three thousand pesos (Codex review of PR #2)"),
         ("$3.000", 3000.0, "likewise; a Vietnamese organiser may mean 3000"),
+        ("$3.000 CLP", 3000.0, "no USD beside the number, so the default"),
+        ("USD budget: $3.000", 3000.0,
+         "USD is in the text but not beside the number"),
     ])
     def test_three_trailing_digits_reads_as_thousands(self, text, parsed, note):
         assert parse_amount_from_text(text) == parsed, note
@@ -146,6 +149,11 @@ class TestKnownAmbiguousCases:
         ("US$3.500 per head", 3500.0, 3.5),
         ("12.500 US$", 12500.0, 12.5),
         ("5 people x 12.500US$", 5.0, 12.5),
+        # A bare "$" selects the number first, but the explicit USD beside
+        # the same number decides (Codex review of PR #2).
+        ("$3.000 USD", 3000.0, 3.0),
+        ("¥ 3.000 USD", 3000.0, 3.0),
+        ("USD $3.000", 3000.0, 3.0),
         ("3.500 USD", 3500.0, 3.5),
         ("12.500 USD", 12500.0, 12.5),
         ("USD 12.500", 12500.0, 12.5),
