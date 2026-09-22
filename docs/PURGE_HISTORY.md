@@ -24,8 +24,9 @@ Mọi lệnh bên dưới chạy trong **PowerShell trên Windows**.
    sau.
 2. **Sao lưu hai file** ra ngoài thư mục repo, ví dụ `C:\Backup\rsvp\`. Bạn vẫn cần
    `rsvp_data.db` để chạy app.
-3. **Merge hoặc đóng PR #1 trước.** Nếu viết lại lịch sử khi PR còn mở, nhánh của PR cũng
-   phải viết lại. Làm một lần, sau khi các nhánh đã ổn định, thì đơn giản hơn.
+3. **Merge hoặc đóng PR #1, #2 và mọi PR khác đang mở trước.** Nếu viết lại lịch sử khi
+   PR còn mở, nhánh của PR cũng phải viết lại. Làm một lần, sau khi các nhánh đã ổn định,
+   thì đơn giản hơn.
 
 ## 1. Cài `git-filter-repo`
 
@@ -69,8 +70,8 @@ Tìm SHA mới:
 git log --all --oneline --grep "Harden the guards against the evasions"
 ```
 
-Nếu commit không có trong kết quả (vì PR #1 chưa merge), hãy tra bảng ánh xạ SHA cũ → mới
-mà filter-repo ghi lại:
+Nếu lệnh trên không ra kết quả (ví dụ commit message đã bị sửa), hãy tra bảng ánh xạ
+SHA cũ → mới mà filter-repo ghi lại:
 
 ```powershell
 Select-String -Path .\filter-repo\commit-map -Pattern '^368c279'
@@ -102,7 +103,11 @@ qua trang diff của PR. Chỉ GitHub Support mới xoá được phần này.
 - Liên hệ tại <https://support.github.com/contact>, chọn loại yêu cầu xoá dữ liệu nhạy cảm
   (*removing sensitive data*).
 - Cung cấp: tên repo, đường dẫn hai file, SHA các commit cũ đã thêm chúng (`48060db`,
-  `9a67145`), và số PR bị ảnh hưởng (#1).
+  `9a67145`), và số của **mọi** PR bị ảnh hưởng.
+- Mọi PR mở từ lịch sử cũ đều giữ các commit chứa hai file, dù PR đó đã merge hay đã đóng.
+  Hiện tại tối thiểu là **#1 và #2**. Trước khi gửi yêu cầu, hãy mở danh sách đầy đủ tại
+  `https://github.com/vohoailinh90/Outlook-RSVP-Tool_Event-follow-up-tool/pulls?q=is%3Apr`
+  và liệt kê tất cả các PR được tạo trước khi viết lại lịch sử.
 - Tham khảo: GitHub Docs, *Removing sensitive data from a repository*.
 
 ## 6. Sau khi xong
