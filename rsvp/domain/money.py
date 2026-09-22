@@ -29,8 +29,15 @@ _NUMBER = r"\d[\d.,]*\d|\d"
 # "đ" cannot take a leading \b, because "200000đ" has no boundary between the
 # digit and the letter. It instead requires that no letter FOLLOWS, so it
 # matches the suffix in "200000đ" but not the first letter of "đại hội".
+#
+# "US$" is listed before the bare symbols so that it is found as one marker:
+# otherwise only its "$" would match, and the USD decimal rule below could not
+# tell it apart from a "$" that means some other dollar or peso. It takes a
+# "no letter before" lookbehind rather than \b, so the glued suffix in
+# "3000US$" is found while "BUS$" is not.
 _CURRENCY = (
-    r"(?:\b(?:JPY|VND|VN\u0110|USD|EUR|yen|dong|\u0111\u1ed3ng)\b"
+    r"(?:(?<![^\W\d_])US\$"
+    r"|\b(?:JPY|VND|VN\u0110|USD|EUR|yen|dong|\u0111\u1ed3ng)\b"
     r"|[\u00a5\u20ab$\u5186]"
     r"|\u0111(?![^\W\d_]))"
 )
@@ -44,11 +51,17 @@ _ANY_NUMBER = re.compile(_NUMBER)
 
 
 # Markers of a currency written with a minor unit and an English-style decimal
-# point: "12.500 USD" / "$3.500" mean twelve and a half / three and a half
-# dollars, not thousands. EUR is deliberately NOT here: European formatting
-# uses the dot for grouping ("3.000 EUR" is three thousand), so the default
-# rule is already the right one for it.
-_DOT_DECIMAL_CURRENCY_RE = re.compile(r"(?:USD|\$)", re.IGNORECASE)
+# point: "12.500 USD" / "US$3.500" mean twelve and a half / three and a half
+# dollars, not thousands.
+#
+# Only unambiguous USD markers belong here. A bare "$" is NOT one: it is
+# shared by currencies that group with the dot (a Chilean "$3.000" is three
+# thousand pesos), and a Vietnamese organiser may well type "$3.000" for three
+# thousand dollars. Raised by Codex review of PR #2; the owner chose to keep
+# the default thousands reading for bare "$". EUR is not here either:
+# European formatting uses the dot for grouping ("3.000 EUR" is three
+# thousand), so the default rule is already right for it.
+_DOT_DECIMAL_CURRENCY_RE = re.compile(r"(?:USD|US\$)", re.IGNORECASE)
 
 
 def _amount_beside_a_currency_marker(text: str) -> tuple[str, str] | None:
@@ -83,7 +96,8 @@ def _to_float(token: str, dot_is_decimal: bool = False) -> float:
     exactly three digits, with no other separator present, is a thousands
     separator. "12.5" keeps its decimal point because 5 is not three digits.
 
-    `dot_is_decimal` is set when the amount is written beside a USD marker.
+    `dot_is_decimal` is set when the amount is written beside an explicit USD
+    marker ("USD" or "US$", not a bare "$").
     A single dot is then always a decimal point, so "12.500 USD" is 12.5.
     """
     token = token.strip()
@@ -104,10 +118,11 @@ def _to_float(token: str, dot_is_decimal: bool = False) -> float:
         # have no minor unit in practice - and for a bare "3.000", which a
         # Vietnamese organiser types for three thousand.
         #
-        # The one exception is a single dot beside a USD marker: "$3.500" and
-        # "12.500 USD" are dollars with a minor unit, so the dot is a decimal
-        # point. The repository owner chose this on PR #1 over both the
-        # locale-blind rule and rejecting the form. A comma stays grouping
+        # The one exception is a single dot beside an explicit USD marker:
+        # "US$3.500" and "12.500 USD" are dollars with a minor unit, so the
+        # dot is a decimal point. A bare "$" does not qualify. The repository
+        # owner chose this on PR #1 over both the locale-blind rule and
+        # rejecting the form. A comma stays grouping
         # for USD ("3,000 USD"), and a repeated dot ("1.234.567 USD") can
         # only be grouping, so neither is affected. Pinned by
         # TestKnownAmbiguousCases in tests/test_domain_money.py.

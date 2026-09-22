@@ -121,8 +121,9 @@ class TestKnownAmbiguousCases:
 
     Raised by review of 727a0fd: the thousands rule was locale-blind, so
     "12.500 USD" read as 12500. The repository owner decided on PR #1 that a
-    single dot beside a USD marker is a decimal point; every other form keeps
-    the thousands reading. If someone later decides otherwise, they change a
+    single dot beside an explicit USD marker ("USD", "US$") is a decimal
+    point, and on PR #2 that a bare "$" is not such a marker; every other
+    form keeps the thousands reading. If someone later decides otherwise, they change a
     test that says why, instead of discovering it from a wrong invoice.
     """
 
@@ -133,12 +134,18 @@ class TestKnownAmbiguousCases:
         ("1.234", 1234.0, "no currency at all; thousands is the likelier intent"),
         ("3,000 USD", 3000.0, "a comma is grouping in USD formatting"),
         ("1.234.567 USD", 1234567.0, "a repeated dot can only be grouping"),
+        ("$3.500 per head", 3500.0,
+         "a bare $ is not an unambiguous USD marker: a Chilean $3.000 is "
+         "three thousand pesos (Codex review of PR #2)"),
+        ("$3.000", 3000.0, "likewise; a Vietnamese organiser may mean 3000"),
     ])
     def test_three_trailing_digits_reads_as_thousands(self, text, parsed, note):
         assert parse_amount_from_text(text) == parsed, note
 
     @pytest.mark.parametrize("text,was,now", [
-        ("$3.500 per head", 3500.0, 3.5),
+        ("US$3.500 per head", 3500.0, 3.5),
+        ("12.500 US$", 12500.0, 12.5),
+        ("5 people x 12.500US$", 5.0, 12.5),
         ("3.500 USD", 3500.0, 3.5),
         ("12.500 USD", 12500.0, 12.5),
         ("USD 12.500", 12500.0, 12.5),

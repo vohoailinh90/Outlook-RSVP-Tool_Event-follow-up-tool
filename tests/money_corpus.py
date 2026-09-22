@@ -16,7 +16,11 @@ NUMBERS = ["3000", "3,000", "3.000", "3000.50", "3,000.50", "1.234.567",
            "1,234,567", "12.5", "12,5", "0", "0.500", "500", "250000",
            "2026", "3.5", "1.50", "10.000", "100.000"]
 
-CURRENCIES = ["", " JPY", " VND", "¥", "円", "đ", " USD", " yen", " dong"]
+# "$", "US$" and " EUR" were added with the USD decimal rule: it turns on
+# exactly these markers ("US$" in, bare "$" and EUR deliberately out), so the
+# corpus must exercise them.
+CURRENCIES = ["", " JPY", " VND", "¥", "円", "đ", " USD", " yen", " dong",
+              "$", "US$", " EUR"]
 
 CONTEXTS = [
     "{n}{c}",
