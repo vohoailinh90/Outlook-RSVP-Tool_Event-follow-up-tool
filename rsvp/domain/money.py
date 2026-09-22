@@ -43,8 +43,17 @@ _NUMBER_AT_END = re.compile(rf"({_NUMBER})\s*$")
 _ANY_NUMBER = re.compile(_NUMBER)
 
 
-def _amount_beside_a_currency_marker(text: str) -> str | None:
-    """Return the number adjacent to the first currency marker, if any.
+# Markers of a currency written with a minor unit and an English-style decimal
+# point: "12.500 USD" / "$3.500" mean twelve and a half / three and a half
+# dollars, not thousands. EUR is deliberately NOT here: European formatting
+# uses the dot for grouping ("3.000 EUR" is three thousand), so the default
+# rule is already the right one for it.
+_DOT_DECIMAL_CURRENCY_RE = re.compile(r"(?:USD|\$)", re.IGNORECASE)
+
+
+def _amount_beside_a_currency_marker(text: str) -> tuple[str, str] | None:
+    """Return (number, marker) for the number adjacent to the first currency
+    marker, if any.
 
     Markers are located first, then the text immediately beside each one is
     checked for a number. The earlier form was a single alternation that, for
@@ -57,14 +66,14 @@ def _amount_beside_a_currency_marker(text: str) -> str | None:
     for marker in _CURRENCY_RE.finditer(text):
         after = _NUMBER_AT_START.match(text, marker.end())
         if after:
-            return after.group(1)
+            return after.group(1), marker.group(0)
         before = _NUMBER_AT_END.search(text, 0, marker.start())
         if before:
-            return before.group(1)
+            return before.group(1), marker.group(0)
     return None
 
 
-def _to_float(token: str) -> float:
+def _to_float(token: str, dot_is_decimal: bool = False) -> float:
     """Resolve grouping separators, then convert.
 
     The hard case is a single separator: "3.000" is three thousand in
@@ -73,6 +82,9 @@ def _to_float(token: str) -> float:
     here is the one those formats actually follow: a separator followed by
     exactly three digits, with no other separator present, is a thousands
     separator. "12.5" keeps its decimal point because 5 is not three digits.
+
+    `dot_is_decimal` is set when the amount is written beside a USD marker.
+    A single dot is then always a decimal point, so "12.500 USD" is 12.5.
     """
     token = token.strip()
     has_comma, has_dot = "," in token, "." in token
@@ -86,15 +98,18 @@ def _to_float(token: str) -> float:
     elif has_comma or has_dot:
         sep = "," if has_comma else "."
         head, _, tail = token.rpartition(sep)
-        # LOCALE-BLIND ON PURPOSE. Three trailing digits after a single
-        # separator is read as thousands grouping whatever the currency, so
-        # "$3.500" becomes 3500.0 rather than three dollars fifty. That is
-        # correct for JPY and VND - the two currencies this tool is actually
-        # used for, both of which have no minor unit in practice - and wrong
-        # for a USD amount written with a trailing zero. Making the rule
-        # currency-dependent would need a currency to be present, and the
-        # commonest input of all ("3000") has none, so the ambiguity would
-        # just move somewhere less visible. The tradeoff is pinned by
+        # Three trailing digits after a single separator is read as
+        # thousands grouping by default. That is correct for JPY and VND -
+        # the two currencies this tool is actually used for, both of which
+        # have no minor unit in practice - and for a bare "3.000", which a
+        # Vietnamese organiser types for three thousand.
+        #
+        # The one exception is a single dot beside a USD marker: "$3.500" and
+        # "12.500 USD" are dollars with a minor unit, so the dot is a decimal
+        # point. The repository owner chose this on PR #1 over both the
+        # locale-blind rule and rejecting the form. A comma stays grouping
+        # for USD ("3,000 USD"), and a repeated dot ("1.234.567 USD") can
+        # only be grouping, so neither is affected. Pinned by
         # TestKnownAmbiguousCases in tests/test_domain_money.py.
         #
         # A leading zero before the separator means a decimal, never grouping:
@@ -103,6 +118,8 @@ def _to_float(token: str) -> float:
         # wrong by 1000x UPWARD, which is a worse failure than the
         # thousand-fold understatement this rule exists to fix.
         looks_grouped = len(tail) == 3 and head and head.lstrip("+-") != "0"
+        if dot_is_decimal and sep == "." and token.count(".") == 1:
+            looks_grouped = False
         if looks_grouped:
             # Thousands grouping: 3,000 / 3.000 / 1.234.567
             token = token.replace(sep, "")
@@ -145,7 +162,10 @@ def parse_amount_from_text(text) -> float:
 
     beside = _amount_beside_a_currency_marker(text)
     if beside is not None:
-        return _to_float(beside)
+        number, marker = beside
+        return _to_float(
+            number,
+            dot_is_decimal=bool(_DOT_DECIMAL_CURRENCY_RE.fullmatch(marker)))
 
     match = _ANY_NUMBER.search(text)
     return _to_float(match.group(0)) if match else 0.0

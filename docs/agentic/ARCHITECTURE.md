@@ -138,12 +138,15 @@ generated budget strings, turned up one genuine defect and one overstatement:
 - **`0.500` became `500.0`** — wrong by 1000x *upward*, a worse failure than the
   understatement the thousands rule exists to fix. A leading zero before the separator is a
   decimal signal; nobody writes `0.500` for five hundred. Fixed.
-- **The rule is locale-blind**, so `$3.500` reads as three thousand five hundred. That is
-  correct for JPY and VND, the two currencies this tool is used for, and wrong for a USD
-  amount written with a trailing zero. Making it currency-dependent would need a currency to
-  be present, and the commonest input of all (`3000`) has none — the ambiguity would just
-  move somewhere less visible. Kept, and pinned by `TestKnownAmbiguousCases` so it is a
-  decision on the record rather than an accident.
+- **The rule was locale-blind**, so `$3.500` read as three thousand five hundred — correct
+  for JPY and VND, wrong for a USD amount written to three decimal places. First kept as-is;
+  then the repository owner decided on the PR #1 review thread that **a single dot beside a
+  USD marker (`USD`, `$`) is a decimal point**, so `12.500 USD` is `12.5`. Everything else
+  keeps the thousands reading: bare `3.000`, JPY/VND/¥/円/đ, EUR (European formatting uses
+  the dot for grouping), a comma (`3,000 USD`) and a repeated dot (`1.234.567 USD`). The
+  cost is the other direction: `3.000 USD` written with Vietnamese grouping now reads as
+  `3.0`. That is 39 of the 2,260 corpus entries, all of the form `N.NNN USD`. Pinned by
+  `TestKnownAmbiguousCases`.
 - **The docstring overstated the fix**, claiming the first number is used when no marker
   appears "anywhere". Adjacency is required, so `JPY quota is 10 max, paid 3000` yields
   `10.0`. Corrected; widening adjacency is deliberately not done, since a marker in one

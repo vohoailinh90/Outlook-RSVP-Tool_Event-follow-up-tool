@@ -119,23 +119,36 @@ class TestKnownAmbiguousCases:
     """Inputs where no reading is objectively right, pinned so the choice is
     reviewable rather than accidental.
 
-    Raised by review of 727a0fd: the thousands rule is locale-blind, so a USD
-    amount written with a trailing zero reads as thousands. These assertions
-    exist to make that a decision on the record - if someone later decides the
-    other reading is correct, they change a test that says why, instead of
-    discovering the behaviour from a wrong invoice.
+    Raised by review of 727a0fd: the thousands rule was locale-blind, so
+    "12.500 USD" read as 12500. The repository owner decided on PR #1 that a
+    single dot beside a USD marker is a decimal point; every other form keeps
+    the thousands reading. If someone later decides otherwise, they change a
+    test that says why, instead of discovering it from a wrong invoice.
     """
 
     @pytest.mark.parametrize("text,parsed,note", [
-        ("$3.500 per head", 3500.0,
-         "right for JPY/VND, wrong if the author meant three dollars fifty"),
-        ("3.500 USD", 3500.0, "same ambiguity with an explicit ISO code"),
         ("3.500 JPY", 3500.0, "unambiguous: JPY has no minor unit in practice"),
         ("3.500 VND", 3500.0, "unambiguous: VND likewise"),
+        ("3.500 EUR", 3500.0, "European formatting: the dot is grouping"),
         ("1.234", 1234.0, "no currency at all; thousands is the likelier intent"),
+        ("3,000 USD", 3000.0, "a comma is grouping in USD formatting"),
+        ("1.234.567 USD", 1234567.0, "a repeated dot can only be grouping"),
     ])
     def test_three_trailing_digits_reads_as_thousands(self, text, parsed, note):
         assert parse_amount_from_text(text) == parsed, note
+
+    @pytest.mark.parametrize("text,was,now", [
+        ("$3.500 per head", 3500.0, 3.5),
+        ("3.500 USD", 3500.0, 3.5),
+        ("12.500 USD", 12500.0, 12.5),
+        ("USD 12.500", 12500.0, 12.5),
+        ("12.500 usd", 12500.0, 12.5),
+    ])
+    def test_a_single_dot_beside_usd_is_a_decimal(self, text, was, now):
+        """Changed after PR #1 review: these used to read as thousands, 1000x
+        too large for a dollar amount written to three decimal places."""
+        assert parse_amount_from_text(text) == now
+        assert was != now
 
     def test_two_trailing_digits_stays_a_decimal(self):
         """The standard way to write a minor unit is unaffected, which is why
