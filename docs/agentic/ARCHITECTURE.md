@@ -160,8 +160,8 @@ generated budget strings, turned up one genuine defect and one overstatement:
   `10.0`. Corrected; widening adjacency is deliberately not done, since a marker in one
   clause would then capture a number from another.
 
-The diff itself is now `tests/golden/money_snapshot.json`: 2,260 generated inputs and their
-parsed values. Any future change to amount parsing surfaces as a concrete list of figures
+The diff itself is now `tests/golden/money_snapshot.json`: 3,016 generated inputs and their
+parsed values (2,260 when first written at `0828e12`). Any future change to amount parsing surfaces as a concrete list of figures
 that would be shown differently, rather than as a surprise on someone's screen.
 
 Worth noting how the defect was found. The review agent was originally asked to do the
