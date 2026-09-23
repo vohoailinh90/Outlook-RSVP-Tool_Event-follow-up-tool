@@ -369,15 +369,31 @@ def main() -> int:
     reader = StagedBlobs()
     allowlist_rel = ALLOWLIST_FILE.relative_to(ROOT).as_posix()
     staged_allowlist = None
-    if allowlist_rel in staged:
-        data = reader.read(staged[allowlist_rel])
-        if data is None:
-            violations.append(
-                f"{allowlist_rel}: cannot read its staged copy, so no "
-                f"approval can be trusted.")
-            data = b""
-        staged_allowlist = data.decode("utf-8", errors="replace")
-    allowed, conflicts = load_allowlist(staged_allowlist)
+    # Neither copy is read whole if it is over the scan limit: an oversized
+    # policy file is rejected, with no approval trusted, rather than loaded
+    # (Codex review of PR #7).
+    oversized = [
+        label for label, size in (
+            ("working copy", ALLOWLIST_FILE.stat().st_size
+             if ALLOWLIST_FILE.is_file() else 0),
+            ("staged copy", sizes.get(staged.get(allowlist_rel, ""), 0)))
+        if size > SCAN_LIMIT]
+    if oversized:
+        violations.append(
+            f"{allowlist_rel}: its {' and '.join(oversized)} is over the "
+            f"{SCAN_LIMIT // 2**20} MiB scan limit, so no approval in it can "
+            f"be trusted.")
+        allowed, conflicts = {}, set()
+    else:
+        if allowlist_rel in staged:
+            data = reader.read(staged[allowlist_rel])
+            if data is None:
+                violations.append(
+                    f"{allowlist_rel}: cannot read its staged copy, so no "
+                    f"approval can be trusted.")
+                data = b""
+            staged_allowlist = data.decode("utf-8", errors="replace")
+        allowed, conflicts = load_allowlist(staged_allowlist)
     # With no working copy, "stage it" would stage the deletion and drop
     # every approval, so point at restoring it instead.
     remedy = (f"Stage {allowlist_rel}." if ALLOWLIST_FILE.exists() else

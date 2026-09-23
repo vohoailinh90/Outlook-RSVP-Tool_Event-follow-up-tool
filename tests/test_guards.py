@@ -605,6 +605,33 @@ class TestPiiGuard:
             "image the commit would carry without it.")
         assert "how_to_vote.png" in result.stderr
 
+    def test_an_oversized_allowlist_is_rejected_unread(
+            self, sandbox, monkeypatch, capsys):
+        """Codex review of PR #7: the staged allowlist was read whole before
+        any size check, so a huge one could exhaust memory. Over the scan
+        limit, it is rejected and trusts nothing."""
+        import importlib.util
+        allowlist = sandbox / ".pii-allowlist"
+        allowlist.write_text(allowlist.read_text(encoding="utf-8")
+                             + "#" * 4096 + "\n", encoding="utf-8")
+        subprocess.run(["git", "add", ".pii-allowlist"], cwd=sandbox, check=True)
+        spec = importlib.util.spec_from_file_location(
+            "check_no_pii_sandbox", sandbox / "scripts" / "check_no_pii.py")
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        monkeypatch.setattr(guard, "SCAN_LIMIT", 1024)
+        real_blob = guard.StagedBlobs.read
+
+        def blob(self, blob_id):
+            data = real_blob(self, blob_id)
+            assert data is None or len(data) <= 1024, "read an oversized blob"
+            return data
+        monkeypatch.setattr(guard.StagedBlobs, "read", blob)
+        assert guard.main() == 1
+        err = capsys.readouterr().err
+        assert ".pii-allowlist: its working copy and staged copy is over" in err
+        assert "how_to_vote.png" in err, "an oversized allowlist approved it"
+
     def test_passes_when_the_approval_is_staged_too(self, sandbox):
         image = sandbox / "how_to_vote.png"
         image.write_bytes(image.read_bytes() + b"\x00regenerated")
