@@ -144,6 +144,35 @@ class TestPiiGuard:
         )
         assert "roster.txt" in result.stderr
 
+    @pytest.mark.parametrize("domain", [
+        # Assembled so no real-looking address is written out in this file.
+        "company" + ".io", "company" + ".fr", "example" + ".company.com",
+        "test" + ".company.org",
+    ])
+    def test_fails_on_any_real_domain(self, sandbox, domain):
+        """Codex review of PR #1: only a few TLDs were matched, and any
+        domain merely starting with example. or test. was skipped."""
+        (sandbox / "roster.txt").write_text(
+            f"Example Person <a.person{'@'}{domain}>\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=sandbox, check=True)
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1, (
+            f"GUARD IS BLIND: an address at {domain} was committed and passed.")
+        assert "roster.txt" in result.stderr
+
+    def test_passes_on_reserved_documentation_domains(self, sandbox):
+        """RFC 2606 / 6761 names can never be a real person's, so the docs may
+        use them freely - including subdomains and any letter case."""
+        at = "@"
+        (sandbox / "notes.md").write_text(
+            f"alice{at}example.com, Bob{at}Example.ORG, c{at}mail.example.net, "
+            f"d{at}host.test, e{at}x.invalid, f{at}box.example\n",
+            encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=sandbox, check=True)
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 0, (
+            f"FALSE POSITIVE on a reserved example domain:\n{result.stderr}")
+
     def test_fails_on_an_unreviewed_binary_document(self, sandbox):
         """The leak the first version of this guard could not see.
 
@@ -275,6 +304,48 @@ class TestNameResolutionGuard:
             "GUARD IS BLIND: a moved module lost an import and still passed."
         )
         assert "datetime" in result.stderr
+
+    def test_a_local_import_does_not_cover_another_function(self, sandbox):
+        """Codex review of PR #1: imports anywhere in the file were counted as
+        module globals, so `import win32com.client` inside
+        scan_voting_responses() hid its loss from _outlook_app() - which then
+        raises NameError on every Outlook path."""
+        target = sandbox / "outlook_com.py"
+        text = target.read_text(encoding="utf-8")
+        mutated = text.replace(
+            "def _outlook_app():\n    import win32com.client\n",
+            "def _outlook_app():\n", 1)
+        assert mutated != text, "mutation did not apply - _outlook_app moved"
+        target.write_text(mutated, encoding="utf-8")
+
+        result = run_guard("check_names_resolve.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: _outlook_app() lost its import and passed, because "
+            "another function's local import was treated as a global."
+        )
+        assert "win32com" in result.stderr
+
+    def test_local_imports_and_nested_defs_resolve_in_their_own_scope(
+            self, sandbox):
+        """The fix must not over-correct: a function's own local import, a
+        nested def and a top-level try/except import are all real bindings."""
+        (sandbox / "rsvp" / "domain" / "_local_scope_probe.py").write_text(
+            "try:\n"
+            "    import json\n"
+            "except ImportError:\n"
+            "    json = None\n"
+            "def outer():\n"
+            "    import os\n"
+            "    from os import path as p\n"
+            "    def inner(n):\n"
+            "        return inner(n - 1) if n else os.sep + p.sep\n"
+            "    class Local:\n"
+            "        pass\n"
+            "    return inner(1), Local, json\n",
+            encoding="utf-8")
+        result = run_guard("check_names_resolve.py", sandbox)
+        assert result.returncode == 0, (
+            f"FALSE POSITIVE on function-local bindings:\n{result.stderr}")
 
     def test_does_not_false_positive_on_normal_scoping(self, sandbox):
         """Comprehensions, `except X as e`, `with ... as f`, lambda params and

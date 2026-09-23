@@ -66,10 +66,23 @@ class ScopeWalker(ast.NodeVisitor):
             self.visit(stmt)
         self.scopes.pop()
 
+    def _current_scope(self) -> set[str]:
+        return self.scopes[-1] if self.scopes else self.globals
+
     # --- visitors ------------------------------------------------------
+    def visit_Import(self, node):
+        self._current_scope().update(
+            (a.asname or a.name.split(".")[0]) for a in node.names)
+
+    def visit_ImportFrom(self, node):
+        self._current_scope().update((a.asname or a.name) for a in node.names)
+
     def visit_FunctionDef(self, node):
         for dec in node.decorator_list:
             self.visit(dec)
+        # A nested def binds its name in the ENCLOSING scope; bound before the
+        # body is walked so a recursive call resolves.
+        self._current_scope().add(node.name)
         self._enter_function(node)
 
     visit_AsyncFunctionDef = visit_FunctionDef
@@ -82,6 +95,7 @@ class ScopeWalker(ast.NodeVisitor):
             self.visit(dec)
         for base in node.bases:
             self.visit(base)
+        self._current_scope().add(node.name)
         self.scopes.append(set())
         for stmt in node.body:
             self.visit(stmt)
@@ -156,18 +170,39 @@ class ScopeWalker(ast.NodeVisitor):
             scope.add(node.id)
 
 
+def _top_level_statements(body):
+    """Module-level statements, descending into if/try/with/for blocks but
+    never into a def or class body - those are separate scopes."""
+    for node in body:
+        yield node
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for field in ("body", "orelse", "finalbody"):
+            yield from _top_level_statements(getattr(node, field, None) or [])
+        for handler in getattr(node, "handlers", None) or []:
+            yield from _top_level_statements(handler.body)
+
+
 def module_globals(tree: ast.Module) -> set[str]:
-    """Every name the module binds at its top level, plus what it imports."""
+    """Every name the module binds at its top level, plus what it imports.
+
+    Only MODULE-level imports and definitions count. An earlier form walked
+    the whole tree, so `import win32com.client` inside one function was
+    treated as a global for every other function: remove the local import
+    from _outlook_app() and the guard still passed, while _outlook_app()
+    raised NameError on every Outlook path (Codex review of PR #1). Imports
+    and definitions inside a function are bound in that function's scope by
+    ScopeWalker instead.
+    """
     names: set[str] = set()
-    for node in ast.walk(tree):
+    for node in _top_level_statements(tree.body):
         if isinstance(node, ast.Import):
             names.update((a.asname or a.name.split(".")[0]) for a in node.names)
         elif isinstance(node, ast.ImportFrom):
             names.update((a.asname or a.name) for a in node.names)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             names.add(node.name)
-    for node in tree.body:
-        if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+        elif isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
             target = node.targets if isinstance(node, ast.Assign) else [node.target]
             for t in target:
                 for n in ast.walk(t):
