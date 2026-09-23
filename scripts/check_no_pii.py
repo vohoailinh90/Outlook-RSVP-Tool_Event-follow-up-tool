@@ -146,62 +146,58 @@ def blob_id(path: Path) -> str:
         encoding="utf-8").stdout.strip()
 
 
-def index_blobs() -> dict[str, str]:
+def index_blobs() -> tuple[dict[str, str], set[str]]:
     """Path -> blob id of the copy STAGED in the index, which is what the next
-    commit will contain."""
+    commit will contain; and the set of submodule paths, which hold a commit
+    id rather than file contents."""
     out = subprocess.run(
         ["git", "-C", str(ROOT), "ls-files", "-s", "-z"],
         capture_output=True, check=True,
     ).stdout
     blobs: dict[str, str] = {}
+    gitlinks: set[str] = set()
     for entry in out.split(b"\0"):
         meta, _, name = entry.partition(b"\t")
-        mode, obj = meta.split()[:2] if name else (b"", b"")
-        # A submodule (gitlink) records a commit, not file contents.
-        if name and mode != b"160000":
-            blobs[name.decode()] = obj.decode()
-    return blobs
-
-
-def working_blobs(paths: list[str]) -> dict[str, str]:
-    """Path -> blob id of each working copy that exists, in one git call.
-
-    Compared against the index by id rather than asked of `git diff-files`,
-    which trusts the index flags: a path marked assume-unchanged or
-    skip-worktree is omitted, so an address staged behind a clean working copy
-    passed (Codex review of PR #5). hash-object reads the file itself. git's
-    clean filters apply, so a CRLF checkout on Windows hashes the same as the
-    committed file."""
-    present = [r for r in paths if (ROOT / r).is_file()]
-    if not present:
-        return {}
-    try:
-        out = subprocess.run(
-            ["git", "-C", str(ROOT), "hash-object", "--stdin-paths"],
-            input="\n".join(present).encode("utf-8") + b"\n",
-            capture_output=True, check=True,
-        ).stdout.decode("ascii").split()
-        return dict(zip(present, out))
-    except subprocess.CalledProcessError:
-        pass
-    # One unreadable file - on Windows, typically one another program holds
-    # open - fails the whole batch. Hash one at a time instead, so only that
-    # file goes unhashed: main() then reads its staged copy and reports its
-    # working copy as unreadable, by name (review of PR #5).
-    blobs: dict[str, str] = {}
-    for rel in present:
-        try:
-            blobs[rel] = blob_id(ROOT / rel)
-        except subprocess.CalledProcessError:
+        if not name:
             continue
-    return blobs
+        mode, obj = meta.split()[:2]
+        if mode == b"160000":
+            gitlinks.add(name.decode())
+        else:
+            blobs[name.decode()] = obj.decode()
+    return blobs, gitlinks
 
 
-def staged_bytes(blob: str) -> bytes:
-    return subprocess.run(
-        ["git", "-C", str(ROOT), "cat-file", "blob", blob],
+def staged_contents(ids: set[str]) -> dict[str, bytes]:
+    """Blob id -> the exact bytes the next commit will carry, read in one
+    `git cat-file --batch` call. An id git cannot read is left out.
+
+    Staged and working copies are compared by these raw bytes, never by blob
+    id. Each earlier shortcut let a staged address through (Codex review of
+    PR #5):
+      - `git diff-files` trusts assume-unchanged and skip-worktree, and omits
+        a path with either flag set.
+      - `git hash-object` runs clean filters, so equal ids only prove that
+        re-adding the working file reproduces the staged blob; a filter that
+        appends an address hashed a harmless file to the blob holding it.
+    The ids go in on stdin, so no path ever passes through a line-based
+    stream."""
+    out = subprocess.run(
+        ["git", "-C", str(ROOT), "cat-file", "--batch"],
+        input="".join(f"{i}\n" for i in sorted(ids)).encode("ascii"),
         capture_output=True, check=True,
     ).stdout
+    contents: dict[str, bytes] = {}
+    pos = 0
+    while pos < len(out):
+        end = out.index(b"\n", pos)
+        header = out[pos:end].split()
+        pos = end + 1
+        if len(header) == 3:                 # <id> <type> <size>
+            size = int(header[2])
+            contents[header[0].decode()] = out[pos:pos + size]
+            pos += size + 1                  # the contents, then a newline
+    return contents
 
 
 def approval_problem(rel: str, current: str | None,
@@ -266,10 +262,12 @@ def tracked_files() -> list[Path]:
 def main() -> int:
     try:
         files = tracked_files()
-        staged = index_blobs()
-        working = working_blobs(sorted(staged))
+        staged, gitlinks = index_blobs()
+        blobs = staged_contents(set(staged.values()))
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-        print(f"no-pii: cannot list tracked files: {exc}", file=sys.stderr)
+        detail = getattr(exc, "stderr", None) or b""
+        print(f"no-pii: cannot read the repository: {exc} "
+              f"{detail.decode(errors='replace').strip()}", file=sys.stderr)
         return 2
 
     allowed = load_allowlist()
@@ -279,6 +277,11 @@ def main() -> int:
 
     for path in files:
         rel = path.relative_to(ROOT).as_posix()
+        # A submodule holds a commit id, not contents, and once initialised it
+        # is a directory that cannot be read as a file. Its own repository is
+        # checked there (Codex review of PR #5).
+        if rel in gitlinks:
+            continue
         # Every copy the next commit could carry: the working copy, which
         # `git add -A` would stage, and the staged copy when it differs. Reading
         # only the working copy passed an address staged behind a clean file,
@@ -296,11 +299,12 @@ def main() -> int:
                 copies.append(("", path.read_bytes()))
             except OSError as exc:
                 unreadable.append(f"working copy ({exc})")
-        if rel in staged and working.get(rel) != staged[rel]:
-            try:
-                copies.append((" (staged copy)", staged_bytes(staged[rel])))
-            except (OSError, subprocess.CalledProcessError) as exc:
-                unreadable.append(f"staged copy ({exc})")
+        if rel in staged:
+            staged_copy = blobs.get(staged[rel])
+            if staged_copy is None:
+                unreadable.append(f"staged copy (blob {staged[rel]})")
+            elif not copies or staged_copy != copies[0][1]:
+                copies.append((" (staged copy)", staged_copy))
         if unreadable:
             violations.append(
                 f"{rel}: cannot read its {' or '.join(unreadable)}, so it "

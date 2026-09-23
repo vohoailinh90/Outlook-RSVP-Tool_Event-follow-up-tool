@@ -237,20 +237,75 @@ class TestPiiGuard:
             f"GUARD IS BLIND: an address staged behind {flag} passed.")
         assert "staged copy" in result.stderr
 
-    def test_one_unreadable_working_copy_does_not_stop_the_rest(
-            self, sandbox, monkeypatch):
-        """Review of PR #5: one file git could not open (on Windows, one that
-        another program holds) failed the batch hash of EVERY file, and the
-        whole guard stopped with no file named. Modelled as a file that
-        vanishes between the is_file() check and git reading it."""
+    def test_fails_on_an_address_a_clean_filter_adds(self, sandbox):
+        """Codex review of PR #5: equal FILTERED hashes only prove that
+        re-adding the working file reproduces the staged blob, not that the
+        bytes scanned are the bytes committed. A clean filter that appends an
+        address made a harmless working file hash to the staged blob holding
+        it, and the staged copy was skipped."""
+        filt = sandbox / "inject.py"
+        filt.write_text(
+            "import sys\n"
+            "sys.stdout.buffer.write(sys.stdin.buffer.read()"
+            " + b'a.person' + bytes([64]) + b'company.io\\n')\n",
+            encoding="utf-8")
+        exe = Path(sys.executable).as_posix()
+        subprocess.run(["git", "config", "filter.inject.clean",
+                        f'"{exe}" "{filt.as_posix()}"'], cwd=sandbox, check=True)
+        (sandbox / ".git" / "info" / "attributes").write_text(
+            "victim.txt filter=inject\n", encoding="utf-8")
+        (sandbox / "victim.txt").write_text("harmless\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=sandbox, check=True)
+        staged = subprocess.run(["git", "show", ":victim.txt"], cwd=sandbox,
+                                check=True, capture_output=True).stdout
+        assert b"company.io" in staged, "setup: the filter did not run"
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: an address added by a clean filter passed.")
+        assert "victim.txt (staged copy)" in result.stderr
+
+    def test_one_locked_file_is_named_and_the_rest_still_scanned(
+            self, sandbox, monkeypatch, capsys):
+        """On Windows a file another program holds cannot be read. That file
+        must be reported by name, and every other file still scanned."""
         import importlib.util
+        (sandbox / "roster.txt").write_text(
+            f"Example Person <a.person{'@'}company.io>\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=sandbox, check=True)
         spec = importlib.util.spec_from_file_location(
             "check_no_pii_sandbox", sandbox / "scripts" / "check_no_pii.py")
         guard = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(guard)
-        monkeypatch.setattr(guard.Path, "is_file", lambda self: True)
-        blobs = guard.working_blobs(["README.md", "locked.txt", "CLAUDE.md"])
-        assert set(blobs) == {"README.md", "CLAUDE.md"}, blobs
+        real_read = guard.Path.read_bytes
+
+        def locked(self):
+            if self.name == "README.md":
+                raise PermissionError(13, "used by another process")
+            return real_read(self)
+        monkeypatch.setattr(guard.Path, "read_bytes", locked)
+        assert guard.main() == 1
+        err = capsys.readouterr().err
+        assert "README.md: cannot read its working copy" in err, err
+        assert "a.person" in err, "the scan stopped at the locked file"
+
+    def test_passes_on_an_initialised_submodule(self, sandbox):
+        """Codex review of PR #5: a populated submodule is a directory, and
+        reading it as a file reported an unreadable copy on every run."""
+        sub = sandbox / "vendor" / "lib"
+        sub.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q"], cwd=sub, check=True)
+        (sub / "x.txt").write_text("x\n", encoding="utf-8")
+        subprocess.run(["git", "add", "x.txt"], cwd=sub, check=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@x.test",
+                        "commit", "-q", "-m", "x"], cwd=sub, check=True)
+        commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=sub,
+                                check=True, capture_output=True,
+                                text=True, encoding="utf-8").stdout.strip()
+        subprocess.run(["git", "update-index", "--add", "--cacheinfo",
+                        f"160000,{commit},vendor/lib"], cwd=sandbox, check=True)
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 0, (
+            f"FALSE POSITIVE on an initialised submodule:\n{result.stderr}")
 
     def test_passes_on_a_submodule_entry(self, sandbox):
         """A gitlink records a commit, not a file: there is no blob to read,
