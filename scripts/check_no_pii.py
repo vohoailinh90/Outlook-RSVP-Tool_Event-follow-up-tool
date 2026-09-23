@@ -143,15 +143,41 @@ def blob_id(path: Path) -> str:
         encoding="utf-8").stdout.strip()
 
 
-def approval_problem(rel: str, path: Path,
-                     allowed: dict[str, str | None]) -> str | None:
+def index_blobs() -> dict[str, str]:
+    """Path -> blob id of the copy STAGED in the index, which is what the next
+    commit will contain."""
+    out = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "-s", "-z"],
+        capture_output=True, check=True,
+    ).stdout
+    blobs: dict[str, str] = {}
+    for entry in out.split(b"\0"):
+        meta, _, name = entry.partition(b"\t")
+        if name:
+            blobs[name.decode()] = meta.split()[1].decode()
+    return blobs
+
+
+def approval_problem(rel: str, path: Path, allowed: dict[str, str | None],
+                     staged: str | None) -> str | None:
     """None when a human approved exactly these bytes, else what to do.
 
     An approval names the CONTENTS, not only the path. By path alone, an
     approved screenshot regenerated in place with real recipients in it still
-    passed (Codex review of PR #1)."""
+    passed (Codex review of PR #1).
+
+    Both copies must match: the working tree AND the index. Checking only the
+    working tree passed a changed image that was staged and then had its
+    working copy restored from HEAD - the commit would carry the unreviewed
+    blob (Codex review of PR #4)."""
     current = blob_id(path)
+    copies = f"working copy blob={current}"
+    if staged is not None and staged != current:
+        copies += f", staged blob={staged}"
     if rel not in allowed:
+        if staged is not None and staged != current:
+            return (f"Its working copy and staged copy differ ({copies}). "
+                    f"Stage the version you mean to commit, then review it.")
         return (f"Open it, confirm it holds no real names/addresses/amounts or "
                 f"corporate classification markings, then add "
                 f"`{rel}  blob={current}  # <who checked, what they saw>` to "
@@ -160,11 +186,10 @@ def approval_problem(rel: str, path: Path,
     if approved is None:
         return (f"It is in .pii-allowlist with no blob= digest, so the approval "
                 f"is not tied to the bytes a human saw. Open it again and put "
-                f"blob={current} on its line.")
-    if approved != current:
+                f"the blob= of the reviewed copy on its line ({copies}).")
+    if current != approved or (staged is not None and staged != approved):
         return (f"It CHANGED since it was approved (approved blob={approved}, "
-                f"now blob={current}). Open it again, then update blob= on "
-                f"its line.")
+                f"{copies}). Open it again, then update blob= on its line.")
     return None
 
 
@@ -187,6 +212,7 @@ def tracked_files() -> list[Path]:
 def main() -> int:
     try:
         files = tracked_files()
+        staged = index_blobs()
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         print(f"no-pii: cannot list tracked files: {exc}", file=sys.stderr)
         return 2
@@ -214,7 +240,7 @@ def main() -> int:
 
         if path.suffix.lower() in ROSTER_SUFFIXES:
             rel = path.relative_to(ROOT).as_posix()
-            problem = approval_problem(rel, path, allowed)
+            problem = approval_problem(rel, path, allowed, staged.get(rel))
             if problem:
                 violations.append(
                     f"{rel}: tracked {path.suffix} file. Rosters hold names, and a "
@@ -226,7 +252,7 @@ def main() -> int:
         if path.suffix.lower() in OPAQUE_SUFFIXES:
             opaque += 1
             rel = path.relative_to(ROOT).as_posix()
-            problem = approval_problem(rel, path, allowed)
+            problem = approval_problem(rel, path, allowed, staged.get(rel))
             if problem:
                 violations.append(
                     f"{rel}: tracked binary document that this check CANNOT read. "
@@ -242,7 +268,7 @@ def main() -> int:
         if blob is None:
             opaque += 1
             rel = path.relative_to(ROOT).as_posix()
-            problem = approval_problem(rel, path, allowed)
+            problem = approval_problem(rel, path, allowed, staged.get(rel))
             if problem:
                 violations.append(
                     f"{rel}: holds NUL bytes, so it is binary or UTF-16 without "

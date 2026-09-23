@@ -188,6 +188,22 @@ class TestPiiGuard:
         assert "how_to_vote.png" in result.stderr
         assert "CHANGED" in result.stderr
 
+    def test_fails_when_a_changed_binary_is_staged_behind_a_clean_copy(
+            self, sandbox):
+        """Codex review of PR #4: only the working tree was hashed, so a
+        changed image that was staged and then had its working copy put back
+        passed, while the next commit would carry the unreviewed blob."""
+        image = sandbox / "how_to_vote.png"
+        reviewed = image.read_bytes()
+        image.write_bytes(reviewed + b"\x00regenerated")
+        subprocess.run(["git", "add", "how_to_vote.png"], cwd=sandbox, check=True)
+        image.write_bytes(reviewed)     # working copy back to the reviewed bytes
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: an unreviewed image was staged behind a clean "
+            "working copy and passed.")
+        assert "staged blob=" in result.stderr
+
     def test_fails_on_an_allowlist_entry_without_a_digest(self, sandbox):
         allowlist = sandbox / ".pii-allowlist"
         text = allowlist.read_text(encoding="utf-8")
