@@ -183,6 +183,45 @@ class TestKnownAmbiguousCases:
         assert parse_amount_from_text("cost is 3000 (JPY)") == 3000.0
 
 
+class TestNumbersOnBothSidesOfAMarker:
+    """A marker between two numbers: the amount, then a headcount.
+
+    The number AFTER a marker always won, so the headcount was read as the
+    amount (Codex review of PR #1). Now a number written against the marker
+    with no space wins; failing that, the marker's conventional side does -
+    after "$", "US$" and "¥", before every code and suffix marker.
+    """
+
+    @pytest.mark.parametrize("text,was,now", [
+        ("3,000 JPY 5 people", 5.0, 3000.0),
+        ("3000円 5人", 5.0, 3000.0),
+        ("200.000đ 3 người", 3.0, 200000.0),
+        ("500 yen 2 people", 2.0, 500.0),
+        ("12.500 USD 3 people", 3.0, 12.5),
+        ("3000¥ 5", 5.0, 3000.0),
+    ])
+    def test_the_amount_beside_the_marker_wins_over_a_headcount(
+            self, text, was, now):
+        assert parse_amount_from_text(text) == now, f"was {was}"
+
+    @pytest.mark.parametrize("text,expected", [
+        ("¥3000 5 people", 3000.0),
+        ("$50 2 people", 50.0),
+        ("US$3.500 2 people", 3.5),
+        ("5 people JPY 3000", 3000.0),
+    ])
+    def test_a_prefix_marker_keeps_the_number_after_it(self, text, expected):
+        assert parse_amount_from_text(text) == expected
+
+    def test_a_year_directly_before_a_code_is_read_as_the_amount(self):
+        """Known ambiguous: with both numbers spaced and a code between them,
+        the code is taken as a suffix. "2026 USD 50" therefore reads 2026. A
+        year set against a code with no punctuation is rarer in a budget field
+        than an amount followed by a headcount."""
+        assert parse_amount_from_text("2026 USD 50") == 2026.0
+        assert parse_amount_from_text("2026 party, USD 50") == 50.0
+
+
 class TestCurrencyMarkersAreWholeTokens:
     """A marker must be a whole token, not a prefix of an ordinary word.
 

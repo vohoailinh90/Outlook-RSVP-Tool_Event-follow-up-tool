@@ -12,6 +12,7 @@ behind.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -173,6 +174,46 @@ class TestPiiGuard:
         assert result.returncode == 1, (
             "GUARD IS BLIND: an Outlook .msg file was committed and passed.")
         assert "invite.msg" in result.stderr
+
+    def test_fails_when_an_approved_binary_changes(self, sandbox):
+        """Codex review of PR #1: approvals named only a path, so the
+        allowlisted screenshot regenerated in place - with real recipients in
+        it - still passed. The approval now names the reviewed bytes."""
+        image = sandbox / "how_to_vote.png"
+        image.write_bytes(image.read_bytes() + b"\x00regenerated")
+        subprocess.run(["git", "add", "-A"], cwd=sandbox, check=True)
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: an allowlisted image was replaced and passed.")
+        assert "how_to_vote.png" in result.stderr
+        assert "CHANGED" in result.stderr
+
+    def test_fails_when_a_changed_binary_is_staged_behind_a_clean_copy(
+            self, sandbox):
+        """Codex review of PR #4: only the working tree was hashed, so a
+        changed image that was staged and then had its working copy put back
+        passed, while the next commit would carry the unreviewed blob."""
+        image = sandbox / "how_to_vote.png"
+        reviewed = image.read_bytes()
+        image.write_bytes(reviewed + b"\x00regenerated")
+        subprocess.run(["git", "add", "how_to_vote.png"], cwd=sandbox, check=True)
+        image.write_bytes(reviewed)     # working copy back to the reviewed bytes
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: an unreviewed image was staged behind a clean "
+            "working copy and passed.")
+        assert "staged blob=" in result.stderr
+
+    def test_fails_on_an_allowlist_entry_without_a_digest(self, sandbox):
+        allowlist = sandbox / ".pii-allowlist"
+        text = allowlist.read_text(encoding="utf-8")
+        unbound = re.sub(r"(how_to_vote\.png)\s+blob=\w+", r"\1", text)
+        assert unbound != text, "mutation did not apply - allowlist moved"
+        allowlist.write_text(unbound, encoding="utf-8")
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: an approval not tied to any contents passed.")
+        assert "no blob= digest" in result.stderr
 
     @pytest.mark.parametrize("domain", [
         # Assembled so no real-looking address is written out in this file.
@@ -572,6 +613,54 @@ class TestNameResolutionGuard:
         result = run_guard("check_names_resolve.py", sandbox)
         assert result.returncode == 0, (
             f"FALSE POSITIVE on ordinary Python scoping:\n{result.stderr}")
+
+
+class TestExportsAreGitignored:
+    """Every spreadsheet the app writes holds recipients or responses, and
+    `git add -A` in a checkout it ran from would stage it. .gitignore once
+    listed export names by hand and missed four of them (Codex review of
+    PR #1), so this reads the names out of the code instead."""
+
+    @staticmethod
+    def spreadsheet_names() -> set[str]:
+        import ast
+        names = set()
+        for path in [*ROOT.glob("*.py"), *ROOT.glob("rsvp/**/*.py")]:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.JoinedStr):
+                    # f"Participant_List_{event_id}.xlsx" -> Participant_List_X.xlsx
+                    text = "".join(v.value if isinstance(v, ast.Constant)
+                                   else "X" for v in node.values)
+                elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    text = node.value
+                else:
+                    continue
+                if (text.lower().endswith((".xlsx", ".xlsm", ".xls"))
+                        and "*" not in text and " " not in text):
+                    names.add(text)
+        return names
+
+    def test_the_scan_finds_the_known_exports(self):
+        names = self.spreadsheet_names()
+        for expected in ("Participant_List_X.xlsx", "X_Report.xlsx",
+                         "RSVP_History_export.xlsx"):
+            assert expected in names, f"scan drifted: {sorted(names)}"
+
+    def test_every_spreadsheet_the_app_names_is_ignored(self):
+        names = sorted(self.spreadsheet_names())
+        # NUL-separated and in binary mode: text mode on Windows writes "\n"
+        # to stdin as "\r\n", git then reads every path with a trailing "\r",
+        # and nothing matches - this test failed that way on windows-latest.
+        result = subprocess.run(
+            ["git", "-C", str(ROOT), "check-ignore", "--no-index", "--stdin",
+             "-z"],
+            input="\0".join(names).encode("utf-8"), capture_output=True)
+        ignored = set(result.stdout.decode("utf-8").split("\0"))
+        missing = [n for n in names if n not in ignored]
+        assert not missing, (
+            f"not gitignored, so `git add -A` would stage real recipients: "
+            f"{missing}")
 
 
 class TestRequiredAppImport:

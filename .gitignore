@@ -9,12 +9,16 @@ rsvp_data.db
 *.db-wal
 *.db-shm
 
-# Exported reports and rosters contain the same personal data.
-RSVP_History.xlsx
-Attendance_Payment_*.xlsx
-Gift_Contribution_*.xlsx
-Recipients_*.xlsx
-RSVP_Report_*.xlsx
+# Exported reports and rosters contain the same personal data. Every
+# spreadsheet this app reads or writes is one of them - Participant_List_*,
+# *_Report, RSVP_History_export, the recipient template - so all of them are
+# ignored, not a list of names. A list of names missed four of the files the
+# app actually writes (Codex review of PR #1). A spreadsheet that genuinely
+# belongs in git is added with `git add -f` and still has to pass
+# .pii-allowlist.
+*.xlsx
+*.xlsm
+*.xls
 
 # Local user overrides written by history.py
 fixed_wording_overrides.json

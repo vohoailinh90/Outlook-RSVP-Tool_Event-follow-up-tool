@@ -106,7 +106,8 @@ screenshots inside `RSVP_tool.pdf` that no text scan could see. Both are untrack
 - Never put real recipient data in a test fixture, a commit, an artifact or a finding.
   Build example data instead.
 - A tracked binary (PDF, image, spreadsheet) must be listed in `.pii-allowlist` by a human
-  who opened it. Do not add a line there to make the build green.
+  who opened it, with the `blob=` digest of the exact file they saw. Do not add a line
+  there to make the build green.
 - `rsvp_data.db` stays on disk and out of git. It is the user's live data: never delete it.
 
 ## Structure

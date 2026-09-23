@@ -6,5 +6,8 @@
 # file and saw no real names, addresses, amounts or corporate classification
 # markings. Do not add a line to make the build green.
 #
-# format:  <path>  # <who checked, what they saw>
-how_to_vote.png   # reviewed 2026-09-21: synthetic placeholders only ("Your Event Name", "[Confirm-EventID]"), no real recipients
+# format:  <path>  blob=<git hash-object of the file>  # <who checked, what they saw>
+#
+# The blob= digest ties the approval to the exact bytes that were reviewed:
+# if the file changes, the check fails until someone looks again.
+how_to_vote.png  blob=0a065618de82776e5f70dde4de6e3de14009b4ab  # reviewed 2026-09-21: synthetic placeholders only ("Your Event Name", "[Confirm-EventID]"), no real recipients
