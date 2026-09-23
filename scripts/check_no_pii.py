@@ -235,7 +235,8 @@ def tracked_files() -> list[Path]:
          "--exclude-standard"],
         capture_output=True, check=True,
     ).stdout
-    return [ROOT / n.decode() for n in out.split(b"\0") if n]
+    # A path in a merge conflict is listed once per index stage; check it once.
+    return [ROOT / n.decode() for n in dict.fromkeys(out.split(b"\0")) if n]
 
 
 def main() -> int:
@@ -259,14 +260,27 @@ def main() -> int:
         # only the working copy passed an address staged behind a clean file,
         # and skipped a staged file whose working copy was deleted (Codex
         # review of PR #1).
+        #
+        # A copy that cannot be read is a violation, not a skip: this guard
+        # fails closed. Sharing one try/except let a failed staged read
+        # discard a working copy already read, address and all (review of
+        # e42f925).
         copies: list[tuple[str, bytes]] = []
-        try:
-            if path.exists():
+        unreadable: list[str] = []
+        if path.exists():
+            try:
                 copies.append(("", path.read_bytes()))
-            if rel in staged and (rel in differs or not copies):
+            except OSError as exc:
+                unreadable.append(f"working copy ({exc})")
+        if rel in staged and (rel in differs or not copies):
+            try:
                 copies.append((" (staged copy)", staged_bytes(staged[rel])))
-        except (OSError, subprocess.CalledProcessError):
-            continue
+            except (OSError, subprocess.CalledProcessError) as exc:
+                unreadable.append(f"staged copy ({exc})")
+        if unreadable:
+            violations.append(
+                f"{rel}: cannot read its {' or '.join(unreadable)}, so it "
+                f"cannot be checked. Close whatever holds it and run again.")
         if not copies:
             continue
 

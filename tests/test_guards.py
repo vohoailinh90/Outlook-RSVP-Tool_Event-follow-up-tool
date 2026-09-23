@@ -232,6 +232,26 @@ class TestPiiGuard:
             "GUARD IS BLIND: a staged database with no working copy passed.")
         assert "notes.bin" in result.stderr
 
+    def test_fails_closed_when_the_staged_copy_cannot_be_read(self, sandbox):
+        """Review of e42f925: a failed staged read discarded the working copy
+        already read, so its address went unreported."""
+        roster = sandbox / "roster.txt"
+        roster.write_text("staged, then lost\n", encoding="utf-8")
+        subprocess.run(["git", "add", "roster.txt"], cwd=sandbox, check=True)
+        blob = subprocess.run(
+            ["git", "rev-parse", ":roster.txt"], cwd=sandbox, check=True,
+            capture_output=True, text=True, encoding="utf-8").stdout.strip()
+        obj = sandbox / ".git" / "objects" / blob[:2] / blob[2:]
+        os.chmod(obj, 0o644)            # git writes objects read-only
+        obj.unlink()
+        roster.write_text(
+            f"Example Person <a.person{'@'}company.io>\n", encoding="utf-8")
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1
+        assert "cannot read its staged copy" in result.stderr, result.stderr
+        assert "a.person" in result.stderr, (
+            "GUARD IS BLIND: the working copy was dropped with the staged one.")
+
     def test_reports_an_address_once_when_both_copies_hold_it(self, sandbox):
         (sandbox / "roster.txt").write_text(
             f"Example Person <a.person{'@'}company.io>\n", encoding="utf-8")
