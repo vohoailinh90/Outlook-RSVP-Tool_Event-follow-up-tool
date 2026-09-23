@@ -204,6 +204,347 @@ class TestPiiGuard:
             "working copy and passed.")
         assert "staged blob=" in result.stderr
 
+    def test_fails_on_an_address_staged_behind_a_clean_text_file(self, sandbox):
+        """Codex review of PR #1: only binary and roster files compared the
+        staged copy. A README.md with an address staged and then restored in
+        the working tree passed, and the next commit would publish it."""
+        readme = sandbox / "README.md"
+        clean = readme.read_bytes()
+        readme.write_bytes(clean + f"Contact a.person{'@'}company.io\n".encode())
+        subprocess.run(["git", "add", "README.md"], cwd=sandbox, check=True)
+        readme.write_bytes(clean)
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: an address was staged behind a clean working "
+            "copy and passed.")
+        assert "README.md" in result.stderr
+        assert "staged copy" in result.stderr
+
+    @pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+    def test_fails_on_an_address_staged_behind_an_index_flag(
+            self, sandbox, flag):
+        """Codex review of PR #5: `git diff-files` omits a path marked
+        assume-unchanged or skip-worktree, so its staged copy went unread."""
+        readme = sandbox / "README.md"
+        clean = readme.read_bytes()
+        readme.write_bytes(clean + f"Contact a.person{'@'}company.io\n".encode())
+        subprocess.run(["git", "add", "README.md"], cwd=sandbox, check=True)
+        subprocess.run(["git", "update-index", flag, "README.md"],
+                       cwd=sandbox, check=True)
+        readme.write_bytes(clean)
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1, (
+            f"GUARD IS BLIND: an address staged behind {flag} passed.")
+        assert "staged copy" in result.stderr
+
+    def test_fails_on_an_address_a_clean_filter_adds(self, sandbox):
+        """Codex review of PR #5: equal FILTERED hashes only prove that
+        re-adding the working file reproduces the staged blob, not that the
+        bytes scanned are the bytes committed. A clean filter that appends an
+        address made a harmless working file hash to the staged blob holding
+        it, and the staged copy was skipped."""
+        filt = sandbox / "inject.py"
+        filt.write_text(
+            "import sys\n"
+            "sys.stdout.buffer.write(sys.stdin.buffer.read()"
+            " + b'a.person' + bytes([64]) + b'company.io\\n')\n",
+            encoding="utf-8")
+        exe = Path(sys.executable).as_posix()
+        subprocess.run(["git", "config", "filter.inject.clean",
+                        f'"{exe}" "{filt.as_posix()}"'], cwd=sandbox, check=True)
+        (sandbox / ".git" / "info" / "attributes").write_text(
+            "victim.txt filter=inject\n", encoding="utf-8")
+        (sandbox / "victim.txt").write_text("harmless\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=sandbox, check=True)
+        staged = subprocess.run(["git", "show", ":victim.txt"], cwd=sandbox,
+                                check=True, capture_output=True).stdout
+        assert b"company.io" in staged, "setup: the filter did not run"
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: an address added by a clean filter passed.")
+        assert "victim.txt (staged copy)" in result.stderr
+
+    def test_one_locked_file_is_named_and_the_rest_still_scanned(
+            self, sandbox, monkeypatch, capsys):
+        """On Windows a file another program holds cannot be read. That file
+        must be reported by name, and every other file still scanned."""
+        import importlib.util
+        (sandbox / "roster.txt").write_text(
+            f"Example Person <a.person{'@'}company.io>\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=sandbox, check=True)
+        spec = importlib.util.spec_from_file_location(
+            "check_no_pii_sandbox", sandbox / "scripts" / "check_no_pii.py")
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        real_read = guard.Path.read_bytes
+
+        def locked(self):
+            if self.name == "README.md":
+                raise PermissionError(13, "used by another process")
+            return real_read(self)
+        monkeypatch.setattr(guard.Path, "read_bytes", locked)
+        assert guard.main() == 1
+        err = capsys.readouterr().err
+        assert "README.md: cannot read its working copy" in err, err
+        assert "a.person" in err, "the scan stopped at the locked file"
+
+    def test_fails_on_a_file_that_replaced_a_submodule(self, sandbox):
+        """Codex review of PR #5: every gitlink path was skipped, including
+        one whose working copy is now a regular file - which `git add -A`
+        stages as a file, address and all."""
+        subprocess.run(["git", "update-index", "--add", "--cacheinfo",
+                        f"160000,{'1' * 40},vendor/lib"], cwd=sandbox, check=True)
+        (sandbox / "vendor").mkdir()
+        (sandbox / "vendor" / "lib").write_text(
+            f"a.person{'@'}company.io\n", encoding="utf-8")
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: a file that replaced a submodule passed.")
+        assert "vendor/lib" in result.stderr
+
+    def test_reads_staged_blobs_past_replacement_refs(self, sandbox):
+        """Codex review of PR #5: `cat-file` honours refs/replace, so a local
+        replacement made a staged address read as harmless bytes, while a
+        clone without the replacement gets the address."""
+        def blob(text: str) -> str:
+            return subprocess.run(
+                ["git", "hash-object", "-w", "--stdin"], cwd=sandbox,
+                check=True, capture_output=True,
+                input=text.encode()).stdout.decode().strip()
+        leak = blob(f"a.person{'@'}company.io\n")
+        decoy = blob("harmless\n")
+        subprocess.run(["git", "replace", leak, decoy], cwd=sandbox, check=True)
+        subprocess.run(["git", "update-index", "--add", "--cacheinfo",
+                        f"100644,{leak},notes.txt"], cwd=sandbox, check=True)
+        (sandbox / "notes.txt").write_text("harmless\n", encoding="utf-8")
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: a replacement ref hid a staged address.")
+        assert "notes.txt (staged copy)" in result.stderr
+
+    @pytest.mark.parametrize("fails", ["read", "hash"])
+    def test_a_locked_binary_does_not_stop_the_guard(
+            self, sandbox, monkeypatch, capsys, fails):
+        """Codex review of PR #5: a binary the guard could not read was then
+        hashed for its approval, git could not open it either, and the
+        uncaught error stopped the guard before the other files were scanned."""
+        import importlib.util
+        (sandbox / "roster.txt").write_text(
+            f"Example Person <a.person{'@'}company.io>\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=sandbox, check=True)
+        spec = importlib.util.spec_from_file_location(
+            "check_no_pii_sandbox", sandbox / "scripts" / "check_no_pii.py")
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        real_read, real_hash = guard.Path.read_bytes, guard.blob_id
+
+        def locked_read(self):
+            if self.name == "how_to_vote.png" and fails == "read":
+                raise PermissionError(13, "used by another process")
+            return real_read(self)
+
+        def locked_hash(path):
+            if path.name == "how_to_vote.png":
+                raise subprocess.CalledProcessError(128, ["git", "hash-object"])
+            return real_hash(path)
+        real_open = guard.Path.open
+
+        def locked_open(self, *args, **kwargs):
+            if self.name == "how_to_vote.png" and fails == "read":
+                raise PermissionError(13, "used by another process")
+            return real_open(self, *args, **kwargs)
+        monkeypatch.setattr(guard.Path, "read_bytes", locked_read)
+        monkeypatch.setattr(guard.Path, "open", locked_open)
+        monkeypatch.setattr(guard, "blob_id", locked_hash)
+        assert guard.main() == 1
+        err = capsys.readouterr().err
+        expected = {"read": "cannot read its working copy",
+                    "hash": "cannot hash its working copy"}[fails]
+        assert f"how_to_vote.png: {expected}" in err, err
+        assert "a.person" in err, "the guard stopped at the locked binary"
+
+    def test_large_and_opaque_files_are_never_loaded_whole(
+            self, sandbox, monkeypatch, capsys):
+        """Codex review of PR #5: every staged blob and working copy was
+        loaded whole, so a mailbox-sized .pst could exhaust memory before the
+        guard said it needs approval. Opaque formats and files over the scan
+        limit are now judged by blob id, reading only their first bytes."""
+        import importlib.util
+        (sandbox / "archive.pst").write_bytes(b"!BDN" + b"\0" * 4096)
+        (sandbox / "huge.log").write_bytes(b"x" * 4096)
+        subprocess.run(["git", "add", "-A"], cwd=sandbox, check=True)
+        spec = importlib.util.spec_from_file_location(
+            "check_no_pii_sandbox", sandbox / "scripts" / "check_no_pii.py")
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        monkeypatch.setattr(guard, "SCAN_LIMIT", 1024)
+        big = {"archive.pst", "huge.log"}
+        real_read, real_blob = guard.Path.read_bytes, guard.StagedBlobs.read
+
+        def read(self):
+            assert self.name not in big, f"{self.name} was read whole"
+            return real_read(self)
+
+        def blob(self, blob_id):
+            data = real_blob(self, blob_id)
+            assert data is None or len(data) <= 1024, (
+                "a blob over the scan limit was loaded whole")
+            return data
+        real_open = guard.Path.open
+
+        def bounded_open(self, *args, **kwargs):
+            f = real_open(self, *args, **kwargs)
+            if self.name not in big:
+                return f
+            real_read_n = f.read
+
+            def read_n(n=-1):
+                assert 0 <= n <= 1024, f"{self.name} was read whole"
+                return real_read_n(n)
+            f.read = read_n
+            return f
+        monkeypatch.setattr(guard.Path, "read_bytes", read)
+        monkeypatch.setattr(guard.Path, "open", bounded_open)
+        monkeypatch.setattr(guard.StagedBlobs, "read", blob)
+        assert guard.main() == 1
+        err = capsys.readouterr().err
+        assert "archive.pst: tracked binary document" in err, err
+        assert "huge.log: is over the" in err, err
+
+    def test_staged_blobs_are_read_one_at_a_time(
+            self, sandbox, monkeypatch, capsys):
+        """Codex review of PR #5: the scan limit was per blob, but every
+        blob under it was read up front in one call, so many blobs just
+        under the limit needed their total size in memory at once. Each
+        blob is now read only when its file is scanned."""
+        import importlib.util
+        for i in range(3):
+            (sandbox / f"part{i}.txt").write_text(f"part {i}\n",
+                                                   encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=sandbox, check=True)
+        for i in range(3):              # staged copies now differ from disk
+            (sandbox / f"part{i}.txt").write_text("changed\n",
+                                                   encoding="utf-8")
+        spec = importlib.util.spec_from_file_location(
+            "check_no_pii_sandbox", sandbox / "scripts" / "check_no_pii.py")
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        events: list[str] = []
+        real_blob, real_read = guard.StagedBlobs.read, guard.Path.read_bytes
+
+        def blob(self, blob_id):
+            events.append("blob")
+            return real_blob(self, blob_id)
+
+        def read(self):
+            if self.name.startswith("part"):
+                events.append(self.name)
+            return real_read(self)
+        monkeypatch.setattr(guard.StagedBlobs, "read", blob)
+        monkeypatch.setattr(guard.Path, "read_bytes", read)
+        guard.main()
+        capsys.readouterr()
+        parts = [i for i, e in enumerate(events) if e.startswith("part")]
+        assert parts and all(events[i + 1] == "blob" for i in parts), (
+            f"staged blobs were not read file by file: {events}")
+
+    def test_names_a_database_staged_under_an_opaque_name(self, sandbox):
+        """Review of ca9b106: opaque files are judged by their first bytes,
+        and only the working copy's were read, so a database staged under a
+        .pst behind a clean working copy was reported as an unapproved
+        binary rather than as the database it is."""
+        pst = sandbox / "archive.pst"
+        pst.write_bytes(b"SQLite format 3\x00" + b"\x00" * 64)
+        subprocess.run(["git", "add", "archive.pst"], cwd=sandbox, check=True)
+        pst.write_bytes(b"!BDN" + b"\x00" * 64)
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1
+        assert "archive.pst (staged copy): SQLite database" in result.stderr, (
+            result.stderr)
+
+    def test_an_unreadable_staged_binary_is_not_offered_for_approval(
+            self, sandbox):
+        """Review of ca9b106: a staged blob git could not read was reported,
+        and then a human was told to approve that same unreadable blob."""
+        subprocess.run(["git", "update-index", "--add", "--info-only",
+                        "--cacheinfo", f"100644,{'2' * 40},archive.pst"],
+                       cwd=sandbox, check=True)
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1
+        assert "archive.pst: cannot read its staged copy" in result.stderr
+        assert f"blob={'2' * 40}  #" not in result.stderr, result.stderr
+
+    def test_passes_on_an_initialised_submodule(self, sandbox):
+        """Codex review of PR #5: a populated submodule is a directory, and
+        reading it as a file reported an unreadable copy on every run."""
+        sub = sandbox / "vendor" / "lib"
+        sub.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q"], cwd=sub, check=True)
+        (sub / "x.txt").write_text("x\n", encoding="utf-8")
+        subprocess.run(["git", "add", "x.txt"], cwd=sub, check=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@x.test",
+                        "commit", "-q", "-m", "x"], cwd=sub, check=True)
+        commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=sub,
+                                check=True, capture_output=True,
+                                text=True, encoding="utf-8").stdout.strip()
+        subprocess.run(["git", "update-index", "--add", "--cacheinfo",
+                        f"160000,{commit},vendor/lib"], cwd=sandbox, check=True)
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 0, (
+            f"FALSE POSITIVE on an initialised submodule:\n{result.stderr}")
+
+    def test_passes_on_a_submodule_entry(self, sandbox):
+        """A gitlink records a commit, not a file: there is no blob to read,
+        and it must not be reported as an unreadable copy."""
+        commit = "1" * 40
+        subprocess.run(["git", "update-index", "--add", "--cacheinfo",
+                        f"160000,{commit},vendor/lib"], cwd=sandbox, check=True)
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 0, (
+            f"FALSE POSITIVE on a submodule entry:\n{result.stderr}")
+
+    def test_fails_on_a_staged_file_whose_working_copy_is_gone(self, sandbox):
+        """A staged file with no working copy was skipped entirely, so a
+        database staged and then deleted from disk passed."""
+        db = sandbox / "notes.bin"
+        db.write_bytes(b"SQLite format 3\x00" + b"\x00" * 64)
+        subprocess.run(["git", "add", "notes.bin"], cwd=sandbox, check=True)
+        db.unlink()
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: a staged database with no working copy passed.")
+        assert "notes.bin" in result.stderr
+
+    def test_fails_closed_when_the_staged_copy_cannot_be_read(self, sandbox):
+        """Review of e42f925: a failed staged read discarded the working copy
+        already read, so its address went unreported."""
+        roster = sandbox / "roster.txt"
+        roster.write_text("staged, then lost\n", encoding="utf-8")
+        subprocess.run(["git", "add", "roster.txt"], cwd=sandbox, check=True)
+        blob = subprocess.run(
+            ["git", "rev-parse", ":roster.txt"], cwd=sandbox, check=True,
+            capture_output=True, text=True, encoding="utf-8").stdout.strip()
+        obj = sandbox / ".git" / "objects" / blob[:2] / blob[2:]
+        os.chmod(obj, 0o644)            # git writes objects read-only
+        obj.unlink()
+        roster.write_text(
+            f"Example Person <a.person{'@'}company.io>\n", encoding="utf-8")
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1
+        assert "cannot read its staged copy" in result.stderr, result.stderr
+        assert "a.person" in result.stderr, (
+            "GUARD IS BLIND: the working copy was dropped with the staged one.")
+
+    def test_reports_an_address_once_when_both_copies_hold_it(self, sandbox):
+        (sandbox / "roster.txt").write_text(
+            f"Example Person <a.person{'@'}company.io>\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=sandbox, check=True)
+        with (sandbox / "roster.txt").open("a", encoding="utf-8") as f:
+            f.write("unstaged edit\n")
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1
+        assert result.stderr.count("a.person") == 1, result.stderr
+
     def test_fails_on_an_allowlist_entry_without_a_digest(self, sandbox):
         allowlist = sandbox / ".pii-allowlist"
         text = allowlist.read_text(encoding="utf-8")
