@@ -633,11 +633,14 @@ class TestExportsAreGitignored:
 
     def test_every_spreadsheet_the_app_names_is_ignored(self):
         names = sorted(self.spreadsheet_names())
+        # NUL-separated and in binary mode: text mode on Windows writes "\n"
+        # to stdin as "\r\n", git then reads every path with a trailing "\r",
+        # and nothing matches - this test failed that way on windows-latest.
         result = subprocess.run(
-            ["git", "-C", str(ROOT), "check-ignore", "--no-index", "--stdin"],
-            input="\n".join(names), capture_output=True, text=True,
-            encoding="utf-8")
-        ignored = set(result.stdout.split("\n"))
+            ["git", "-C", str(ROOT), "check-ignore", "--no-index", "--stdin",
+             "-z"],
+            input="\0".join(names).encode("utf-8"), capture_output=True)
+        ignored = set(result.stdout.decode("utf-8").split("\0"))
         missing = [n for n in names if n not in ignored]
         assert not missing, (
             f"not gitignored, so `git add -A` would stage real recipients: "
