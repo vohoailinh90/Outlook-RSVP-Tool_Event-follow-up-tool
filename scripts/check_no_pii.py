@@ -116,15 +116,56 @@ def scannable_text(blob: bytes) -> bytes | None:
     return None if b"\0" in blob else blob
 
 
-def load_allowlist() -> set[str]:
+def load_allowlist() -> dict[str, str | None]:
+    """Path -> the git blob id a human approved, or None when the line
+    carries no `blob=`."""
     if not ALLOWLIST_FILE.exists():
-        return set()
-    entries = set()
+        return {}
+    entries: dict[str, str | None] = {}
     for raw in ALLOWLIST_FILE.read_text(encoding="utf-8").splitlines():
         line = raw.split("#", 1)[0].strip()
-        if line:
-            entries.add(line)
+        if not line:
+            continue
+        path, _, last = line.rpartition(" ")
+        if last.startswith("blob=") and path.strip():
+            entries[path.strip()] = last[len("blob="):]
+        else:
+            entries[line] = None
     return entries
+
+
+def blob_id(path: Path) -> str:
+    """The id git gives these contents. git's own clean filters apply, so a
+    CRLF checkout on Windows hashes the same as the committed file."""
+    return subprocess.run(
+        ["git", "-C", str(ROOT), "hash-object", "--", str(path)],
+        capture_output=True, check=True, text=True,
+        encoding="utf-8").stdout.strip()
+
+
+def approval_problem(rel: str, path: Path,
+                     allowed: dict[str, str | None]) -> str | None:
+    """None when a human approved exactly these bytes, else what to do.
+
+    An approval names the CONTENTS, not only the path. By path alone, an
+    approved screenshot regenerated in place with real recipients in it still
+    passed (Codex review of PR #1)."""
+    current = blob_id(path)
+    if rel not in allowed:
+        return (f"Open it, confirm it holds no real names/addresses/amounts or "
+                f"corporate classification markings, then add "
+                f"`{rel}  blob={current}  # <who checked, what they saw>` to "
+                f".pii-allowlist - or untrack it.")
+    approved = allowed[rel]
+    if approved is None:
+        return (f"It is in .pii-allowlist with no blob= digest, so the approval "
+                f"is not tied to the bytes a human saw. Open it again and put "
+                f"blob={current} on its line.")
+    if approved != current:
+        return (f"It CHANGED since it was approved (approved blob={approved}, "
+                f"now blob={current}). Open it again, then update blob= on "
+                f"its line.")
+    return None
 
 
 def tracked_files() -> list[Path]:
@@ -173,25 +214,24 @@ def main() -> int:
 
         if path.suffix.lower() in ROSTER_SUFFIXES:
             rel = path.relative_to(ROOT).as_posix()
-            if rel not in allowed:
+            problem = approval_problem(rel, path, allowed)
+            if problem:
                 violations.append(
                     f"{rel}: tracked {path.suffix} file. Rosters hold names, and a "
                     f"name is personal data even with no address next to it - which "
-                    f"no pattern here can detect. Confirm it holds no real people "
-                    f"and add it to .pii-allowlist, or untrack it."
+                    f"no pattern here can detect. {problem}"
                 )
                 continue
 
         if path.suffix.lower() in OPAQUE_SUFFIXES:
             opaque += 1
             rel = path.relative_to(ROOT).as_posix()
-            if rel not in allowed:
+            problem = approval_problem(rel, path, allowed)
+            if problem:
                 violations.append(
                     f"{rel}: tracked binary document that this check CANNOT read. "
                     f"Personal data in a screenshot is invisible to a text scan. "
-                    f"Open it, confirm it holds no real names/addresses/amounts or "
-                    f"corporate classification markings, then add it to "
-                    f".pii-allowlist with a note - or untrack it."
+                    f"{problem}"
                 )
             continue
 
@@ -202,13 +242,12 @@ def main() -> int:
         if blob is None:
             opaque += 1
             rel = path.relative_to(ROOT).as_posix()
-            if rel not in allowed:
+            problem = approval_problem(rel, path, allowed)
+            if problem:
                 violations.append(
                     f"{rel}: holds NUL bytes, so it is binary or UTF-16 without "
-                    f"a byte-order mark, and this check CANNOT read it. Open it, "
-                    f"confirm it holds no real names/addresses/amounts, then add "
-                    f"it to .pii-allowlist with a note - or untrack it, or "
-                    f"re-save it as UTF-8."
+                    f"a byte-order mark, and this check CANNOT read it (re-saving "
+                    f"it as UTF-8 also works). {problem}"
                 )
             continue
         scanned += 1

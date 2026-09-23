@@ -107,12 +107,33 @@ def _amount_beside_a_currency_marker(text: str) -> re.Match | None:
     """
     for marker in _CURRENCY_RE.finditer(text):
         after = _NUMBER_AT_START.match(text, marker.end())
-        if after:
-            return after
         before = _number_just_before(text, marker.start())
-        if before:
-            return before
+        if after and before:
+            return _nearer_side(marker, before, after)
+        if after or before:
+            return after or before
     return None
+
+
+# Symbols conventionally written BEFORE the amount: "$50", "US$50", "¥3000".
+# Every other marker - the ISO codes, 円, đ, yen, dong - is conventionally
+# written after it: "3,000 JPY", "3000円", "200.000đ".
+_PREFIX_MARKERS = {"$", "US$", "\u00a5"}
+
+
+def _nearer_side(marker: re.Match, before: re.Match, after: re.Match) -> re.Match:
+    """Choose between numbers on both sides of one marker.
+
+    Always taking the number after it read a headcount as the amount:
+    "3,000 JPY 5 people" -> 5, "3000円 5人" -> 5, "200.000đ 3 người" -> 3
+    (Codex review of PR #1). A number written against the marker with no
+    space belongs to it; failing that, the marker's conventional side wins.
+    """
+    glued_before = before.end(1) == marker.start()
+    glued_after = after.start(1) == marker.end()
+    if glued_before != glued_after:
+        return before if glued_before else after
+    return after if marker.group(0).upper() in _PREFIX_MARKERS else before
 
 
 def _number_just_before(text: str, end: int) -> re.Match | None:
