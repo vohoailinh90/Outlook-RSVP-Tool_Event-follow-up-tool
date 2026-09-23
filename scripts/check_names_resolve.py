@@ -42,6 +42,12 @@ class _Scope:
     - A nested def or lambda runs LATER, when it is called, so it sees
       everything its enclosing function binds (`every`). A closure defined
       above a later `import os` is valid (Codex review of PR #3).
+
+    Known limit: WHEN a closure is called is not tracked. One called before
+    the enclosing binding runs (`if flag: return inner()` above `import os`)
+    raises NameError, and this guard passes it. Deciding that needs
+    control-flow analysis; recorded in CLAUDE.md under "What these guards
+    cannot see".
     """
 
     def __init__(self, kind: str, every: set[str] | None = None) -> None:

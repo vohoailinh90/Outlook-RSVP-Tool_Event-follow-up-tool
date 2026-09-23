@@ -88,6 +88,11 @@ are what remains after that.
   to the AST check.
 - **A wrong translation.** The matrix check proves a language is *present*, never that it
   is correct.
+- **When a closure is called.** `check_names_resolve.py` lets a nested function read any
+  name its enclosing function binds, anywhere, because a closure resolves it at call time.
+  If the closure is called *before* that binding runs (`if flag: return inner()` above
+  `import os`), Python raises `NameError` and the guard does not see it. Telling the two
+  apart needs control-flow analysis, which is beyond this check.
 
 ## Personal data
 
