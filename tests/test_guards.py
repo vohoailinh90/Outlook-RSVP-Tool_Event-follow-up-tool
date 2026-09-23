@@ -379,17 +379,17 @@ class TestPiiGuard:
         spec.loader.exec_module(guard)
         monkeypatch.setattr(guard, "SCAN_LIMIT", 1024)
         big = {"archive.pst", "huge.log"}
-        real_read, real_contents = guard.Path.read_bytes, guard.staged_contents
+        real_read, real_blob = guard.Path.read_bytes, guard.StagedBlobs.read
 
         def read(self):
             assert self.name not in big, f"{self.name} was read whole"
             return real_read(self)
 
-        def contents(ids):
-            out = real_contents(ids)
-            assert all(len(b) <= 1024 for b in out.values()), (
+        def blob(self, blob_id):
+            data = real_blob(self, blob_id)
+            assert data is None or len(data) <= 1024, (
                 "a blob over the scan limit was loaded whole")
-            return out
+            return data
         real_open = guard.Path.open
 
         def bounded_open(self, *args, **kwargs):
@@ -405,11 +405,48 @@ class TestPiiGuard:
             return f
         monkeypatch.setattr(guard.Path, "read_bytes", read)
         monkeypatch.setattr(guard.Path, "open", bounded_open)
-        monkeypatch.setattr(guard, "staged_contents", contents)
+        monkeypatch.setattr(guard.StagedBlobs, "read", blob)
         assert guard.main() == 1
         err = capsys.readouterr().err
         assert "archive.pst: tracked binary document" in err, err
         assert "huge.log: is over the" in err, err
+
+    def test_staged_blobs_are_read_one_at_a_time(
+            self, sandbox, monkeypatch, capsys):
+        """Codex review of PR #5: the scan limit was per blob, but every
+        blob under it was read up front in one call, so many blobs just
+        under the limit needed their total size in memory at once. Each
+        blob is now read only when its file is scanned."""
+        import importlib.util
+        for i in range(3):
+            (sandbox / f"part{i}.txt").write_text(f"part {i}\n",
+                                                   encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=sandbox, check=True)
+        for i in range(3):              # staged copies now differ from disk
+            (sandbox / f"part{i}.txt").write_text("changed\n",
+                                                   encoding="utf-8")
+        spec = importlib.util.spec_from_file_location(
+            "check_no_pii_sandbox", sandbox / "scripts" / "check_no_pii.py")
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        events: list[str] = []
+        real_blob, real_read = guard.StagedBlobs.read, guard.Path.read_bytes
+
+        def blob(self, blob_id):
+            events.append("blob")
+            return real_blob(self, blob_id)
+
+        def read(self):
+            if self.name.startswith("part"):
+                events.append(self.name)
+            return real_read(self)
+        monkeypatch.setattr(guard.StagedBlobs, "read", blob)
+        monkeypatch.setattr(guard.Path, "read_bytes", read)
+        guard.main()
+        capsys.readouterr()
+        parts = [i for i, e in enumerate(events) if e.startswith("part")]
+        assert parts and all(events[i + 1] == "blob" for i in parts), (
+            f"staged blobs were not read file by file: {events}")
 
     def test_names_a_database_staged_under_an_opaque_name(self, sandbox):
         """Review of ca9b106: opaque files are judged by their first bytes,

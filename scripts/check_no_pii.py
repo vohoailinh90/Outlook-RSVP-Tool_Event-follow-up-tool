@@ -211,9 +211,12 @@ def staged_head(blob: str, n: int) -> bytes | None:
     return head
 
 
-def staged_contents(ids: set[str]) -> dict[str, bytes]:
-    """Blob id -> the exact bytes the next commit will carry, read in one
-    `git cat-file --batch` call. An id git cannot read is left out.
+class StagedBlobs:
+    """Reads staged blobs one at a time, on demand, through one long-lived
+    `git cat-file --batch` process. At most one blob is held in memory: all
+    blobs read up front in a single call needed their total size, which
+    for many blobs just under SCAN_LIMIT ran to gigabytes (Codex review of
+    PR #5).
 
     Staged and working copies are compared by these raw bytes, never by blob
     id. Each earlier shortcut let a staged address through (Codex review of
@@ -230,22 +233,37 @@ def staged_contents(ids: set[str]) -> dict[str, bytes]:
     ref and returns its bytes under the ORIGINAL id, so a harmless
     replacement hid a staged address that a clone would receive (Codex
     review of PR #5)."""
-    out = subprocess.run(
-        ["git", "-C", str(ROOT), "--no-replace-objects", "cat-file", "--batch"],
-        input="".join(f"{i}\n" for i in sorted(ids)).encode("ascii"),
-        capture_output=True, check=True,
-    ).stdout
-    contents: dict[str, bytes] = {}
-    pos = 0
-    while pos < len(out):
-        end = out.index(b"\n", pos)
-        header = out[pos:end].split()
-        pos = end + 1
-        if len(header) == 3:                 # <id> <type> <size>
-            size = int(header[2])
-            contents[header[0].decode()] = out[pos:pos + size]
-            pos += size + 1                  # the contents, then a newline
-    return contents
+
+    def __init__(self) -> None:
+        self.proc: subprocess.Popen | None = None
+
+    def read(self, blob: str) -> bytes | None:
+        """The exact bytes the next commit will carry for this blob, or None
+        when git cannot read it."""
+        try:
+            if self.proc is None:
+                self.proc = subprocess.Popen(
+                    ["git", "-C", str(ROOT), "--no-replace-objects",
+                     "cat-file", "--batch"],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL)
+            self.proc.stdin.write(f"{blob}\n".encode("ascii"))
+            self.proc.stdin.flush()
+            header = self.proc.stdout.readline().split()
+            if len(header) != 3:             # "<id> missing", or git died
+                return None
+            size = int(header[2])            # <id> <type> <size>
+            data = self.proc.stdout.read(size)
+            self.proc.stdout.read(1)         # the newline after the contents
+            return data if len(data) == size else None
+        except (OSError, ValueError):
+            return None
+
+    def close(self) -> None:
+        if self.proc is not None:
+            self.proc.stdin.close()
+            self.proc.stdout.close()
+            self.proc.wait()
 
 
 def approval_problem(rel: str, current: str | None,
@@ -312,12 +330,6 @@ def main() -> int:
         files = tracked_files()
         staged, gitlinks = index_blobs()
         sizes = staged_sizes(set(staged.values()))
-        # Only what will be scanned is loaded: never an opaque format, never
-        # anything over the scan limit.
-        blobs = staged_contents(
-            {staged[r] for r in staged
-             if sizes.get(staged[r], SCAN_LIMIT + 1) <= SCAN_LIMIT
-             and Path(r).suffix.lower() not in OPAQUE_SUFFIXES})
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         detail = getattr(exc, "stderr", None) or b""
         print(f"no-pii: cannot read the repository: {exc} "
@@ -329,6 +341,7 @@ def main() -> int:
     scanned = 0
     opaque = 0
 
+    reader = StagedBlobs()
     for path in files:
         rel = path.relative_to(ROOT).as_posix()
         # A submodule holds a commit id, not contents, and once initialised it
@@ -433,7 +446,9 @@ def main() -> int:
             except OSError as exc:
                 unreadable.append(f"working copy ({exc})")
         if rel in staged and staged_size is not None:
-            staged_copy = blobs.get(staged[rel])
+            # Only reached for a blob under the scan limit and not opaque
+            # by name; read now, when this file is scanned.
+            staged_copy = reader.read(staged[rel])
             if staged_copy is None:
                 unreadable.append(f"staged copy (blob {staged[rel]})")
             elif not copies or staged_copy != copies[0][1]:
@@ -511,6 +526,8 @@ def main() -> int:
                         f"{rel}{label}:{line}: {kind} email address "
                         f"{found.decode(errors='replace')!r} in a tracked file"
                     )
+
+    reader.close()
 
     # Printed first: returning on the drift check swallowed every violation
     # already found (review of ca9b106).
