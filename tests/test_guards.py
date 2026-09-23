@@ -390,6 +390,58 @@ class TestNameResolutionGuard:
             f"FALSE POSITIVE on match captures or a comprehension walrus:\n"
             f"{result.stderr}")
 
+    def test_fails_when_a_nested_def_or_class_reads_its_own_unbound_name(
+            self, sandbox):
+        """Codex review of PR #3: a nested class name is bound only after its
+        body runs, and a nested def's name only after its defaults run, so
+        `class Inner: value = Inner` is a NameError and
+        `def inner(value=inner)` an UnboundLocalError. Both passed."""
+        (sandbox / "rsvp" / "domain" / "_early_bind_probe.py").write_text(
+            "def outer_class():\n"
+            "    class Inner:\n"
+            "        value = Inner\n"
+            "    return Inner\n"
+            "def outer_def():\n"
+            "    def inner(value=inner):\n"
+            "        return value\n"
+            "    return inner\n",
+            encoding="utf-8")
+        result = run_guard("check_names_resolve.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: a nested class or def read its own name before "
+            "Python binds it.")
+        assert "'Inner'" in result.stderr
+        assert "'inner'" in result.stderr
+
+    def test_module_match_and_walrus_bindings_resolve_from_earlier_functions(
+            self, sandbox):
+        """Codex review of PR #3: module globals were collected only from
+        assignments, so a function defined ABOVE a module-level `match`
+        capture or comprehension walrus could not read it, although it runs
+        fine once called. Methods reading their own nested class, and
+        recursive nested defs, must stay clean after the binding-order fix."""
+        (sandbox / "rsvp" / "domain" / "_module_binding_probe.py").write_text(
+            "def read_capture():\n"
+            "    return captured\n"
+            "def read_walrus():\n"
+            "    return leaked\n"
+            "def outer():\n"
+            "    class Inner:\n"
+            "        def m(self):\n"
+            "            return Inner\n"
+            "    def again(n):\n"
+            "        return again(n - 1) if n else Inner().m()\n"
+            "    return again(2)\n"
+            "match 1:\n"
+            "    case captured:\n"
+            "        pass\n"
+            "_ = [leaked := x for x in (1, 2)]\n",
+            encoding="utf-8")
+        result = run_guard("check_names_resolve.py", sandbox)
+        assert result.returncode == 0, (
+            f"FALSE POSITIVE on module-level match or walrus bindings:\n"
+            f"{result.stderr}")
+
     def test_local_imports_and_nested_defs_resolve_in_their_own_scope(
             self, sandbox):
         """The fix must not over-correct: a function's own local import, a

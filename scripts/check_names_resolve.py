@@ -89,6 +89,12 @@ class ScopeWalker(ast.NodeVisitor):
             if isinstance(n, ast.Name):
                 scope.add(n.id)
 
+    def _visit_defaults(self, node) -> None:
+        # defaults evaluate in the ENCLOSING scope, before the name is bound
+        args = node.args
+        for d in (*args.defaults, *[d for d in args.kw_defaults if d]):
+            self.visit(d)
+
     def _enter_function(self, node) -> None:
         params: set[str] = set()
         args = node.args
@@ -98,9 +104,6 @@ class ScopeWalker(ast.NodeVisitor):
             params.add(args.vararg.arg)
         if args.kwarg:
             params.add(args.kwarg.arg)
-        # defaults evaluate in the ENCLOSING scope
-        for d in (*args.defaults, *[d for d in args.kw_defaults if d]):
-            self.visit(d)
         # A Lambda's body is a single expression; a def's is a list.
         body = node.body if isinstance(node.body, list) else [node.body]
         # Every name the function binds anywhere, for closures nested in it.
@@ -131,14 +134,18 @@ class ScopeWalker(ast.NodeVisitor):
     def visit_FunctionDef(self, node):
         for dec in node.decorator_list:
             self.visit(dec)
-        # A nested def binds its name in the ENCLOSING scope; bound before the
-        # body is walked so a recursive call resolves.
+        self._visit_defaults(node)
+        # A nested def binds its name in the ENCLOSING scope once decorators
+        # and defaults have run, so `def inner(value=inner)` is flagged (Codex
+        # review of PR #3); bound before the body is walked so a recursive
+        # call resolves.
         self._current_scope().add(node.name)
         self._enter_function(node)
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
     def visit_Lambda(self, node):
+        self._visit_defaults(node)
         self._enter_function(node)
 
     def visit_ClassDef(self, node):
@@ -146,11 +153,14 @@ class ScopeWalker(ast.NodeVisitor):
             self.visit(dec)
         for base in node.bases:
             self.visit(base)
-        self._current_scope().add(node.name)
         self.scopes.append(_Scope("class"))
         for stmt in node.body:
             self.visit(stmt)
         self.scopes.pop()
+        # The class name is bound only once its body has run, so a body that
+        # reads it, `class Inner: value = Inner`, is a NameError (Codex review
+        # of PR #3). Its methods still see it: they run later.
+        self._current_scope().add(node.name)
 
     def _comprehension(self, node):
         comp = _Scope("comprehension")
@@ -327,6 +337,11 @@ def module_globals(tree: ast.Module) -> set[str]:
                 for n in ast.walk(t):
                     if isinstance(n, ast.Name):
                         names.add(n.id)
+    # Every other module-level binding form - match captures, a walrus in a
+    # comprehension, for/with/except targets - so a function defined above
+    # one can still read it (Codex review of PR #3).
+    for node in tree.body:
+        _collect_bindings(node, names, set())
     return names
 
 
