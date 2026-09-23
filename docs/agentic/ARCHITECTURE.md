@@ -121,11 +121,33 @@ U4 is fixed too: `_on_amount_paid_changed` swallowed every exception, so a locke
 unwritable database lost the figure while the UI still showed it as entered. It now warns —
 once per run, because it fires on every keystroke.
 
-**Phase 3 — `ports/` + the adapter seam.** Define `OutlookPort`, make `outlook_com.py`
-implement it, and give the tests a fake. This is what finally makes code above the seam
-testable without Outlook. Judge it by whether a test can exercise a send path against the
-fake — a directory rename that leaves everything still calling `outlook_com` directly has
-bought nothing.
+**Phase 3 — `ports/` + the adapter seam (done).** `rsvp/ports/outlook.py` defines
+`OutlookPort`, a Protocol with the nine operations the app uses, each signature copied from
+`outlook_com.py`. `RSVPApp` takes an `outlook` argument and calls `self.outlook.*`
+everywhere; its default is the `outlook_com` module itself, which satisfies the Protocol
+as it stands. `outlook_com.py` is unchanged: COM code cannot run in CI, so the seam was
+cut without touching it.
+
+Two choices came out of the `architecture-critic` review of the first design:
+
+- **No adapter class.** A `ComOutlook` class delegating 1:1 to `outlook_com` would have
+  been a third copy of every signature, kept in sync only by a test. A module already
+  satisfies a Protocol structurally, so the module is the adapter.
+- **The invite path first, not the reminder path.** The reminder path hard-codes
+  `auto_send=False`, so testing it would check a constant. `_send_invite` is the one path
+  whose auto-send comes from a checkbox and can call `Send()`, which cannot be undone. Its
+  send and History write now live in `rsvp/services/invite.py`, and
+  `tests/test_outlook_port.py` checks against `tests/fake_outlook.py` that Outlook gets
+  exactly the auto-send the user chose.
+
+Guards: `check_layering.py` forbids `outlook_com` in `ports/` and `services/`, and fails
+any `outlook_com.<attr>` use in `rsvp_app.py`, since a direct call never reaches a test's
+fake. A test compares the signatures of the Protocol, `outlook_com.py` and the fake, parsed
+rather than imported so it runs without pywin32. COM threading is unchanged: `outlook_com`
+calls `CoInitialize` inside each function, on the calling thread.
+
+Left for Phase 4: the other send paths (reminders, gift reminder and report, calendar
+invite, thank-you) call `self.outlook` but their orchestration is still in the UI class.
 
 **Phase 4 — split `ui/`.** Seven tabs, seven modules, out of the 4,673-line class. Largest
 and last, because it is worth least until the layers beneath it are real.

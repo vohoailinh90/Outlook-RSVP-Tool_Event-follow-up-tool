@@ -117,6 +117,30 @@ class TestLayeringGuard:
             "the layer boundary. Every future violation could do the same."
         )
 
+    def test_fails_when_the_app_bypasses_the_outlook_port(self, sandbox):
+        """Phase 3: a call straight to outlook_com never reaches a test's
+        fake, so the seam would test nothing on that path."""
+        app = sandbox / "rsvp_app.py"
+        text = app.read_text(encoding="utf-8")
+        mutated = text.replace("self.outlook.send_reminder_email(",
+                               "outlook_com.send_reminder_email(", 1)
+        assert mutated != text, "mutation did not apply - the call site moved"
+        app.write_text(mutated, encoding="utf-8")
+        result = run_guard("check_layering.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: rsvp_app.py called outlook_com directly and the "
+            "seam guard passed.")
+        assert "bypassing the OutlookPort" in result.stderr
+
+    def test_fails_when_a_service_imports_outlook_com(self, sandbox):
+        svc = sandbox / "rsvp" / "services" / "invite.py"
+        svc.write_text("import outlook_com\n" + svc.read_text(encoding="utf-8"),
+                       encoding="utf-8")
+        result = run_guard("check_layering.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: a service imported the COM adapter directly.")
+        assert "outlook_com" in result.stderr
+
 
 class TestPiiGuard:
     def test_passes_on_clean_tree(self, sandbox):

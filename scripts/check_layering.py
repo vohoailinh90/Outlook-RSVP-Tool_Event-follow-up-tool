@@ -33,6 +33,9 @@ HEAVY = {
     "pythoncom": "Windows + Outlook",
     "pywintypes": "Windows + Outlook",
     "openpyxl": "the openpyxl dependency",
+    # Not a third-party package, but the same kind of dependency: the COM
+    # adapter. Code above the seam takes an OutlookPort (rsvp/ports/) instead.
+    "outlook_com": "Windows + Outlook (take an OutlookPort instead)",
 }
 
 # Function-local imports of a heavy dependency are NOT automatically fine.
@@ -63,7 +66,26 @@ LAYERS: list[tuple[str, set[str]]] = [
     ("rsvp/i18n/**/*.py", set(HEAVY)),
     ("rsvp/storage/**/*.py", set(HEAVY)),
     ("rsvp/ports/**/*.py", set(HEAVY)),
+    ("rsvp/services/**/*.py", set(HEAVY)),
 ]
+
+# The application above the Outlook seam may name outlook_com only to wire it
+# in as the default OutlookPort. Any `outlook_com.<attr>` access is a call
+# that bypasses the port, so a test's fake would never see it (phase 3).
+SEAM_CLIENTS = ["rsvp_app.py"]
+SEAM_MODULE = "outlook_com"
+
+
+def seam_bypasses(path: Path) -> list[int]:
+    """Line numbers where `outlook_com.<attr>` is used in code."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (SyntaxError, OSError):
+        return []
+    return sorted(
+        node.lineno for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name) and node.value.id == SEAM_MODULE)
 
 
 def imported_roots(path: Path) -> tuple[set[str], set[str]]:
@@ -172,6 +194,17 @@ def main() -> int:
                     )
                 else:
                     notes.append(f"{rel}: {func}() lazy {lazy!r} allowed - {reason}")
+
+    for name in SEAM_CLIENTS:
+        path = ROOT / name
+        if not path.is_file():
+            violations.append(f"{name}: listed in SEAM_CLIENTS but missing")
+            continue
+        checked += 1
+        for line in seam_bypasses(path):
+            violations.append(
+                f"{name}:{line}: calls {SEAM_MODULE} directly, bypassing the "
+                f"OutlookPort. Use self.outlook, so a test's fake sees the call.")
 
     if not checked:
         print("layering: FAIL - matched no files; LAYERS has drifted from the tree",

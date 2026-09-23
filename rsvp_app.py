@@ -53,6 +53,8 @@ import history
 import db
 import outlook_com
 from rsvp.export import legacy_excel
+from rsvp.ports import OutlookPort
+from rsvp.services.invite import InviteRequest, send_invite
 
 APP_TITLE = "Outlook RSVP Tool"
 
@@ -313,8 +315,13 @@ def make_scrollable_text(parent, **text_kwargs):
 
 # ══════════════════════════════════════════════════════════════════════════
 class RSVPApp(tk.Tk):
-    def __init__(self):
+    def __init__(self, outlook: OutlookPort | None = None):
         super().__init__()
+        # Every Outlook operation goes through self.outlook. The real one is
+        # the outlook_com module, which satisfies OutlookPort as it stands;
+        # tests pass a fake. This is the only place rsvp_app.py names
+        # outlook_com - scripts/check_layering.py fails any other use.
+        self.outlook: OutlookPort = outlook if outlook is not None else outlook_com
         self.title(APP_TITLE)
         self.geometry("1020x720")
 
@@ -1408,7 +1415,7 @@ class RSVPApp(tk.Tk):
         """Với mỗi dòng trong danh sách hiện tại, kiểm tra xem đó có phải 1
         group email (Exchange Distribution List) không — nếu phải, thay dòng
         đó bằng TẤT CẢ thành viên thật của group (kể cả sub-group lồng bên
-        trong, xem outlook_com.expand_group_members()). Dòng nào KHÔNG phải
+        trong, xem self.outlook.expand_group_members()). Dòng nào KHÔNG phải
         group thì giữ nguyên. Chạy trong background thread vì có thể mất vài
         giây/group khi query Exchange GAL."""
         if not self.recipients:
@@ -1424,7 +1431,7 @@ class RSVPApp(tk.Tk):
             errors = []
             for name, email in original:
                 try:
-                    members = outlook_com.expand_group_members(email)
+                    members = self.outlook.expand_group_members(email)
                 except Exception as e:
                     members = None
                     errors.append(f"{email}: {e}")
@@ -2237,95 +2244,61 @@ class RSVPApp(tk.Tk):
         send_to_override = self.var_send_to_override.get().strip() or None
         is_update = self._is_update_mode()
         is_gift = self._is_gift_mode()
+        # Everything the send needs is read from the widgets here, on the Tk
+        # thread, before the worker starts. The History record used to be
+        # built inside the worker, which read Tk variables off the main
+        # thread.
+        request = InviteRequest(
+            recipients=list(self.recipients),
+            subject=subject,
+            body=body,
+            voting_options=voting_options,
+            auto_send=auto_send,
+            send_to_override=send_to_override,
+            mode="gift" if is_gift else ("update" if is_update else "invite"),
+            record={
+                "EventID": self.var_event_id.get(),
+                "EventName": self.var_event_name.get(),
+                "EventDate": get_date_str(self.date_event),
+                "Deadline": get_date_str(self.date_deadline),
+                "Location": self.var_location.get(),
+                "Budget": self.var_budget.get(),
+                "EmailLanguage": self.combo_email_lang.get(),
+                "OrganizerNote": self._source_note_text(),
+                "RecipientFile": self.recipient_file.get(),
+                "TotalInvited": len(self.recipients),
+                "EventMode": self.var_event_mode.get(),
+                "Organizer": self.var_organizer.get(),
+                "GuestOfHonor": self.var_guest_of_honor.get(),
+                "GiftBudget": self.var_gift_budget.get(),
+                "GiftDeadline": get_date_str(self.date_gift_deadline),
+                "StartTime": self.var_start_time.get(),
+                "EndTime": self.var_end_time.get(),
+            },
+        )
+        history_path = self.history_path.get()
 
         def worker():
             try:
-                outlook_com.send_voting_invite(
-                    self.recipients, subject, body,
-                    voting_options=voting_options, auto_send=auto_send,
-                    send_to_override=send_to_override,
-                    # MỚI: email "Send Gift Contribution Notice" KHÔNG có
-                    # Voting Buttons/ảnh hướng dẫn vote — đây chỉ là thông
-                    # báo kêu gọi đóng góp, không phải 1 cuộc bỏ phiếu.
-                    use_voting_buttons=not is_gift,
+                # The send, and the History write that follows it, live in
+                # rsvp/services/invite.py, where a test can check exactly
+                # what reaches Outlook. The History row is written at send
+                # time (SentDate or UpdateInviteDate by mode; neither for a
+                # gift notice) and Tab 4's later Save updates the same row.
+                result = send_invite(
+                    self.outlook,
+                    lambda record: db.save_event_record(record, history_path),
+                    request,
                 )
-                # Record the actual send time NOW (not whenever "Save event to
-                # History" happens to be clicked later on Tab 4, which could be
-                # minutes/hours/days after the real send) — Tab 4's Save uses
-                # this if present. Also used by Tab 5 to find the matching sent
-                # confirmation email to attach to the Calendar Invite.
-                send_time = datetime.now()
+                # Tab 5 uses both times to find and attach the original and
+                # the update email to the Calendar Invite.
                 if is_update:
-                    # Theo dõi RIÊNG lần gửi update-invite (khác _invite_sent_date
-                    # = lần gửi invite ĐẦU TIÊN) — Tab 5 dùng CẢ HAI để tìm và
-                    # đính kèm đủ 2 email (gốc + update) vào Calendar Invite.
-                    self._update_invite_sent_date = send_time
+                    self._update_invite_sent_date = result.send_time
                 elif not is_gift:
-                    self._invite_sent_date = send_time
-
-                # ALSO write/update the History row right now — previously the
-                # History file only got a row when "Save event to History" was
-                # manually clicked on Tab 4, which could be much later (or
-                # never), leaving SentDate/EventID missing from History even
-                # though the email had already gone out. This writes the
-                # fields known at send-time immediately; Tab 4's later Save
-                # will UPDATE this same row (matched by EventID) with vote
-                # counts, cost tracking, etc. — no duplicate rows are created.
-                try:
-                    record = {
-                        "EventID": self.var_event_id.get(),
-                        "EventName": self.var_event_name.get(),
-                        "EventDate": get_date_str(self.date_event),
-                        "Deadline": get_date_str(self.date_deadline),
-                        "Location": self.var_location.get(),
-                        "Budget": self.var_budget.get(),
-                        "EmailLanguage": self.combo_email_lang.get(),
-                        "OrganizerNote": self._source_note_text(),
-                        "RecipientFile": self.recipient_file.get(),
-                        "TotalInvited": len(self.recipients),
-                        "EventMode": self.var_event_mode.get(),
-                        "Organizer": self.var_organizer.get(),
-                        "GuestOfHonor": self.var_guest_of_honor.get(),
-                        "GiftBudget": self.var_gift_budget.get(),
-                        "GiftDeadline": get_date_str(self.date_gift_deadline),
-                        "StartTime": self.var_start_time.get(),
-                        "EndTime": self.var_end_time.get(),
-                    }
-                    # Chỉ ghi ĐÚNG 1 trong 2 cột theo chế độ gửi — cột còn lại
-                    # KHÔNG được đưa vào record, nên db.save_event_record()
-                    # (đã sửa để giữ nguyên giá trị cũ khi UPDATE 1 dòng có sẵn)
-                    # sẽ không đụng tới nó. Vd: gửi update invite lần 2 sẽ chỉ
-                    # cập nhật UpdateInviteDate, SentDate gốc vẫn giữ nguyên.
-                    # MỚI: gửi "Gift Contribution Notice" KHÔNG đụng tới CẢ 2
-                    # cột này — đây không phải 1 lần gửi RSVP invite, nên
-                    # không nên ghi đè/thay đổi trạng thái theo dõi invite.
-                    if is_gift:
-                        pass
-                    elif is_update:
-                        record["UpdateInviteDate"] = send_time.strftime("%Y-%m-%d %H:%M")
-                    else:
-                        record["SentDate"] = send_time.strftime("%Y-%m-%d %H:%M")
-                    db.save_event_record(record, self.history_path.get())
+                    self._invite_sent_date = result.send_time
+                if result.history_written:
                     self.after(0, self._refresh_history_tree)
-                except Exception:
-                    pass  # best-effort — a History-write failure shouldn't block the send confirmation
-
-                mode_label = "Gift Contribution Notice" if is_gift else ("UPDATE invite" if is_update else "invite")
-                if is_gift:
-                    history_note = "🗂 History updated with the latest Tab 1 details for this EventID."
-                elif is_update:
-                    history_note = "🗂 History updated with the update-invite time for this EventID."
-                else:
-                    history_note = "🗂 History updated with the send time for this EventID."
-                self.after(0, lambda: messagebox.showinfo(
-                    "Done",
-                    f"{mode_label} email {'SENT' if auto_send else 'OPENED for review'} "
-                    + (f"to group address: {send_to_override}" if send_to_override
-                       else f"individually for {len(self.recipients)} people")
-                    + ".\n\n"
-                    + ("" if auto_send else "Check it in Outlook, then click Send.")
-                    + f"\n\n{history_note}"
-                ))
+                self.after(0, lambda: messagebox.showinfo("Done", result.message))
             except Exception as e:
                 err_msg = str(e)
                 self.after(0, lambda: messagebox.showerror(
@@ -2489,7 +2462,7 @@ class RSVPApp(tk.Tk):
     def _load_folder_list(self):
         def worker():
             try:
-                paths = outlook_com.list_folder_paths()
+                paths = self.outlook.list_folder_paths()
             except Exception as e:
                 err_msg = str(e)
                 self.after(0, lambda: messagebox.showerror(
@@ -2527,7 +2500,7 @@ class RSVPApp(tk.Tk):
 
         def worker():
             try:
-                responses, skipped = outlook_com.scan_voting_responses(
+                responses, skipped = self.outlook.scan_voting_responses(
                     event_id, folder_paths=folder_paths, scan_all=scan_all)
             except Exception as e:
                 err_msg = str(e)
@@ -2612,7 +2585,7 @@ class RSVPApp(tk.Tk):
         """Trả về roster THỰC TẾ để đối chiếu vote ở Tab 4 — mỗi dòng trong
         Tab 2 là group email (Exchange Distribution List) được TỰ ĐỘNG thay
         bằng các thành viên thật (đệ quy qua sub-group, xem
-        outlook_com.expand_group_members()), để khung 'Đã/Chưa phản hồi'
+        self.outlook.expand_group_members()), để khung 'Đã/Chưa phản hồi'
         liệt kê đúng TỪNG NGƯỜI thay vì 1 dòng group email mơ hồ.
 
         KHÔNG sửa self.recipients (Tab 2 vẫn giữ nguyên như đã lưu) — chỉ áp
@@ -2631,7 +2604,7 @@ class RSVPApp(tk.Tk):
         # address book, so it is passed in rather than imported there.
         return merge_expanded_roster(
             self.recipients,
-            outlook_com.expand_group_members,
+            self.outlook.expand_group_members,
             cache=self._group_expansion_cache,
         )
 
@@ -2945,7 +2918,7 @@ class RSVPApp(tk.Tk):
 
         def worker():
             try:
-                mail, attached = outlook_com.send_reminder_email(
+                mail, attached = self.outlook.send_reminder_email(
                     pending, subject, body,
                     auto_send=auto_send,
                     attach_event_id=(event_id if attach else None),
@@ -3419,7 +3392,7 @@ class RSVPApp(tk.Tk):
                 # here it's deliberately absent, per the requirement that
                 # every reminder — RSVP or Gift — must be sent by the user
                 # clicking Send themselves).
-                mail, attached = outlook_com.send_gift_reminder_email(
+                mail, attached = self.outlook.send_gift_reminder_email(
                     pending, subject, body,
                     auto_send=False,
                     attach_event_id=(event_id if attach else None),
@@ -3576,7 +3549,7 @@ class RSVPApp(tk.Tk):
         — danh sách chi tiết từng người ĐÃ đóng góp (đánh số lại từ 1,
         KHÔNG gồm 2 cột checkbox) nằm trong file Excel TỰ ĐỘNG ĐÍNH KÈM
         (xem _build_gift_report_workbook()). Không có Voting Buttons (dùng
-        outlook_com.send_gift_report_email(), hàm gửi thông báo thuần tuý
+        self.outlook.send_gift_report_email(), hàm gửi thông báo thuần tuý
         + đính kèm file — KHÁC với send_voting_invite() vốn không hỗ trợ
         đính kèm)."""
         recipients = [
@@ -3622,7 +3595,7 @@ class RSVPApp(tk.Tk):
 
         def worker():
             try:
-                mail, attached = outlook_com.send_gift_report_email(
+                mail, attached = self.outlook.send_gift_report_email(
                     recipients, subject, body, excel_path=excel_path)
                 attach_note = ("\n\n📎 Attached the contribution report." if attached else
                                 "\n\n⚠️ Couldn't attach the contribution report file — the email was "
@@ -4640,7 +4613,7 @@ class RSVPApp(tk.Tk):
                 # KHÔNG còn đính kèm nhầm email nhắc nhở hay email reply
                 # Yes/No/RE (xem docstring _find_all_sent_invite_mails()).
                 # attached_count = SỐ email đính kèm thành công.
-                appt, attached_count = outlook_com.send_calendar_invite(
+                appt, attached_count = self.outlook.send_calendar_invite(
                     self._yes_emails, subject, location, start_dt, end_dt, body,
                     attach_event_id=event_id or None,
                     include_update=include_update,
@@ -4676,7 +4649,7 @@ class RSVPApp(tk.Tk):
         Amount paid/Remaining amount, xem _build_attendance_workbook()),
         và (2) Calendar Invite của sự kiện, tìm best-effort trong folder
         Calendar theo đúng Subject = Event Name (xem
-        outlook_com.send_thankyou_email() / outlook_com._find_calendar_
+        self.outlook.send_thankyou_email() / outlook_com._find_calendar_
         invite_appointment() — CÙNG file/convention với các nút gửi khác
         của app, không còn tách riêng như bản trước khi có outlook_com.py)."""
         actual_attendees = [
@@ -4729,7 +4702,7 @@ class RSVPApp(tk.Tk):
 
         def worker():
             try:
-                mail, calendar_attached = outlook_com.send_thankyou_email(
+                mail, calendar_attached = self.outlook.send_thankyou_email(
                     actual_attendees, subject, body,
                     excel_path=excel_path, event_name=event_name,
                 )
