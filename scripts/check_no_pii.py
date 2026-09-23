@@ -181,9 +181,14 @@ def staged_contents(ids: set[str]) -> dict[str, bytes]:
         re-adding the working file reproduces the staged blob; a filter that
         appends an address hashed a harmless file to the blob holding it.
     The ids go in on stdin, so no path ever passes through a line-based
-    stream."""
+    stream.
+
+    --no-replace-objects: `cat-file` otherwise honours a local refs/replace
+    ref and returns its bytes under the ORIGINAL id, so a harmless
+    replacement hid a staged address that a clone would receive (Codex
+    review of PR #5)."""
     out = subprocess.run(
-        ["git", "-C", str(ROOT), "cat-file", "--batch"],
+        ["git", "-C", str(ROOT), "--no-replace-objects", "cat-file", "--batch"],
         input="".join(f"{i}\n" for i in sorted(ids)).encode("ascii"),
         capture_output=True, check=True,
     ).stdout
@@ -279,8 +284,9 @@ def main() -> int:
         rel = path.relative_to(ROOT).as_posix()
         # A submodule holds a commit id, not contents, and once initialised it
         # is a directory that cannot be read as a file. Its own repository is
-        # checked there (Codex review of PR #5).
-        if rel in gitlinks:
+        # checked there (Codex review of PR #5). A regular file that has
+        # replaced one is still scanned: `git add -A` stages it as a file.
+        if rel in gitlinks and not path.is_file():
             continue
         # Every copy the next commit could carry: the working copy, which
         # `git add -A` would stage, and the staged copy when it differs. Reading

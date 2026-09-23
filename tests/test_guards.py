@@ -288,6 +288,40 @@ class TestPiiGuard:
         assert "README.md: cannot read its working copy" in err, err
         assert "a.person" in err, "the scan stopped at the locked file"
 
+    def test_fails_on_a_file_that_replaced_a_submodule(self, sandbox):
+        """Codex review of PR #5: every gitlink path was skipped, including
+        one whose working copy is now a regular file - which `git add -A`
+        stages as a file, address and all."""
+        subprocess.run(["git", "update-index", "--add", "--cacheinfo",
+                        f"160000,{'1' * 40},vendor/lib"], cwd=sandbox, check=True)
+        (sandbox / "vendor").mkdir()
+        (sandbox / "vendor" / "lib").write_text(
+            f"a.person{'@'}company.io\n", encoding="utf-8")
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: a file that replaced a submodule passed.")
+        assert "vendor/lib" in result.stderr
+
+    def test_reads_staged_blobs_past_replacement_refs(self, sandbox):
+        """Codex review of PR #5: `cat-file` honours refs/replace, so a local
+        replacement made a staged address read as harmless bytes, while a
+        clone without the replacement gets the address."""
+        def blob(text: str) -> str:
+            return subprocess.run(
+                ["git", "hash-object", "-w", "--stdin"], cwd=sandbox,
+                check=True, capture_output=True,
+                input=text.encode()).stdout.decode().strip()
+        leak = blob(f"a.person{'@'}company.io\n")
+        decoy = blob("harmless\n")
+        subprocess.run(["git", "replace", leak, decoy], cwd=sandbox, check=True)
+        subprocess.run(["git", "update-index", "--add", "--cacheinfo",
+                        f"100644,{leak},notes.txt"], cwd=sandbox, check=True)
+        (sandbox / "notes.txt").write_text("harmless\n", encoding="utf-8")
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: a replacement ref hid a staged address.")
+        assert "notes.txt (staged copy)" in result.stderr
+
     def test_passes_on_an_initialised_submodule(self, sandbox):
         """Codex review of PR #5: a populated submodule is a directory, and
         reading it as a file reported an unreadable copy on every run."""
