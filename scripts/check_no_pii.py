@@ -300,9 +300,11 @@ def main() -> int:
         # e42f925).
         copies: list[tuple[str, bytes]] = []
         unreadable: list[str] = []
+        working_read = False
         if path.exists():
             try:
                 copies.append(("", path.read_bytes()))
+                working_read = True
             except OSError as exc:
                 unreadable.append(f"working copy ({exc})")
         if rel in staged:
@@ -319,7 +321,22 @@ def main() -> int:
             continue
 
         def approval(what: str) -> None:
-            current = blob_id(path) if path.exists() else None
+            # A working copy that could not be read cannot be hashed either:
+            # on Windows, git cannot open a file another program holds. The
+            # uncaught error stopped the guard before the other files were
+            # scanned (Codex review of PR #5). The unreadable copy is already
+            # a violation; approval is then judged on the staged copy alone.
+            current = None
+            if working_read:
+                try:
+                    current = blob_id(path)
+                except subprocess.CalledProcessError as exc:
+                    violations.append(
+                        f"{rel}: cannot hash its working copy ({exc}), so it "
+                        f"cannot be checked. Close whatever holds it and run "
+                        f"again.")
+            if current is None and staged.get(rel) is None:
+                return
             problem = approval_problem(rel, current, allowed, staged.get(rel))
             if problem:
                 violations.append(f"{rel}: {what} {problem}")

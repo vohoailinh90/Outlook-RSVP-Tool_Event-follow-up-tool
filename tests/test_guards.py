@@ -322,6 +322,40 @@ class TestPiiGuard:
             "GUARD IS BLIND: a replacement ref hid a staged address.")
         assert "notes.txt (staged copy)" in result.stderr
 
+    @pytest.mark.parametrize("fails", ["read", "hash"])
+    def test_a_locked_binary_does_not_stop_the_guard(
+            self, sandbox, monkeypatch, capsys, fails):
+        """Codex review of PR #5: a binary the guard could not read was then
+        hashed for its approval, git could not open it either, and the
+        uncaught error stopped the guard before the other files were scanned."""
+        import importlib.util
+        (sandbox / "roster.txt").write_text(
+            f"Example Person <a.person{'@'}company.io>\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=sandbox, check=True)
+        spec = importlib.util.spec_from_file_location(
+            "check_no_pii_sandbox", sandbox / "scripts" / "check_no_pii.py")
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        real_read, real_hash = guard.Path.read_bytes, guard.blob_id
+
+        def locked_read(self):
+            if self.name == "how_to_vote.png" and fails == "read":
+                raise PermissionError(13, "used by another process")
+            return real_read(self)
+
+        def locked_hash(path):
+            if path.name == "how_to_vote.png":
+                raise subprocess.CalledProcessError(128, ["git", "hash-object"])
+            return real_hash(path)
+        monkeypatch.setattr(guard.Path, "read_bytes", locked_read)
+        monkeypatch.setattr(guard, "blob_id", locked_hash)
+        assert guard.main() == 1
+        err = capsys.readouterr().err
+        expected = {"read": "cannot read its working copy",
+                    "hash": "cannot hash its working copy"}[fails]
+        assert f"how_to_vote.png: {expected}" in err, err
+        assert "a.person" in err, "the guard stopped at the locked binary"
+
     def test_passes_on_an_initialised_submodule(self, sandbox):
         """Codex review of PR #5: a populated submodule is a directory, and
         reading it as a file reported an unreadable copy on every run."""
