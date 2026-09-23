@@ -228,25 +228,32 @@ class TestLongInputDoesNotStall:
     starting digit and then backtracked hunting for a marker - quadratic, and
     measurably so: 4,000 digits took most of a second, freezing the Tk UI on a
     paste. Locating markers first makes each digit run be considered once.
+
+    The same applies to a paste of many markers with no number beside them:
+    looking for the number before each marker by searching from the start of
+    the text made that quadratic too - 16,000 "$" took ~750 ms (Codex review
+    of PR #1). Both shapes are timed.
     """
 
-    def test_a_long_pasted_number_parses_promptly(self):
+    @pytest.mark.parametrize("unit", ["1", "$"], ids=["digits", "markers"])
+    def test_a_long_paste_parses_promptly(self, unit):
         import time
 
         start = time.perf_counter()
-        parse_amount_from_text("1" * 8000)
+        parse_amount_from_text(unit * 8000)
         elapsed = time.perf_counter() - start
         assert elapsed < 0.10, (
-            f"parsing 8,000 digits took {elapsed*1000:.0f} ms. This runs on "
-            f"every keystroke in the amount field; the quadratic version took "
-            f"~750 ms at half that length and stalled the UI."
+            f"parsing 8,000 {unit!r} took {elapsed*1000:.0f} ms. This runs on "
+            f"every keystroke in the amount field; the quadratic versions took "
+            f"~750 ms at that order of length and stalled the UI."
         )
 
-    def test_cost_grows_roughly_linearly(self):
+    @pytest.mark.parametrize("unit", ["1", "$"], ids=["digits", "markers"])
+    def test_cost_grows_roughly_linearly(self, unit):
         import time
 
         def timed(n):
-            s = "1" * n
+            s = unit * n
             start = time.perf_counter()
             for _ in range(5):
                 parse_amount_from_text(s)

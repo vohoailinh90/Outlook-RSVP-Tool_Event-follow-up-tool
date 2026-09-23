@@ -21,6 +21,7 @@ Exit 0 clean, 1 violation found, 2 the check could not run.
 """
 from __future__ import annotations
 
+import codecs
 import re
 import subprocess
 import sys
@@ -29,17 +30,34 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SQLITE_MAGIC = b"SQLite format 3\x00"
 
-# Deliberately not "any email": the docs legitimately contain example.com and
-# noreply@ addresses. This matches a real person at a real company domain.
+# Any address at any real domain. The docs legitimately contain example.com
+# and noreply@ addresses, so those are excluded - but by EXACT reserved domain,
+# not by pattern. An earlier form listed a handful of TLDs (com, net, jp, ...)
+# and excluded any domain merely BEGINNING with "example." or "test.", so an
+# address at a .io or .fr company, or at a real domain whose first label
+# happened to be "example", passed (Codex review of PR #1). The domain part now accepts any DNS suffix, and reserved_domain()
+# below decides what is documentation.
+#
 # re.I matters: "Alice@Example.com" is as much a documentation address as
 # "alice@example.com", and a case-sensitive exclusion flagged the first one as
 # a real person. A guard that fires on RFC 2606 example domains trains people
 # to ignore it.
 EMAIL = re.compile(
-    rb"[A-Za-z0-9._%+-]+@(?!example\.|test\.|invalid\b|localhost)"
-    rb"[A-Za-z0-9.-]+\.(?:com|net|org|jp|vn|de|co\.[a-z]{2})\b",
-    re.I,
-)
+    rb"[A-Za-z0-9._%+-]+@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})\b", re.I)
+
+# RFC 2606 / RFC 6761 names that can never belong to a real person.
+RESERVED_DOMAINS = {b"example.com", b"example.net", b"example.org"}
+RESERVED_TLDS = {b"example", b"test", b"invalid", b"localhost"}
+
+
+def reserved_domain(domain: bytes) -> bool:
+    """True for a documentation-only domain, or a subdomain of one."""
+    d = domain.lower().rstrip(b".")
+    if d.rsplit(b".", 1)[-1] in RESERVED_TLDS:
+        return True
+    return any(d == r or d.endswith(b"." + r) for r in RESERVED_DOMAINS)
+
+
 ALLOWED_ADDRESSES = {b"noreply@anthropic.com"}
 
 # Bracketed at-forms only. A first attempt also matched a bare " at ", which
@@ -64,9 +82,38 @@ ROSTER_SUFFIXES = {".csv", ".tsv"}
 # not "skipped": each one must be named in .pii-allowlist by a human who opened
 # it. An unaccounted binary FAILS. This is the difference between a guard that
 # cannot see a leak and a guard that admits it cannot see and stops.
+#
+# Outlook's own formats are listed too: a saved .msg or .oft is an OLE document
+# holding recipients and message text, and a .pst/.ost is a whole mailbox
+# (Codex review of PR #1).
 OPAQUE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".bmp", ".webp",
-                   ".pdf", ".xlsx", ".xls", ".docx", ".doc", ".pptx", ".zip"}
+                   ".pdf", ".xlsx", ".xls", ".docx", ".doc", ".pptx", ".zip",
+                   ".msg", ".oft", ".pst", ".ost"}
 ALLOWLIST_FILE = ROOT / ".pii-allowlist"
+
+
+# Windows tools readily save text as UTF-16, where every ASCII character is
+# followed by a NUL byte and no address pattern can match the raw bytes: a
+# UTF-16 roster.txt passed this check (Codex review of PR #1). BOM-marked
+# UTF-16/32 is decoded before scanning. UTF-32 comes first because its
+# little-endian BOM begins with UTF-16's.
+_BOMS = ((codecs.BOM_UTF32_LE, "utf-32"), (codecs.BOM_UTF32_BE, "utf-32"),
+         (codecs.BOM_UTF16_LE, "utf-16"), (codecs.BOM_UTF16_BE, "utf-16"))
+
+
+def scannable_text(blob: bytes) -> bytes | None:
+    """The bytes to run the address patterns over, or None when the file
+    cannot be read as text and a human has to account for it instead.
+
+    A NUL byte without a BOM means UTF-16 with no BOM, or a binary format this
+    check has no name for; either way a regex over it proves nothing."""
+    for bom, codec in _BOMS:
+        if blob.startswith(bom):
+            try:
+                return blob.decode(codec).encode("utf-8")
+            except UnicodeDecodeError:
+                return None
+    return None if b"\0" in blob else blob
 
 
 def load_allowlist() -> set[str]:
@@ -149,13 +196,25 @@ def main() -> int:
             continue
 
         try:
-            blob = path.read_bytes()
+            blob = scannable_text(path.read_bytes())
         except OSError:
+            continue
+        if blob is None:
+            opaque += 1
+            rel = path.relative_to(ROOT).as_posix()
+            if rel not in allowed:
+                violations.append(
+                    f"{rel}: holds NUL bytes, so it is binary or UTF-16 without "
+                    f"a byte-order mark, and this check CANNOT read it. Open it, "
+                    f"confirm it holds no real names/addresses/amounts, then add "
+                    f"it to .pii-allowlist with a note - or untrack it, or "
+                    f"re-save it as UTF-8."
+                )
             continue
         scanned += 1
         for m in EMAIL.finditer(blob):
             addr = m.group(0)
-            if addr.lower() in ALLOWED_ADDRESSES:
+            if addr.lower() in ALLOWED_ADDRESSES or reserved_domain(m.group(1)):
                 continue
             line = blob[: m.start()].count(b"\n") + 1
             violations.append(

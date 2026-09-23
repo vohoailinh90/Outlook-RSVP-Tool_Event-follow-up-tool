@@ -11,6 +11,7 @@ behind.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -144,6 +145,64 @@ class TestPiiGuard:
         )
         assert "roster.txt" in result.stderr
 
+    @pytest.mark.parametrize("encoding", ["utf-16", "utf-16-le", "utf-32"])
+    def test_fails_on_an_address_in_a_utf16_or_utf32_file(
+            self, sandbox, encoding):
+        """Codex review of PR #1: Windows tools save text as UTF-16, where NUL
+        bytes split every ASCII character and the raw-byte scan saw nothing.
+        "utf-16" and "utf-32" write a BOM and are decoded; "utf-16-le" has no
+        BOM and must be refused as unreadable rather than passed."""
+        address = "a.person" + "@" + "company" + ".io"
+        (sandbox / "roster.txt").write_bytes(
+            f"Example Person <{address}>\n".encode(encoding))
+        subprocess.run(["git", "add", "-A"], cwd=sandbox, check=True)
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1, (
+            f"GUARD IS BLIND: an address in a {encoding} file passed.")
+        assert "roster.txt" in result.stderr
+
+    def test_fails_on_an_unaccounted_outlook_message_file(self, sandbox):
+        """Codex review of PR #1: a saved Outlook .msg is an OLE document that
+        holds recipients and message text, and it was scanned as plain text.
+        This one carries no readable address at all, so only treating the
+        format as opaque catches it."""
+        (sandbox / "invite.msg").write_bytes(
+            b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 64)
+        subprocess.run(["git", "add", "-A"], cwd=sandbox, check=True)
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: an Outlook .msg file was committed and passed.")
+        assert "invite.msg" in result.stderr
+
+    @pytest.mark.parametrize("domain", [
+        # Assembled so no real-looking address is written out in this file.
+        "company" + ".io", "company" + ".fr", "example" + ".company.com",
+        "test" + ".company.org",
+    ])
+    def test_fails_on_any_real_domain(self, sandbox, domain):
+        """Codex review of PR #1: only a few TLDs were matched, and any
+        domain merely starting with example. or test. was skipped."""
+        (sandbox / "roster.txt").write_text(
+            f"Example Person <a.person{'@'}{domain}>\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=sandbox, check=True)
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1, (
+            f"GUARD IS BLIND: an address at {domain} was committed and passed.")
+        assert "roster.txt" in result.stderr
+
+    def test_passes_on_reserved_documentation_domains(self, sandbox):
+        """RFC 2606 / 6761 names can never be a real person's, so the docs may
+        use them freely - including subdomains and any letter case."""
+        at = "@"
+        (sandbox / "notes.md").write_text(
+            f"alice{at}example.com, Bob{at}Example.ORG, c{at}mail.example.net, "
+            f"d{at}host.test, e{at}x.invalid, f{at}box.example\n",
+            encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=sandbox, check=True)
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 0, (
+            f"FALSE POSITIVE on a reserved example domain:\n{result.stderr}")
+
     def test_fails_on_an_unreviewed_binary_document(self, sandbox):
         """The leak the first version of this guard could not see.
 
@@ -276,6 +335,218 @@ class TestNameResolutionGuard:
         )
         assert "datetime" in result.stderr
 
+    def test_a_local_import_does_not_cover_another_function(self, sandbox):
+        """Codex review of PR #1: imports anywhere in the file were counted as
+        module globals, so `import win32com.client` inside
+        scan_voting_responses() hid its loss from _outlook_app() - which then
+        raises NameError on every Outlook path."""
+        target = sandbox / "outlook_com.py"
+        text = target.read_text(encoding="utf-8")
+        mutated = text.replace(
+            "def _outlook_app():\n    import win32com.client\n",
+            "def _outlook_app():\n", 1)
+        assert mutated != text, "mutation did not apply - _outlook_app moved"
+        target.write_text(mutated, encoding="utf-8")
+
+        result = run_guard("check_names_resolve.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: _outlook_app() lost its import and passed, because "
+            "another function's local import was treated as a global."
+        )
+        assert "win32com" in result.stderr
+
+    def test_fails_on_a_read_before_its_local_binding(self, sandbox):
+        """Precollecting a function's bindings (for closures) must not let a
+        read in the SAME body see a later assignment: `print(x)` then `x = 1`
+        is an UnboundLocalError. Codex review of PR #3 caught the guard
+        briefly going blind to this."""
+        (sandbox / "rsvp" / "domain" / "_unbound_probe.py").write_text(
+            "def f():\n"
+            "    print(late_name)\n"
+            "    late_name = 1\n"
+            "    return late_name\n",
+            encoding="utf-8")
+        result = run_guard("check_names_resolve.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: a read before its local binding passed.")
+        assert "late_name" in result.stderr
+
+    def test_fails_when_a_local_shadows_a_global_read_before_it(self, sandbox):
+        """A module-level name of the same spelling does not rescue it: the
+        later assignment makes the name local to the whole function, so
+        `shadowed = 0; def f(): print(shadowed); shadowed = 1` is still an
+        UnboundLocalError (Codex review of PR #3). A `global` declaration
+        does rescue it, and must not be flagged."""
+        (sandbox / "rsvp" / "domain" / "_shadow_probe.py").write_text(
+            "shadowed = 0\n"
+            "declared = 0\n"
+            "def f():\n"
+            "    print(shadowed)\n"
+            "    shadowed = 1\n"
+            "    return shadowed\n"
+            "def g():\n"
+            "    global declared\n"
+            "    print(declared)\n"
+            "    declared = 1\n",
+            encoding="utf-8")
+        result = run_guard("check_names_resolve.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: a local read before binding passed because a "
+            "global of the same name exists.")
+        assert "'shadowed'" in result.stderr
+        assert "'declared'" not in result.stderr, (
+            f"FALSE POSITIVE on a global declaration:\n{result.stderr}")
+
+    def test_match_captures_and_comprehension_walrus_are_bindings(
+            self, sandbox):
+        """Found by rsvp-reviewer on PR #3, both pre-existing false positives:
+        `match` capture names (`case [a, *rest]`, `**restmap`, `as whole`)
+        were never bound, and a walrus inside a comprehension was bound in
+        the comprehension instead of the enclosing function (PEP 572)."""
+        (sandbox / "rsvp" / "domain" / "_pattern_probe.py").write_text(
+            "def f(cmd, data):\n"
+            "    match cmd:\n"
+            "        case [a, *rest]:\n"
+            "            return a, rest\n"
+            "        case {'k': v, **restmap}:\n"
+            "            return v, restmap\n"
+            "        case str() as whole:\n"
+            "            return whole\n"
+            "    doubled = [y := x * 2 for x in data]\n"
+            "    return y, doubled\n",
+            encoding="utf-8")
+        result = run_guard("check_names_resolve.py", sandbox)
+        assert result.returncode == 0, (
+            f"FALSE POSITIVE on match captures or a comprehension walrus:\n"
+            f"{result.stderr}")
+
+    def test_fails_when_a_nested_def_or_class_reads_its_own_unbound_name(
+            self, sandbox):
+        """Codex review of PR #3: a nested class name is bound only after its
+        body runs, and a nested def's name only after its defaults run, so
+        `class Inner: value = Inner` is a NameError and
+        `def inner(value=inner)` an UnboundLocalError. Both passed."""
+        (sandbox / "rsvp" / "domain" / "_early_bind_probe.py").write_text(
+            "def outer_class():\n"
+            "    class Inner:\n"
+            "        value = Inner\n"
+            "    return Inner\n"
+            "def outer_def():\n"
+            "    def inner(value=inner):\n"
+            "        return value\n"
+            "    return inner\n",
+            encoding="utf-8")
+        result = run_guard("check_names_resolve.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: a nested class or def read its own name before "
+            "Python binds it.")
+        assert "'Inner'" in result.stderr
+        assert "'inner'" in result.stderr
+
+    def test_module_match_and_walrus_bindings_resolve_from_earlier_functions(
+            self, sandbox):
+        """Codex review of PR #3: module globals were collected only from
+        assignments, so a function defined ABOVE a module-level `match`
+        capture or comprehension walrus could not read it, although it runs
+        fine once called. Methods reading their own nested class, and
+        recursive nested defs, must stay clean after the binding-order fix."""
+        (sandbox / "rsvp" / "domain" / "_module_binding_probe.py").write_text(
+            "def read_capture():\n"
+            "    return captured\n"
+            "def read_walrus():\n"
+            "    return leaked\n"
+            "def outer():\n"
+            "    class Inner:\n"
+            "        def m(self):\n"
+            "            return Inner\n"
+            "    def again(n):\n"
+            "        return again(n - 1) if n else Inner().m()\n"
+            "    return again(2)\n"
+            "match 1:\n"
+            "    case captured:\n"
+            "        pass\n"
+            "_ = [leaked := x for x in (1, 2)]\n",
+            encoding="utf-8")
+        result = run_guard("check_names_resolve.py", sandbox)
+        assert result.returncode == 0, (
+            f"FALSE POSITIVE on module-level match or walrus bindings:\n"
+            f"{result.stderr}")
+
+    def test_walrus_in_a_def_header_binds_in_the_enclosing_scope(
+            self, sandbox):
+        """Codex review of PR #3: decorators, defaults and bases run in the
+        enclosing scope, so a walrus there binds there, and a closure defined
+        earlier can read it. The precollection skipped whole definitions."""
+        (sandbox / "rsvp" / "domain" / "_header_walrus_probe.py").write_text(
+            "def outer():\n"
+            "    def read():\n"
+            "        return late_default, late_lambda, late_base, late_deco\n"
+            "    def inner(value=(late_default := 1)):\n"
+            "        return value\n"
+            "    f = lambda v=(late_lambda := 2): v\n"
+            "    class K((late_base := object)):\n"
+            "        pass\n"
+            "    @(late_deco := (lambda fn: fn))\n"
+            "    def g():\n"
+            "        pass\n"
+            "    return read(), inner, f, K, g\n",
+            encoding="utf-8")
+        result = run_guard("check_names_resolve.py", sandbox)
+        assert result.returncode == 0, (
+            f"FALSE POSITIVE on a walrus in a definition header:\n"
+            f"{result.stderr}")
+
+    def test_walrus_inside_a_lambda_in_a_comprehension_stays_local(
+            self, sandbox):
+        """Codex review of PR #3: the comprehension walrus scan crossed into a
+        nested lambda, so `[(lambda: (hidden := x))() for x in xs]` counted
+        `hidden` as a module global, and a function reading it passed while
+        raising NameError when called."""
+        (sandbox / "rsvp" / "domain" / "_lambda_walrus_probe.py").write_text(
+            "def read():\n"
+            "    return hidden\n"
+            "_ = [(lambda: (hidden := x))() for x in (1,)]\n",
+            encoding="utf-8")
+        result = run_guard("check_names_resolve.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: a walrus local to a lambda counted as a global.")
+        assert "'hidden'" in result.stderr
+
+    def test_local_imports_and_nested_defs_resolve_in_their_own_scope(
+            self, sandbox):
+        """The fix must not over-correct: a function's own local import, a
+        nested def and a top-level try/except import are all real bindings."""
+        (sandbox / "rsvp" / "domain" / "_local_scope_probe.py").write_text(
+            "try:\n"
+            "    import json\n"
+            "except ImportError:\n"
+            "    json = None\n"
+            "def outer():\n"
+            "    import os\n"
+            "    from os import path as p\n"
+            "    def inner(n):\n"
+            "        return inner(n - 1) if n else os.sep + p.sep\n"
+            "    class Local:\n"
+            "        pass\n"
+            "    return inner(1), Local, json, closure(), late_os\n"
+            # A closure defined ABOVE the import it uses: Python resolves it
+            # at call time, so it is valid (Codex review of PR #3).
+            "def closure():\n"
+            "    def use():\n"
+            "        return sys.sep\n"
+            "    import os as sys\n"
+            "    return use()\n"
+            # A name bound only inside a top-level `match` case.
+            "match 1:\n"
+            "    case 1:\n"
+            "        import os as late_os\n"
+            "    case _:\n"
+            "        late_os = None\n",
+            encoding="utf-8")
+        result = run_guard("check_names_resolve.py", sandbox)
+        assert result.returncode == 0, (
+            f"FALSE POSITIVE on function-local bindings:\n{result.stderr}")
+
     def test_does_not_false_positive_on_normal_scoping(self, sandbox):
         """Comprehensions, `except X as e`, `with ... as f`, lambda params and
         walrus bindings are all real names. Flagging them would make the guard
@@ -301,6 +572,29 @@ class TestNameResolutionGuard:
         result = run_guard("check_names_resolve.py", sandbox)
         assert result.returncode == 0, (
             f"FALSE POSITIVE on ordinary Python scoping:\n{result.stderr}")
+
+
+class TestRequiredAppImport:
+    """tests/conftest.py is a guard too: with RSVP_REQUIRE_APP_IMPORT=1, as CI
+    sets it, an rsvp_app.py that cannot be imported must fail the run."""
+
+    def test_a_broken_app_import_fails_the_run(self, sandbox):
+        """Codex review of PR #1: the failure was deferred to the `monolith`
+        fixture, which no test requests, so an import of a nonexistent module
+        added to rsvp_app.py still left every test passing."""
+        app = sandbox / "rsvp_app.py"
+        app.write_text("import rsvp_no_such_module_\n"
+                       + app.read_text(encoding="utf-8"), encoding="utf-8")
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+             "tests/test_domain_money.py"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=sandbox, env={**os.environ, "RSVP_REQUIRE_APP_IMPORT": "1"})
+        assert result.returncode != 0, (
+            "GUARD IS BLIND: rsvp_app.py could not be imported, "
+            "RSVP_REQUIRE_APP_IMPORT=1 was set, and the run still passed.\n"
+            + result.stdout[-500:])
+        assert "rsvp_no_such_module_" in result.stdout + result.stderr
 
 
 class TestWindowsEncodingGuard:

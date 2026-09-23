@@ -98,15 +98,38 @@ def _amount_beside_a_currency_marker(text: str) -> re.Match | None:
     function runs synchronously from a keystroke handler, so pasting a few
     thousand digits into the amount field stalled the UI for most of a second.
     Locating markers first makes each digit run be considered once.
+
+    The number BEFORE a marker is found by stepping back from the marker, not
+    by searching from the start of the text: a search from offset zero for
+    every marker was quadratic again on a paste of many markers with no
+    number beside them - 16,000 "$" took most of a second (Codex review of
+    PR #1).
     """
     for marker in _CURRENCY_RE.finditer(text):
         after = _NUMBER_AT_START.match(text, marker.end())
         if after:
             return after
-        before = _NUMBER_AT_END.search(text, 0, marker.start())
+        before = _number_just_before(text, marker.start())
         if before:
             return before
     return None
+
+
+def _number_just_before(text: str, end: int) -> re.Match | None:
+    """The match of _NUMBER_AT_END ending at `end`, found in time
+    proportional to the number and the whitespace before `end`."""
+    stop = end
+    while stop > 0 and text[stop - 1].isspace():
+        stop -= 1
+    start = stop
+    while start > 0 and (text[start - 1].isdecimal() or text[start - 1] in ".,"):
+        start -= 1
+    # _NUMBER starts with a digit, so skip separators left of the first one.
+    while start < stop and not text[start].isdecimal():
+        start += 1
+    if start == stop:
+        return None
+    return _NUMBER_AT_END.match(text, start, end)
 
 
 def _to_float(token: str, dot_is_decimal: bool = False) -> float:
