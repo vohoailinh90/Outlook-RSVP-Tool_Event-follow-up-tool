@@ -367,6 +367,29 @@ class TestNameResolutionGuard:
         assert "'declared'" not in result.stderr, (
             f"FALSE POSITIVE on a global declaration:\n{result.stderr}")
 
+    def test_match_captures_and_comprehension_walrus_are_bindings(
+            self, sandbox):
+        """Found by rsvp-reviewer on PR #3, both pre-existing false positives:
+        `match` capture names (`case [a, *rest]`, `**restmap`, `as whole`)
+        were never bound, and a walrus inside a comprehension was bound in
+        the comprehension instead of the enclosing function (PEP 572)."""
+        (sandbox / "rsvp" / "domain" / "_pattern_probe.py").write_text(
+            "def f(cmd, data):\n"
+            "    match cmd:\n"
+            "        case [a, *rest]:\n"
+            "            return a, rest\n"
+            "        case {'k': v, **restmap}:\n"
+            "            return v, restmap\n"
+            "        case str() as whole:\n"
+            "            return whole\n"
+            "    doubled = [y := x * 2 for x in data]\n"
+            "    return y, doubled\n",
+            encoding="utf-8")
+        result = run_guard("check_names_resolve.py", sandbox)
+        assert result.returncode == 0, (
+            f"FALSE POSITIVE on match captures or a comprehension walrus:\n"
+            f"{result.stderr}")
+
     def test_local_imports_and_nested_defs_resolve_in_their_own_scope(
             self, sandbox):
         """The fix must not over-correct: a function's own local import, a

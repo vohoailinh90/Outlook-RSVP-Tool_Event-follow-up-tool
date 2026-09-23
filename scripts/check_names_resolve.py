@@ -208,6 +208,32 @@ class ScopeWalker(ast.NodeVisitor):
 
     visit_AsyncWith = visit_With
 
+    # `match` patterns bind their capture names in the current scope.
+    def visit_MatchAs(self, node):
+        if node.name:
+            self._current_scope().add(node.name)
+        self.generic_visit(node)
+
+    def visit_MatchStar(self, node):
+        if node.name:
+            self._current_scope().add(node.name)
+
+    def visit_MatchMapping(self, node):
+        if node.rest:
+            self._current_scope().add(node.rest)
+        self.generic_visit(node)
+
+    def visit_NamedExpr(self, node):
+        """PEP 572: `:=` inside a comprehension binds in the nearest
+        enclosing NON-comprehension scope, so `[y := x for x in xs]` makes y
+        available to the rest of the function."""
+        self.visit(node.value)
+        for scope in reversed(self.scopes):
+            if scope.kind != "comprehension":
+                scope.bound.add(node.target.id)
+                return
+        self.globals.add(node.target.id)
+
     def visit_Global(self, node):
         for n in node.names:
             self.globals.add(n)
@@ -234,6 +260,12 @@ def _collect_bindings(node, scope: set[str], declared: set[str]) -> None:
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
         scope.add(node.name)
         return
+    if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+        # Only a walrus target leaks out of a comprehension (PEP 572).
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.NamedExpr):
+                scope.add(sub.target.id)
+        return
     if isinstance(node, _NEW_SCOPE):
         return
     if isinstance(node, ast.Import):
@@ -244,6 +276,10 @@ def _collect_bindings(node, scope: set[str], declared: set[str]) -> None:
         scope.add(node.id)
     elif isinstance(node, ast.ExceptHandler) and node.name:
         scope.add(node.name)
+    elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+        scope.add(node.name)
+    elif isinstance(node, ast.MatchMapping) and node.rest:
+        scope.add(node.rest)
     elif isinstance(node, (ast.Global, ast.Nonlocal)):
         declared.update(node.names)
     for child in ast.iter_child_nodes(node):

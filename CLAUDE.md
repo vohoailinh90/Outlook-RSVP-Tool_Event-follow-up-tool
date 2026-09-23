@@ -82,6 +82,8 @@ are what remains after that.
   guard does not pretend to: it refuses to pass while a tracked `.csv`/`.tsv` or binary
   document is unaccounted for, and makes a person say what is in it. A name sitting in a
   `.md` or `.txt` file still gets through.
+- **An address at a non-ASCII domain.** The email pattern is ASCII, so `user@` followed by
+  a Unicode (IDN) domain is not seen. The Punycode form (`xn--...`) is.
 - **A computed module name.** `importlib.import_module(name)` with a variable is beyond
   static analysis. Constant arguments are checked.
 - **A message table built at runtime** rather than written as a dict literal is invisible
