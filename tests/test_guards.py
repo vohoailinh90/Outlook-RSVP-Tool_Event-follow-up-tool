@@ -592,6 +592,19 @@ class TestPiiGuard:
             "changed image through.")
         assert ".pii-allowlist" in result.stderr
 
+    def test_approvals_do_not_count_when_the_allowlist_is_not_staged(
+            self, sandbox):
+        """Codex review of PR #7: with .pii-allowlist removed from the index
+        but still on disk, its approvals were trusted, though the commit
+        would carry the image with no allowlist at all."""
+        subprocess.run(["git", "rm", "-q", "--cached", ".pii-allowlist"],
+                       cwd=sandbox, check=True)
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: an allowlist that is not staged approved an "
+            "image the commit would carry without it.")
+        assert "how_to_vote.png" in result.stderr
+
     def test_passes_when_the_approval_is_staged_too(self, sandbox):
         image = sandbox / "how_to_vote.png"
         image.write_bytes(image.read_bytes() + b"\x00regenerated")

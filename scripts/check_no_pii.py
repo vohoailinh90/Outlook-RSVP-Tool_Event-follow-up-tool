@@ -154,13 +154,15 @@ def load_allowlist(staged_text: str | None
     copy. Reading only the working copy let an approval edited on disk but
     not staged clear a changed image that the commit would carry under the
     old approval (Codex review of PR #1). An entry counts only when the two
-    copies say the same thing; with no staged copy, the working copy is what
-    `git add -A` would stage."""
+    copies say the same thing.
+
+    `staged_text` is None when the allowlist is not in the index at all.
+    That is an empty staged allowlist, not a reason to trust the working
+    copy: the commit would carry no approvals, so trusting the copy on disk
+    passed an image the commit carries unapproved (Codex review of PR #7)."""
     working = (parse_allowlist(ALLOWLIST_FILE.read_text(encoding="utf-8"))
                if ALLOWLIST_FILE.exists() else {})
-    if staged_text is None:
-        return working, set()
-    staged = parse_allowlist(staged_text)
+    staged = parse_allowlist(staged_text or "")
     missing = object()
     conflicts = {p for p in working.keys() | staged.keys()
                  if working.get(p, missing) != staged.get(p, missing)}
