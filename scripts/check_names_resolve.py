@@ -60,15 +60,23 @@ class ScopeWalker(ast.NodeVisitor):
 
     # --- scope helpers -------------------------------------------------
     def _bound(self, name: str) -> bool:
-        if name in self.globals or name in BUILTINS:
-            return True
         immediate = True    # still inside code that runs straight away
         for scope in reversed(self.scopes):
-            if name in (scope.bound if immediate else scope.every):
+            # A method does not see its class body's names.
+            if scope.kind == "class" and not immediate:
+                continue
+            if name in scope.bound:
                 return True
             if scope.kind == "function":
+                if name in scope.every:
+                    # Local to this function. Read before its binding, that is
+                    # an UnboundLocalError even when a global of the same name
+                    # exists: `x = 0; def f(): print(x); x = 1` (Codex review
+                    # of PR #3). From a nested function, it resolves at call
+                    # time.
+                    return not immediate
                 immediate = False   # outer scopes are seen at call time
-        return False
+        return name in self.globals or name in BUILTINS
 
     def _bind_target(self, node, scope: set[str]) -> None:
         for n in ast.walk(node):
@@ -91,8 +99,11 @@ class ScopeWalker(ast.NodeVisitor):
         body = node.body if isinstance(node.body, list) else [node.body]
         # Every name the function binds anywhere, for closures nested in it.
         every = set(params)
+        declared: set[str] = set()
         for stmt in body:
-            _collect_bindings(stmt, every)
+            _collect_bindings(stmt, every, declared)
+        # `global x` / `nonlocal x` make x refer OUTWARD, however it is bound.
+        every -= declared
         scope = _Scope("function", every)
         scope.bound.update(params)
         self.scopes.append(scope)
@@ -209,10 +220,11 @@ _NEW_SCOPE = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda,
               ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 
 
-def _collect_bindings(node, scope: set[str]) -> None:
+def _collect_bindings(node, scope: set[str], declared: set[str]) -> None:
     """Add every name `node` binds in the CURRENT scope to `scope`, without
     descending into nested scopes (def, class, lambda, comprehension) - those
-    bind their own names, apart from the def/class name itself."""
+    bind their own names, apart from the def/class name itself. Names in a
+    `global`/`nonlocal` statement are added to `declared`."""
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
         scope.add(node.name)
         return
@@ -226,8 +238,10 @@ def _collect_bindings(node, scope: set[str]) -> None:
         scope.add(node.id)
     elif isinstance(node, ast.ExceptHandler) and node.name:
         scope.add(node.name)
+    elif isinstance(node, (ast.Global, ast.Nonlocal)):
+        declared.update(node.names)
     for child in ast.iter_child_nodes(node):
-        _collect_bindings(child, scope)
+        _collect_bindings(child, scope, declared)
 
 
 def _top_level_statements(body):

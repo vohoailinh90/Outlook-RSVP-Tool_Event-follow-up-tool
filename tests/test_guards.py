@@ -341,6 +341,32 @@ class TestNameResolutionGuard:
             "GUARD IS BLIND: a read before its local binding passed.")
         assert "late_name" in result.stderr
 
+    def test_fails_when_a_local_shadows_a_global_read_before_it(self, sandbox):
+        """A module-level name of the same spelling does not rescue it: the
+        later assignment makes the name local to the whole function, so
+        `shadowed = 0; def f(): print(shadowed); shadowed = 1` is still an
+        UnboundLocalError (Codex review of PR #3). A `global` declaration
+        does rescue it, and must not be flagged."""
+        (sandbox / "rsvp" / "domain" / "_shadow_probe.py").write_text(
+            "shadowed = 0\n"
+            "declared = 0\n"
+            "def f():\n"
+            "    print(shadowed)\n"
+            "    shadowed = 1\n"
+            "    return shadowed\n"
+            "def g():\n"
+            "    global declared\n"
+            "    print(declared)\n"
+            "    declared = 1\n",
+            encoding="utf-8")
+        result = run_guard("check_names_resolve.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: a local read before binding passed because a "
+            "global of the same name exists.")
+        assert "'shadowed'" in result.stderr
+        assert "'declared'" not in result.stderr, (
+            f"FALSE POSITIVE on a global declaration:\n{result.stderr}")
+
     def test_local_imports_and_nested_defs_resolve_in_their_own_scope(
             self, sandbox):
         """The fix must not over-correct: a function's own local import, a
