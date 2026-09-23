@@ -258,25 +258,29 @@ class ScopeWalker(ast.NodeVisitor):
             scope.add(node.id)
 
 
-_NEW_SCOPE = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda,
-              ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
-
-
 def _collect_bindings(node, scope: set[str], declared: set[str]) -> None:
     """Add every name `node` binds in the CURRENT scope to `scope`, without
     descending into nested scopes (def, class, lambda, comprehension) - those
-    bind their own names, apart from the def/class name itself. Names in a
+    bind their own names, apart from the def/class name itself, its header
+    and a comprehension's walrus targets. Names in a
     `global`/`nonlocal` statement are added to `declared`."""
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        scope.add(node.name)
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                         ast.Lambda)):
+        if not isinstance(node, ast.Lambda):
+            scope.add(node.name)
+        # The header - decorators, defaults, bases - runs in THIS scope, so a
+        # walrus there binds here: `def inner(value=(late := 1))` (Codex
+        # review of PR #3). Only the body is a separate scope.
+        for header in _header_expressions(node):
+            _collect_bindings(header, scope, declared)
         return
     if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
-        # Only a walrus target leaks out of a comprehension (PEP 572).
-        for sub in ast.walk(node):
-            if isinstance(sub, ast.NamedExpr):
-                scope.add(sub.target.id)
-        return
-    if isinstance(node, _NEW_SCOPE):
+        # Only a walrus target leaks out of a comprehension (PEP 572), through
+        # nested comprehensions but not through a lambda, which is its own
+        # scope: `[(lambda: (hidden := x))() for x in xs]` binds nothing here
+        # (Codex review of PR #3).
+        for sub in ast.iter_child_nodes(node):
+            _collect_comprehension_walrus(sub, scope, declared)
         return
     if isinstance(node, ast.Import):
         scope.update((a.asname or a.name.split(".")[0]) for a in node.names)
@@ -294,6 +298,30 @@ def _collect_bindings(node, scope: set[str], declared: set[str]) -> None:
         declared.update(node.names)
     for child in ast.iter_child_nodes(node):
         _collect_bindings(child, scope, declared)
+
+
+def _header_expressions(node):
+    """The parts of a def, class or lambda evaluated in the ENCLOSING scope."""
+    if isinstance(node, ast.ClassDef):
+        return [*node.decorator_list, *node.bases,
+                *(k.value for k in node.keywords)]
+    args = node.args
+    return [*getattr(node, "decorator_list", []), *args.defaults,
+            *(d for d in args.kw_defaults if d is not None)]
+
+
+def _collect_comprehension_walrus(node, scope: set[str], declared: set[str]) -> None:
+    if isinstance(node, ast.NamedExpr):
+        scope.add(node.target.id)
+    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                           ast.Lambda)):
+        # A nested def or lambda keeps its own walrus targets; only its header
+        # runs in the comprehension.
+        for header in _header_expressions(node):
+            _collect_comprehension_walrus(header, scope, declared)
+        return
+    for child in ast.iter_child_nodes(node):
+        _collect_comprehension_walrus(child, scope, declared)
 
 
 def _top_level_statements(body):
