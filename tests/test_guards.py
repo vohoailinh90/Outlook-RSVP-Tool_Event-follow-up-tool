@@ -347,7 +347,14 @@ class TestPiiGuard:
             if path.name == "how_to_vote.png":
                 raise subprocess.CalledProcessError(128, ["git", "hash-object"])
             return real_hash(path)
+        real_open = guard.Path.open
+
+        def locked_open(self, *args, **kwargs):
+            if self.name == "how_to_vote.png" and fails == "read":
+                raise PermissionError(13, "used by another process")
+            return real_open(self, *args, **kwargs)
         monkeypatch.setattr(guard.Path, "read_bytes", locked_read)
+        monkeypatch.setattr(guard.Path, "open", locked_open)
         monkeypatch.setattr(guard, "blob_id", locked_hash)
         assert guard.main() == 1
         err = capsys.readouterr().err
@@ -355,6 +362,40 @@ class TestPiiGuard:
                     "hash": "cannot hash its working copy"}[fails]
         assert f"how_to_vote.png: {expected}" in err, err
         assert "a.person" in err, "the guard stopped at the locked binary"
+
+    def test_large_and_opaque_files_are_never_loaded_whole(
+            self, sandbox, monkeypatch, capsys):
+        """Codex review of PR #5: every staged blob and working copy was
+        loaded whole, so a mailbox-sized .pst could exhaust memory before the
+        guard said it needs approval. Opaque formats and files over the scan
+        limit are now judged by blob id, reading only their first bytes."""
+        import importlib.util
+        (sandbox / "archive.pst").write_bytes(b"!BDN" + b"\0" * 4096)
+        (sandbox / "huge.log").write_bytes(b"x" * 4096)
+        subprocess.run(["git", "add", "-A"], cwd=sandbox, check=True)
+        spec = importlib.util.spec_from_file_location(
+            "check_no_pii_sandbox", sandbox / "scripts" / "check_no_pii.py")
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        monkeypatch.setattr(guard, "SCAN_LIMIT", 1024)
+        big = {"archive.pst", "huge.log"}
+        real_read, real_contents = guard.Path.read_bytes, guard.staged_contents
+
+        def read(self):
+            assert self.name not in big, f"{self.name} was read whole"
+            return real_read(self)
+
+        def contents(ids):
+            out = real_contents(ids)
+            assert all(len(b) <= 1024 for b in out.values()), (
+                "a blob over the scan limit was loaded whole")
+            return out
+        monkeypatch.setattr(guard.Path, "read_bytes", read)
+        monkeypatch.setattr(guard, "staged_contents", contents)
+        assert guard.main() == 1
+        err = capsys.readouterr().err
+        assert "archive.pst: tracked binary document" in err, err
+        assert "huge.log: is over the" in err, err
 
     def test_passes_on_an_initialised_submodule(self, sandbox):
         """Codex review of PR #5: a populated submodule is a directory, and

@@ -94,6 +94,12 @@ OPAQUE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".bmp", ".webp",
                    ".msg", ".oft", ".pst", ".ost"}
 ALLOWLIST_FILE = ROOT / ".pii-allowlist"
 
+# Files larger than this are never loaded whole, nor is anything opaque by
+# name: a mailbox-sized .pst could otherwise exhaust memory before the guard
+# said it needs approval (Codex review of PR #5). They are judged by blob id,
+# like any opaque file, after a look at their first bytes.
+SCAN_LIMIT = 16 * 1024 * 1024
+
 
 # Windows tools readily save text as UTF-16, where every ASCII character is
 # followed by a NUL byte and no address pattern can match the raw bytes: a
@@ -166,6 +172,23 @@ def index_blobs() -> tuple[dict[str, str], set[str]]:
         else:
             blobs[name.decode()] = obj.decode()
     return blobs, gitlinks
+
+
+def staged_sizes(ids: set[str]) -> dict[str, int]:
+    """Blob id -> size in bytes, without reading any contents. An id git
+    cannot read is left out."""
+    out = subprocess.run(
+        ["git", "-C", str(ROOT), "--no-replace-objects", "cat-file",
+         "--batch-check"],
+        input="".join(f"{i}\n" for i in sorted(ids)).encode("ascii"),
+        capture_output=True, check=True,
+    ).stdout
+    sizes: dict[str, int] = {}
+    for line in out.splitlines():
+        header = line.split()
+        if len(header) == 3:                 # <id> <type> <size>
+            sizes[header[0].decode()] = int(header[2])
+    return sizes
 
 
 def staged_contents(ids: set[str]) -> dict[str, bytes]:
@@ -268,7 +291,13 @@ def main() -> int:
     try:
         files = tracked_files()
         staged, gitlinks = index_blobs()
-        blobs = staged_contents(set(staged.values()))
+        sizes = staged_sizes(set(staged.values()))
+        # Only what will be scanned is loaded: never an opaque format, never
+        # anything over the scan limit.
+        blobs = staged_contents(
+            {staged[r] for r in staged
+             if sizes.get(staged[r], SCAN_LIMIT + 1) <= SCAN_LIMIT
+             and Path(r).suffix.lower() not in OPAQUE_SUFFIXES})
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         detail = getattr(exc, "stderr", None) or b""
         print(f"no-pii: cannot read the repository: {exc} "
@@ -301,13 +330,64 @@ def main() -> int:
         copies: list[tuple[str, bytes]] = []
         unreadable: list[str] = []
         working_read = False
+        staged_size = sizes.get(staged[rel]) if rel in staged else None
+        if rel in staged and staged_size is None:
+            unreadable.append(f"staged copy (blob {staged[rel]})")
+        try:
+            working_size = path.stat().st_size if path.is_file() else None
+        except OSError:
+            working_size = None
+        too_big = max(working_size or 0, staged_size or 0) > SCAN_LIMIT
+        if too_big or path.suffix.lower() in OPAQUE_SUFFIXES:
+            head = b""
+            if path.exists():
+                try:
+                    with path.open("rb") as f:
+                        head = f.read(len(SQLITE_MAGIC))
+                    working_read = True
+                except OSError as exc:
+                    unreadable.append(f"working copy ({exc})")
+            if unreadable:
+                violations.append(
+                    f"{rel}: cannot read its {' or '.join(unreadable)}, so it "
+                    f"cannot be checked. Close whatever holds it and run again.")
+            if not working_read and rel not in staged:
+                continue
+            opaque += 1
+            if head.startswith(SQLITE_MAGIC):
+                violations.append(
+                    f"{rel}: SQLite database is TRACKED IN GIT. It holds "
+                    f"recipients, responses and contribution amounts. Untrack "
+                    f"it (git rm --cached) and keep it gitignored.")
+                continue
+            what = ("tracked binary document that this check CANNOT read. "
+                    "Personal data in a screenshot is invisible to a text scan."
+                    if path.suffix.lower() in OPAQUE_SUFFIXES else
+                    f"is over the {SCAN_LIMIT // 2**20} MiB scan limit, so this "
+                    f"check does not read it.")
+            current = None
+            if working_read:
+                try:
+                    current = blob_id(path)
+                except subprocess.CalledProcessError as exc:
+                    violations.append(
+                        f"{rel}: cannot hash its working copy ({exc}), so it "
+                        f"cannot be checked. Close whatever holds it and run "
+                        f"again.")
+            if current is not None or rel in staged:
+                problem = approval_problem(rel, current, allowed,
+                                           staged.get(rel))
+                if problem:
+                    violations.append(f"{rel}: {what} {problem}")
+            continue
+
         if path.exists():
             try:
                 copies.append(("", path.read_bytes()))
                 working_read = True
             except OSError as exc:
                 unreadable.append(f"working copy ({exc})")
-        if rel in staged:
+        if rel in staged and staged_size is not None:
             staged_copy = blobs.get(staged[rel])
             if staged_copy is None:
                 unreadable.append(f"staged copy (blob {staged[rel]})")
@@ -359,13 +439,6 @@ def main() -> int:
                 f"pattern here can detect.")
             if len(violations) > before:
                 continue
-
-        if path.suffix.lower() in OPAQUE_SUFFIXES:
-            opaque += 1
-            approval(
-                "tracked binary document that this check CANNOT read. Personal "
-                "data in a screenshot is invisible to a text scan.")
-            continue
 
         texts = [(label, scannable_text(data)) for label, data in copies]
         if any(blob is None for _, blob in texts):
