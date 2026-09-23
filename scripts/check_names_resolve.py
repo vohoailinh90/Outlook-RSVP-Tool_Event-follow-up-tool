@@ -29,18 +29,46 @@ TARGETS = ("rsvp_app.py", "db.py", "history.py", "outlook_com.py", "rsvp/**/*.py
 BUILTINS = set(dir(builtins)) | {"__file__", "__name__", "__doc__", "__package__"}
 
 
+class _Scope:
+    """One enclosing scope during the walk.
+
+    `bound` grows in source order, as the walker passes each binding. `every`
+    is every name the scope binds anywhere (precollected, for functions).
+
+    Code runs in two ways, and the lookup follows it:
+    - The body being walked, a class body and a comprehension run straight
+      away, so they can only see what is `bound` so far. `def f(): print(x);
+      x = 1` is an UnboundLocalError, and the guard reports it.
+    - A nested def or lambda runs LATER, when it is called, so it sees
+      everything its enclosing function binds (`every`). A closure defined
+      above a later `import os` is valid (Codex review of PR #3).
+    """
+
+    def __init__(self, kind: str, every: set[str] | None = None) -> None:
+        self.kind = kind            # "function", "class" or "comprehension"
+        self.bound: set[str] = set()
+        self.every = every if every is not None else self.bound
+
+
 class ScopeWalker(ast.NodeVisitor):
     """Collect names loaded at module scope that the module never binds."""
 
     def __init__(self, module_globals: set[str]) -> None:
         self.globals = module_globals
         self.unresolved: list[tuple[str, int]] = []
-        self.scopes: list[set[str]] = []
+        self.scopes: list[_Scope] = []
 
     # --- scope helpers -------------------------------------------------
     def _bound(self, name: str) -> bool:
-        return (name in self.globals or name in BUILTINS
-                or any(name in s for s in self.scopes))
+        if name in self.globals or name in BUILTINS:
+            return True
+        immediate = True    # still inside code that runs straight away
+        for scope in reversed(self.scopes):
+            if name in (scope.bound if immediate else scope.every):
+                return True
+            if scope.kind == "function":
+                immediate = False   # outer scopes are seen at call time
+        return False
 
     def _bind_target(self, node, scope: set[str]) -> None:
         for n in ast.walk(node):
@@ -48,33 +76,32 @@ class ScopeWalker(ast.NodeVisitor):
                 scope.add(n.id)
 
     def _enter_function(self, node) -> None:
-        scope: set[str] = set()
+        params: set[str] = set()
         args = node.args
         for a in (*args.posonlyargs, *args.args, *args.kwonlyargs):
-            scope.add(a.arg)
+            params.add(a.arg)
         if args.vararg:
-            scope.add(args.vararg.arg)
+            params.add(args.vararg.arg)
         if args.kwarg:
-            scope.add(args.kwarg.arg)
+            params.add(args.kwarg.arg)
         # defaults evaluate in the ENCLOSING scope
         for d in (*args.defaults, *[d for d in args.kw_defaults if d]):
             self.visit(d)
         # A Lambda's body is a single expression; a def's is a list.
         body = node.body if isinstance(node.body, list) else [node.body]
-        # A name bound ANYWHERE in a function is local to the whole function,
-        # so collect every binding before walking the body. Walking in source
-        # order instead flagged a closure defined above a later local import
-        # (`def inner(): return os.sep` then `import os`), which Python runs
-        # fine (Codex review of PR #3).
+        # Every name the function binds anywhere, for closures nested in it.
+        every = set(params)
         for stmt in body:
-            _collect_bindings(stmt, scope)
+            _collect_bindings(stmt, every)
+        scope = _Scope("function", every)
+        scope.bound.update(params)
         self.scopes.append(scope)
         for stmt in body:
             self.visit(stmt)
         self.scopes.pop()
 
     def _current_scope(self) -> set[str]:
-        return self.scopes[-1] if self.scopes else self.globals
+        return self.scopes[-1].bound if self.scopes else self.globals
 
     # --- visitors ------------------------------------------------------
     def visit_Import(self, node):
@@ -103,14 +130,15 @@ class ScopeWalker(ast.NodeVisitor):
         for base in node.bases:
             self.visit(base)
         self._current_scope().add(node.name)
-        self.scopes.append(set())
+        self.scopes.append(_Scope("class"))
         for stmt in node.body:
             self.visit(stmt)
         self.scopes.pop()
 
     def _comprehension(self, node):
-        scope: set[str] = set()
-        self.scopes.append(scope)
+        comp = _Scope("comprehension")
+        scope = comp.bound
+        self.scopes.append(comp)
         for gen in node.generators:
             self.visit(gen.iter)
             self._bind_target(gen.target, scope)
@@ -127,25 +155,25 @@ class ScopeWalker(ast.NodeVisitor):
 
     def visit_ExceptHandler(self, node):
         if node.name and self.scopes:
-            self.scopes[-1].add(node.name)
+            self.scopes[-1].bound.add(node.name)
         elif node.name:
             self.globals.add(node.name)
         self.generic_visit(node)
 
     def visit_Assign(self, node):
         self.visit(node.value)
-        scope = self.scopes[-1] if self.scopes else self.globals
+        scope = self._current_scope()
         for t in node.targets:
             self._bind_target(t, scope)
 
     def visit_AugAssign(self, node):
         self.visit(node.value)
-        scope = self.scopes[-1] if self.scopes else self.globals
+        scope = self._current_scope()
         self._bind_target(node.target, scope)
 
     def visit_For(self, node):
         self.visit(node.iter)
-        scope = self.scopes[-1] if self.scopes else self.globals
+        scope = self._current_scope()
         self._bind_target(node.target, scope)
         for stmt in [*node.body, *node.orelse]:
             self.visit(stmt)
@@ -153,7 +181,7 @@ class ScopeWalker(ast.NodeVisitor):
     visit_AsyncFor = visit_For
 
     def visit_With(self, node):
-        scope = self.scopes[-1] if self.scopes else self.globals
+        scope = self._current_scope()
         for item in node.items:
             self.visit(item.context_expr)
             if item.optional_vars is not None:
@@ -173,7 +201,7 @@ class ScopeWalker(ast.NodeVisitor):
         if isinstance(node.ctx, ast.Load) and not self._bound(node.id):
             self.unresolved.append((node.id, node.lineno))
         elif isinstance(node.ctx, (ast.Store, ast.Del)):
-            scope = self.scopes[-1] if self.scopes else self.globals
+            scope = self._current_scope()
             scope.add(node.id)
 
 

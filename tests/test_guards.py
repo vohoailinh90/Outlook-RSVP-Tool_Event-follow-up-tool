@@ -325,6 +325,22 @@ class TestNameResolutionGuard:
         )
         assert "win32com" in result.stderr
 
+    def test_fails_on_a_read_before_its_local_binding(self, sandbox):
+        """Precollecting a function's bindings (for closures) must not let a
+        read in the SAME body see a later assignment: `print(x)` then `x = 1`
+        is an UnboundLocalError. Codex review of PR #3 caught the guard
+        briefly going blind to this."""
+        (sandbox / "rsvp" / "domain" / "_unbound_probe.py").write_text(
+            "def f():\n"
+            "    print(late_name)\n"
+            "    late_name = 1\n"
+            "    return late_name\n",
+            encoding="utf-8")
+        result = run_guard("check_names_resolve.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: a read before its local binding passed.")
+        assert "late_name" in result.stderr
+
     def test_local_imports_and_nested_defs_resolve_in_their_own_scope(
             self, sandbox):
         """The fix must not over-correct: a function's own local import, a
