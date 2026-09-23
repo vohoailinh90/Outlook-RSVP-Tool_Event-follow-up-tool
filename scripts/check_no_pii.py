@@ -17,6 +17,9 @@ fine, that is the point of the ignore):
      so renaming rsvp_data.db to data.bin does not evade it).
   2. No corporate email address appears in a tracked text file.
 
+Both the working copy and the staged copy of each file are checked, because
+either one can end up in the next commit.
+
 Exit 0 clean, 1 violation found, 2 the check could not run.
 """
 from __future__ import annotations
@@ -158,9 +161,32 @@ def index_blobs() -> dict[str, str]:
     return blobs
 
 
-def approval_problem(rel: str, path: Path, allowed: dict[str, str | None],
+def unstaged_paths() -> set[str]:
+    """Paths whose working copy differs from the staged copy, or is missing.
+
+    git applies its own clean filters before comparing, so a CRLF checkout on
+    Windows does not count as a difference."""
+    out = subprocess.run(
+        ["git", "-C", str(ROOT), "diff-files", "--name-only", "-z"],
+        capture_output=True, check=True,
+    ).stdout
+    return {n.decode() for n in out.split(b"\0") if n}
+
+
+def staged_bytes(blob: str) -> bytes:
+    return subprocess.run(
+        ["git", "-C", str(ROOT), "cat-file", "blob", blob],
+        capture_output=True, check=True,
+    ).stdout
+
+
+def approval_problem(rel: str, current: str | None,
+                     allowed: dict[str, str | None],
                      staged: str | None) -> str | None:
     """None when a human approved exactly these bytes, else what to do.
+
+    `current` is the working copy's blob id, or None when it has no working
+    copy and only the staged one will be committed.
 
     An approval names the CONTENTS, not only the path. By path alone, an
     approved screenshot regenerated in place with real recipients in it still
@@ -170,24 +196,27 @@ def approval_problem(rel: str, path: Path, allowed: dict[str, str | None],
     working tree passed a changed image that was staged and then had its
     working copy restored from HEAD - the commit would carry the unreviewed
     blob (Codex review of PR #4)."""
-    current = blob_id(path)
-    copies = f"working copy blob={current}"
-    if staged is not None and staged != current:
-        copies += f", staged blob={staged}"
-    if rel not in allowed:
+    ids = {i for i in (current, staged) if i is not None}
+    if current is None:
+        copies = f"staged blob={staged}"
+    else:
+        copies = f"working copy blob={current}"
         if staged is not None and staged != current:
+            copies += f", staged blob={staged}"
+    if rel not in allowed:
+        if len(ids) > 1:
             return (f"Its working copy and staged copy differ ({copies}). "
                     f"Stage the version you mean to commit, then review it.")
         return (f"Open it, confirm it holds no real names/addresses/amounts or "
                 f"corporate classification markings, then add "
-                f"`{rel}  blob={current}  # <who checked, what they saw>` to "
-                f".pii-allowlist - or untrack it.")
+                f"`{rel}  blob={next(iter(ids))}  # <who checked, what they saw>` "
+                f"to .pii-allowlist - or untrack it.")
     approved = allowed[rel]
     if approved is None:
         return (f"It is in .pii-allowlist with no blob= digest, so the approval "
                 f"is not tied to the bytes a human saw. Open it again and put "
                 f"the blob= of the reviewed copy on its line ({copies}).")
-    if current != approved or (staged is not None and staged != approved):
+    if ids != {approved}:
         return (f"It CHANGED since it was approved (approved blob={approved}, "
                 f"{copies}). Open it again, then update blob= on its line.")
     return None
@@ -213,6 +242,7 @@ def main() -> int:
     try:
         files = tracked_files()
         staged = index_blobs()
+        differs = unstaged_paths()
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         print(f"no-pii: cannot list tracked files: {exc}", file=sys.stderr)
         return 2
@@ -223,75 +253,81 @@ def main() -> int:
     opaque = 0
 
     for path in files:
-        if not path.exists():
-            continue
+        rel = path.relative_to(ROOT).as_posix()
+        # Every copy the next commit could carry: the working copy, which
+        # `git add -A` would stage, and the staged copy when it differs. Reading
+        # only the working copy passed an address staged behind a clean file,
+        # and skipped a staged file whose working copy was deleted (Codex
+        # review of PR #1).
+        copies: list[tuple[str, bytes]] = []
         try:
-            head = path.open("rb").read(16)
-        except OSError:
+            if path.exists():
+                copies.append(("", path.read_bytes()))
+            if rel in staged and (rel in differs or not copies):
+                copies.append((" (staged copy)", staged_bytes(staged[rel])))
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        if not copies:
             continue
 
-        if head.startswith(SQLITE_MAGIC):
+        def approval(what: str) -> None:
+            current = blob_id(path) if path.exists() else None
+            problem = approval_problem(rel, current, allowed, staged.get(rel))
+            if problem:
+                violations.append(f"{rel}: {what} {problem}")
+
+        db_copy = next((label for label, data in copies
+                        if data.startswith(SQLITE_MAGIC)), None)
+        if db_copy is not None:
             violations.append(
-                f"{path.relative_to(ROOT)}: SQLite database is TRACKED IN GIT. "
+                f"{rel}{db_copy}: SQLite database is TRACKED IN GIT. "
                 f"It holds recipients, responses and contribution amounts. "
                 f"Untrack it (git rm --cached) and keep it gitignored."
             )
             continue
 
         if path.suffix.lower() in ROSTER_SUFFIXES:
-            rel = path.relative_to(ROOT).as_posix()
-            problem = approval_problem(rel, path, allowed, staged.get(rel))
-            if problem:
-                violations.append(
-                    f"{rel}: tracked {path.suffix} file. Rosters hold names, and a "
-                    f"name is personal data even with no address next to it - which "
-                    f"no pattern here can detect. {problem}"
-                )
+            before = len(violations)
+            approval(
+                f"tracked {path.suffix} file. Rosters hold names, and a name is "
+                f"personal data even with no address next to it - which no "
+                f"pattern here can detect.")
+            if len(violations) > before:
                 continue
 
         if path.suffix.lower() in OPAQUE_SUFFIXES:
             opaque += 1
-            rel = path.relative_to(ROOT).as_posix()
-            problem = approval_problem(rel, path, allowed, staged.get(rel))
-            if problem:
-                violations.append(
-                    f"{rel}: tracked binary document that this check CANNOT read. "
-                    f"Personal data in a screenshot is invisible to a text scan. "
-                    f"{problem}"
-                )
+            approval(
+                "tracked binary document that this check CANNOT read. Personal "
+                "data in a screenshot is invisible to a text scan.")
             continue
 
-        try:
-            blob = scannable_text(path.read_bytes())
-        except OSError:
-            continue
-        if blob is None:
+        texts = [(label, scannable_text(data)) for label, data in copies]
+        if any(blob is None for _, blob in texts):
             opaque += 1
-            rel = path.relative_to(ROOT).as_posix()
-            problem = approval_problem(rel, path, allowed, staged.get(rel))
-            if problem:
-                violations.append(
-                    f"{rel}: holds NUL bytes, so it is binary or UTF-16 without "
-                    f"a byte-order mark, and this check CANNOT read it (re-saving "
-                    f"it as UTF-8 also works). {problem}"
-                )
+            approval(
+                "holds NUL bytes, so it is binary or UTF-16 without a byte-order "
+                "mark, and this check CANNOT read it (re-saving it as UTF-8 also "
+                "works).")
             continue
         scanned += 1
-        for m in EMAIL.finditer(blob):
-            addr = m.group(0)
-            if addr.lower() in ALLOWED_ADDRESSES or reserved_domain(m.group(1)):
-                continue
-            line = blob[: m.start()].count(b"\n") + 1
-            violations.append(
-                f"{path.relative_to(ROOT)}:{line}: real email address "
-                f"{addr.decode(errors='replace')!r} in a tracked file"
-            )
-        for m in OBFUSCATED.finditer(blob):
-            line = blob[: m.start()].count(b"\n") + 1
-            violations.append(
-                f"{path.relative_to(ROOT)}:{line}: obfuscated email address "
-                f"{m.group(0).decode(errors='replace').strip()!r} in a tracked file"
-            )
+        seen: set[tuple[str, bytes]] = set()
+        for label, blob in texts:
+            for kind, pattern in (("real", EMAIL), ("obfuscated", OBFUSCATED)):
+                for m in pattern.finditer(blob):
+                    if kind == "real" and (
+                            m.group(0).lower() in ALLOWED_ADDRESSES
+                            or reserved_domain(m.group(1))):
+                        continue
+                    found = m.group(0).strip()
+                    if (kind, found) in seen:
+                        continue
+                    seen.add((kind, found))
+                    line = blob[: m.start()].count(b"\n") + 1
+                    violations.append(
+                        f"{rel}{label}:{line}: {kind} email address "
+                        f"{found.decode(errors='replace')!r} in a tracked file"
+                    )
 
     if not scanned:
         print("no-pii: FAIL - scanned no text files; the guard has drifted",

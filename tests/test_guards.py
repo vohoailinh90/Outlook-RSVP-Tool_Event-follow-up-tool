@@ -204,6 +204,44 @@ class TestPiiGuard:
             "working copy and passed.")
         assert "staged blob=" in result.stderr
 
+    def test_fails_on_an_address_staged_behind_a_clean_text_file(self, sandbox):
+        """Codex review of PR #1: only binary and roster files compared the
+        staged copy. A README.md with an address staged and then restored in
+        the working tree passed, and the next commit would publish it."""
+        readme = sandbox / "README.md"
+        clean = readme.read_bytes()
+        readme.write_bytes(clean + f"Contact a.person{'@'}company.io\n".encode())
+        subprocess.run(["git", "add", "README.md"], cwd=sandbox, check=True)
+        readme.write_bytes(clean)
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: an address was staged behind a clean working "
+            "copy and passed.")
+        assert "README.md" in result.stderr
+        assert "staged copy" in result.stderr
+
+    def test_fails_on_a_staged_file_whose_working_copy_is_gone(self, sandbox):
+        """A staged file with no working copy was skipped entirely, so a
+        database staged and then deleted from disk passed."""
+        db = sandbox / "notes.bin"
+        db.write_bytes(b"SQLite format 3\x00" + b"\x00" * 64)
+        subprocess.run(["git", "add", "notes.bin"], cwd=sandbox, check=True)
+        db.unlink()
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: a staged database with no working copy passed.")
+        assert "notes.bin" in result.stderr
+
+    def test_reports_an_address_once_when_both_copies_hold_it(self, sandbox):
+        (sandbox / "roster.txt").write_text(
+            f"Example Person <a.person{'@'}company.io>\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=sandbox, check=True)
+        with (sandbox / "roster.txt").open("a", encoding="utf-8") as f:
+            f.write("unstaged edit\n")
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1
+        assert result.stderr.count("a.person") == 1, result.stderr
+
     def test_fails_on_an_allowlist_entry_without_a_digest(self, sandbox):
         allowlist = sandbox / ".pii-allowlist"
         text = allowlist.read_text(encoding="utf-8")
