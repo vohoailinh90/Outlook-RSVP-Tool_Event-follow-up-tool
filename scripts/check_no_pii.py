@@ -213,10 +213,12 @@ def staged_head(blob: str, n: int) -> bytes | None:
 
 class StagedBlobs:
     """Reads staged blobs one at a time, on demand, through one long-lived
-    `git cat-file --batch` process. At most one blob is held in memory: all
-    blobs read up front in a single call needed their total size, which
-    for many blobs just under SCAN_LIMIT ran to gigabytes (Codex review of
-    PR #5).
+    `git cat-file --batch` process. Memory is bounded per file, not by the
+    size of the repository: at most one file's working copy and staged copy,
+    each no larger than SCAN_LIMIT, plus a decoded copy for a BOM-marked
+    file. Reading every blob up front in one call needed their total size,
+    which for many blobs just under SCAN_LIMIT ran to gigabytes (Codex
+    review of PR #5).
 
     Staged and working copies are compared by these raw bytes, never by blob
     id. Each earlier shortcut let a staged address through (Codex review of
