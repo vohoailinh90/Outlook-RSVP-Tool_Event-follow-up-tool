@@ -569,12 +569,67 @@ class TestPiiGuard:
         assert result.returncode == 1
         assert result.stderr.count("a.person") == 1, result.stderr
 
+    def test_approval_must_be_staged_not_only_on_disk(self, sandbox):
+        """Codex review of PR #1: .pii-allowlist itself was read from the
+        working copy only. A changed image staged with its approval edited
+        on disk but not staged passed, yet the commit would carry the image
+        under the OLD approval, which does not cover it."""
+        image = sandbox / "how_to_vote.png"
+        image.write_bytes(image.read_bytes() + b"\x00regenerated")
+        subprocess.run(["git", "add", "how_to_vote.png"], cwd=sandbox, check=True)
+        new_blob = subprocess.run(
+            ["git", "rev-parse", ":how_to_vote.png"], cwd=sandbox, check=True,
+            capture_output=True, text=True, encoding="utf-8").stdout.strip()
+        allowlist = sandbox / ".pii-allowlist"
+        text = allowlist.read_text(encoding="utf-8")
+        approved = re.sub(r"(how_to_vote\.png\s+blob=)\w+",
+                          lambda m: m.group(1) + new_blob, text)
+        assert approved != text, "mutation did not apply - allowlist moved"
+        allowlist.write_text(approved, encoding="utf-8")   # NOT staged
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: an approval that exists only on disk let a "
+            "changed image through.")
+        assert ".pii-allowlist" in result.stderr
+
+    def test_passes_when_the_approval_is_staged_too(self, sandbox):
+        image = sandbox / "how_to_vote.png"
+        image.write_bytes(image.read_bytes() + b"\x00regenerated")
+        subprocess.run(["git", "add", "how_to_vote.png"], cwd=sandbox, check=True)
+        new_blob = subprocess.run(
+            ["git", "rev-parse", ":how_to_vote.png"], cwd=sandbox, check=True,
+            capture_output=True, text=True, encoding="utf-8").stdout.strip()
+        allowlist = sandbox / ".pii-allowlist"
+        allowlist.write_text(re.sub(
+            r"(how_to_vote\.png\s+blob=)\w+", lambda m: m.group(1) + new_blob,
+            allowlist.read_text(encoding="utf-8")), encoding="utf-8")
+        subprocess.run(["git", "add", ".pii-allowlist"], cwd=sandbox, check=True)
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 0, (
+            f"FALSE POSITIVE on a staged approval:\n{result.stderr}")
+
+    def test_fails_on_an_unreviewed_svg(self, sandbox):
+        """Codex review of PR #1: an SVG can draw names and amounts as text
+        or embed a raster screenshot, with no address for the scan to find.
+        It must be reviewed by a human like any other image."""
+        (sandbox / "chart.svg").write_text(
+            '<svg xmlns="http://www.w3.org/2000/svg"><text>Example Person '
+            '3000 JPY</text></svg>\n', encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=sandbox, check=True)
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: an unreviewed SVG passed as plain text.")
+        assert "chart.svg" in result.stderr
+
     def test_fails_on_an_allowlist_entry_without_a_digest(self, sandbox):
         allowlist = sandbox / ".pii-allowlist"
         text = allowlist.read_text(encoding="utf-8")
         unbound = re.sub(r"(how_to_vote\.png)\s+blob=\w+", r"\1", text)
         assert unbound != text, "mutation did not apply - allowlist moved"
         allowlist.write_text(unbound, encoding="utf-8")
+        # Staged, so the working and staged allowlists agree and this tests
+        # the missing digest, not the disagreement check.
+        subprocess.run(["git", "add", ".pii-allowlist"], cwd=sandbox, check=True)
         result = run_guard("check_no_pii.py", sandbox)
         assert result.returncode == 1, (
             "GUARD IS BLIND: an approval not tied to any contents passed.")

@@ -91,7 +91,11 @@ ROSTER_SUFFIXES = {".csv", ".tsv"}
 # (Codex review of PR #1).
 OPAQUE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".bmp", ".webp",
                    ".pdf", ".xlsx", ".xls", ".docx", ".doc", ".pptx", ".zip",
-                   ".msg", ".oft", ".pst", ".ost"}
+                   ".msg", ".oft", ".pst", ".ost",
+                   # An SVG can draw names and amounts as text, or embed a
+                   # base64 screenshot, with no address for the scan to find
+                   # (Codex review of PR #1).
+                   ".svg"}
 ALLOWLIST_FILE = ROOT / ".pii-allowlist"
 
 # Files larger than this are never loaded whole, nor is anything opaque by
@@ -125,13 +129,11 @@ def scannable_text(blob: bytes) -> bytes | None:
     return None if b"\0" in blob else blob
 
 
-def load_allowlist() -> dict[str, str | None]:
+def parse_allowlist(text: str) -> dict[str, str | None]:
     """Path -> the git blob id a human approved, or None when the line
     carries no `blob=`."""
-    if not ALLOWLIST_FILE.exists():
-        return {}
     entries: dict[str, str | None] = {}
-    for raw in ALLOWLIST_FILE.read_text(encoding="utf-8").splitlines():
+    for raw in text.splitlines():
         line = raw.split("#", 1)[0].strip()
         if not line:
             continue
@@ -141,6 +143,29 @@ def load_allowlist() -> dict[str, str | None]:
         else:
             entries[line] = None
     return entries
+
+
+def load_allowlist(staged_text: str | None
+                   ) -> tuple[dict[str, str | None], set[str]]:
+    """The approvals both copies of .pii-allowlist agree on, and the paths
+    they disagree about.
+
+    The allowlist is policy input, and the next commit carries its STAGED
+    copy. Reading only the working copy let an approval edited on disk but
+    not staged clear a changed image that the commit would carry under the
+    old approval (Codex review of PR #1). An entry counts only when the two
+    copies say the same thing; with no staged copy, the working copy is what
+    `git add -A` would stage."""
+    working = (parse_allowlist(ALLOWLIST_FILE.read_text(encoding="utf-8"))
+               if ALLOWLIST_FILE.exists() else {})
+    if staged_text is None:
+        return working, set()
+    staged = parse_allowlist(staged_text)
+    missing = object()
+    conflicts = {p for p in working.keys() | staged.keys()
+                 if working.get(p, missing) != staged.get(p, missing)}
+    agreed = {p: v for p, v in working.items() if p not in conflicts}
+    return agreed, conflicts
 
 
 def blob_id(path: Path) -> str:
@@ -338,12 +363,32 @@ def main() -> int:
               f"{detail.decode(errors='replace').strip()}", file=sys.stderr)
         return 2
 
-    allowed = load_allowlist()
     violations: list[str] = []
+    reader = StagedBlobs()
+    allowlist_rel = ALLOWLIST_FILE.relative_to(ROOT).as_posix()
+    staged_allowlist = None
+    if allowlist_rel in staged:
+        data = reader.read(staged[allowlist_rel])
+        if data is None:
+            violations.append(
+                f"{allowlist_rel}: cannot read its staged copy, so no "
+                f"approval can be trusted.")
+            data = b""
+        staged_allowlist = data.decode("utf-8", errors="replace")
+    allowed, conflicts = load_allowlist(staged_allowlist)
+    # With no working copy, "stage it" would stage the deletion and drop
+    # every approval, so point at restoring it instead.
+    remedy = (f"Stage {allowlist_rel}." if ALLOWLIST_FILE.exists() else
+              f"It is missing on disk: restore it with "
+              f"`git checkout -- {allowlist_rel}`.")
+    for rel in sorted(conflicts):
+        violations.append(
+            f"{rel}: its {allowlist_rel} entry differs between the working "
+            f"copy and the staged copy, so the commit would carry a different "
+            f"approval than the one on disk. {remedy}")
     scanned = 0
     opaque = 0
 
-    reader = StagedBlobs()
     for path in files:
         rel = path.relative_to(ROOT).as_posix()
         # A submodule holds a commit id, not contents, and once initialised it
