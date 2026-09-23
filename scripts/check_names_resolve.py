@@ -59,9 +59,16 @@ class ScopeWalker(ast.NodeVisitor):
         # defaults evaluate in the ENCLOSING scope
         for d in (*args.defaults, *[d for d in args.kw_defaults if d]):
             self.visit(d)
-        self.scopes.append(scope)
         # A Lambda's body is a single expression; a def's is a list.
         body = node.body if isinstance(node.body, list) else [node.body]
+        # A name bound ANYWHERE in a function is local to the whole function,
+        # so collect every binding before walking the body. Walking in source
+        # order instead flagged a closure defined above a later local import
+        # (`def inner(): return os.sep` then `import os`), which Python runs
+        # fine (Codex review of PR #3).
+        for stmt in body:
+            _collect_bindings(stmt, scope)
+        self.scopes.append(scope)
         for stmt in body:
             self.visit(stmt)
         self.scopes.pop()
@@ -170,6 +177,31 @@ class ScopeWalker(ast.NodeVisitor):
             scope.add(node.id)
 
 
+_NEW_SCOPE = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda,
+              ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+def _collect_bindings(node, scope: set[str]) -> None:
+    """Add every name `node` binds in the CURRENT scope to `scope`, without
+    descending into nested scopes (def, class, lambda, comprehension) - those
+    bind their own names, apart from the def/class name itself."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        scope.add(node.name)
+        return
+    if isinstance(node, _NEW_SCOPE):
+        return
+    if isinstance(node, ast.Import):
+        scope.update((a.asname or a.name.split(".")[0]) for a in node.names)
+    elif isinstance(node, ast.ImportFrom):
+        scope.update((a.asname or a.name) for a in node.names)
+    elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+        scope.add(node.id)
+    elif isinstance(node, ast.ExceptHandler) and node.name:
+        scope.add(node.name)
+    for child in ast.iter_child_nodes(node):
+        _collect_bindings(child, scope)
+
+
 def _top_level_statements(body):
     """Module-level statements, descending into if/try/with/for blocks but
     never into a def or class body - those are separate scopes."""
@@ -181,6 +213,9 @@ def _top_level_statements(body):
             yield from _top_level_statements(getattr(node, field, None) or [])
         for handler in getattr(node, "handlers", None) or []:
             yield from _top_level_statements(handler.body)
+        # `match` keeps its suites under .cases (Codex review of PR #3).
+        for case in getattr(node, "cases", None) or []:
+            yield from _top_level_statements(case.body)
 
 
 def module_globals(tree: ast.Module) -> set[str]:

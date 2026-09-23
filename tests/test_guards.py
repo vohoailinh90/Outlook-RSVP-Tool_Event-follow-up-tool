@@ -341,7 +341,20 @@ class TestNameResolutionGuard:
             "        return inner(n - 1) if n else os.sep + p.sep\n"
             "    class Local:\n"
             "        pass\n"
-            "    return inner(1), Local, json\n",
+            "    return inner(1), Local, json, closure(), late_os\n"
+            # A closure defined ABOVE the import it uses: Python resolves it
+            # at call time, so it is valid (Codex review of PR #3).
+            "def closure():\n"
+            "    def use():\n"
+            "        return sys.sep\n"
+            "    import os as sys\n"
+            "    return use()\n"
+            # A name bound only inside a top-level `match` case.
+            "match 1:\n"
+            "    case 1:\n"
+            "        import os as late_os\n"
+            "    case _:\n"
+            "        late_os = None\n",
             encoding="utf-8")
         result = run_guard("check_names_resolve.py", sandbox)
         assert result.returncode == 0, (
