@@ -390,12 +390,52 @@ class TestPiiGuard:
             assert all(len(b) <= 1024 for b in out.values()), (
                 "a blob over the scan limit was loaded whole")
             return out
+        real_open = guard.Path.open
+
+        def bounded_open(self, *args, **kwargs):
+            f = real_open(self, *args, **kwargs)
+            if self.name not in big:
+                return f
+            real_read_n = f.read
+
+            def read_n(n=-1):
+                assert 0 <= n <= 1024, f"{self.name} was read whole"
+                return real_read_n(n)
+            f.read = read_n
+            return f
         monkeypatch.setattr(guard.Path, "read_bytes", read)
+        monkeypatch.setattr(guard.Path, "open", bounded_open)
         monkeypatch.setattr(guard, "staged_contents", contents)
         assert guard.main() == 1
         err = capsys.readouterr().err
         assert "archive.pst: tracked binary document" in err, err
         assert "huge.log: is over the" in err, err
+
+    def test_names_a_database_staged_under_an_opaque_name(self, sandbox):
+        """Review of ca9b106: opaque files are judged by their first bytes,
+        and only the working copy's were read, so a database staged under a
+        .pst behind a clean working copy was reported as an unapproved
+        binary rather than as the database it is."""
+        pst = sandbox / "archive.pst"
+        pst.write_bytes(b"SQLite format 3\x00" + b"\x00" * 64)
+        subprocess.run(["git", "add", "archive.pst"], cwd=sandbox, check=True)
+        pst.write_bytes(b"!BDN" + b"\x00" * 64)
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1
+        assert "archive.pst (staged copy): SQLite database" in result.stderr, (
+            result.stderr)
+
+    def test_an_unreadable_staged_binary_is_not_offered_for_approval(
+            self, sandbox):
+        """Review of ca9b106: a staged blob git could not read was reported,
+        and then a human was told to approve that same unreadable blob."""
+        subprocess.run(["git", "update-index", "--add", "--info-only",
+                        "--cacheinfo", f"100644,{'2' * 40},archive.pst"],
+                       cwd=sandbox, check=True)
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1
+        assert "archive.pst: cannot read its staged copy" in result.stderr
+        assert f"blob={'2' * 40}  #" not in result.stderr, result.stderr
 
     def test_passes_on_an_initialised_submodule(self, sandbox):
         """Codex review of PR #5: a populated submodule is a directory, and

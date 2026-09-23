@@ -191,6 +191,26 @@ def staged_sizes(ids: set[str]) -> dict[str, int]:
     return sizes
 
 
+def staged_head(blob: str, n: int) -> bytes | None:
+    """The first n bytes of a staged blob, or None when git cannot read it.
+    Only those bytes are read: the process is stopped once they arrive, so
+    a mailbox-sized blob is never loaded to learn it is a database."""
+    proc = subprocess.Popen(
+        ["git", "-C", str(ROOT), "--no-replace-objects", "cat-file", "blob",
+         blob], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    head = b""
+    try:
+        head = proc.stdout.read(n)
+    finally:
+        proc.kill()             # no-op if git already exited
+        proc.stdout.close()
+        code = proc.wait()
+    # A blob shorter than n ends before the kill, so its exit code is real.
+    if len(head) < n and code != 0:
+        return None
+    return head
+
+
 def staged_contents(ids: set[str]) -> dict[str, bytes]:
     """Blob id -> the exact bytes the next commit will carry, read in one
     `git cat-file --batch` call. An id git cannot read is left out.
@@ -351,20 +371,42 @@ def main() -> int:
                 violations.append(
                     f"{rel}: cannot read its {' or '.join(unreadable)}, so it "
                     f"cannot be checked. Close whatever holds it and run again.")
-            if not working_read and rel not in staged:
+            # The staged copy's first bytes are sniffed as well: a database
+            # staged under an opaque name behind a clean working copy was
+            # otherwise reported only as an unapproved binary, never as the
+            # database it is (review of ca9b106).
+            staged_ok = rel in staged and staged_size is not None
+            staged_first = (staged_head(staged[rel], len(SQLITE_MAGIC))
+                            if staged_ok else None)
+            if staged_ok and staged_first is None:
+                staged_ok = False
+                violations.append(
+                    f"{rel}: cannot read its staged copy (blob {staged[rel]}), "
+                    f"so it cannot be checked.")
+            if not working_read and not staged_ok:
                 continue
             opaque += 1
-            if head.startswith(SQLITE_MAGIC):
+            db_copy = next((label for label, data in
+                            (("", head), (" (staged copy)", staged_first))
+                            if data and data.startswith(SQLITE_MAGIC)), None)
+            if db_copy is not None:
                 violations.append(
-                    f"{rel}: SQLite database is TRACKED IN GIT. It holds "
-                    f"recipients, responses and contribution amounts. Untrack "
-                    f"it (git rm --cached) and keep it gitignored.")
+                    f"{rel}{db_copy}: SQLite database is TRACKED IN GIT. It "
+                    f"holds recipients, responses and contribution amounts. "
+                    f"Untrack it (git rm --cached) and keep it gitignored.")
                 continue
-            what = ("tracked binary document that this check CANNOT read. "
-                    "Personal data in a screenshot is invisible to a text scan."
-                    if path.suffix.lower() in OPAQUE_SUFFIXES else
-                    f"is over the {SCAN_LIMIT // 2**20} MiB scan limit, so this "
-                    f"check does not read it.")
+            suffix = path.suffix.lower()
+            if suffix in OPAQUE_SUFFIXES:
+                what = ("tracked binary document that this check CANNOT read. "
+                        "Personal data in a screenshot is invisible to a text "
+                        "scan.")
+            elif suffix in ROSTER_SUFFIXES:
+                what = (f"tracked {path.suffix} file. Rosters hold names, and a "
+                        f"name is personal data even with no address next to "
+                        f"it - which no pattern here can detect.")
+            else:
+                what = (f"is over the {SCAN_LIMIT // 2**20} MiB scan limit, so "
+                        f"this check does not read it.")
             current = None
             if working_read:
                 try:
@@ -374,9 +416,12 @@ def main() -> int:
                         f"{rel}: cannot hash its working copy ({exc}), so it "
                         f"cannot be checked. Close whatever holds it and run "
                         f"again.")
-            if current is not None or rel in staged:
-                problem = approval_problem(rel, current, allowed,
-                                           staged.get(rel))
+            # A staged copy git cannot read is already a violation; asking a
+            # human to approve its id would ask for the impossible (review of
+            # ca9b106).
+            staged_id = staged[rel] if staged_ok else None
+            if current is not None or staged_id is not None:
+                problem = approval_problem(rel, current, allowed, staged_id)
                 if problem:
                     violations.append(f"{rel}: {what} {problem}")
             continue
@@ -467,13 +512,15 @@ def main() -> int:
                         f"{found.decode(errors='replace')!r} in a tracked file"
                     )
 
+    # Printed first: returning on the drift check swallowed every violation
+    # already found (review of ca9b106).
+    for v in violations:
+        print(f"no-pii: {v}", file=sys.stderr)
     if not scanned:
         print("no-pii: FAIL - scanned no text files; the guard has drifted",
               file=sys.stderr)
         return 1
 
-    for v in violations:
-        print(f"no-pii: {v}", file=sys.stderr)
     if violations:
         print(f"\nno-pii: FAIL - {len(violations)} violation(s)", file=sys.stderr)
         return 1
