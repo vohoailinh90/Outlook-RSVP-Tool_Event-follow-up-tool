@@ -156,21 +156,45 @@ def index_blobs() -> dict[str, str]:
     blobs: dict[str, str] = {}
     for entry in out.split(b"\0"):
         meta, _, name = entry.partition(b"\t")
-        if name:
-            blobs[name.decode()] = meta.split()[1].decode()
+        mode, obj = meta.split()[:2] if name else (b"", b"")
+        # A submodule (gitlink) records a commit, not file contents.
+        if name and mode != b"160000":
+            blobs[name.decode()] = obj.decode()
     return blobs
 
 
-def unstaged_paths() -> set[str]:
-    """Paths whose working copy differs from the staged copy, or is missing.
+def working_blobs(paths: list[str]) -> dict[str, str]:
+    """Path -> blob id of each working copy that exists, in one git call.
 
-    git applies its own clean filters before comparing, so a CRLF checkout on
-    Windows does not count as a difference."""
-    out = subprocess.run(
-        ["git", "-C", str(ROOT), "diff-files", "--name-only", "-z"],
-        capture_output=True, check=True,
-    ).stdout
-    return {n.decode() for n in out.split(b"\0") if n}
+    Compared against the index by id rather than asked of `git diff-files`,
+    which trusts the index flags: a path marked assume-unchanged or
+    skip-worktree is omitted, so an address staged behind a clean working copy
+    passed (Codex review of PR #5). hash-object reads the file itself. git's
+    clean filters apply, so a CRLF checkout on Windows hashes the same as the
+    committed file."""
+    present = [r for r in paths if (ROOT / r).is_file()]
+    if not present:
+        return {}
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(ROOT), "hash-object", "--stdin-paths"],
+            input="\n".join(present).encode("utf-8") + b"\n",
+            capture_output=True, check=True,
+        ).stdout.decode("ascii").split()
+        return dict(zip(present, out))
+    except subprocess.CalledProcessError:
+        pass
+    # One unreadable file - on Windows, typically one another program holds
+    # open - fails the whole batch. Hash one at a time instead, so only that
+    # file goes unhashed: main() then reads its staged copy and reports its
+    # working copy as unreadable, by name (review of PR #5).
+    blobs: dict[str, str] = {}
+    for rel in present:
+        try:
+            blobs[rel] = blob_id(ROOT / rel)
+        except subprocess.CalledProcessError:
+            continue
+    return blobs
 
 
 def staged_bytes(blob: str) -> bytes:
@@ -243,7 +267,7 @@ def main() -> int:
     try:
         files = tracked_files()
         staged = index_blobs()
-        differs = unstaged_paths()
+        working = working_blobs(sorted(staged))
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         print(f"no-pii: cannot list tracked files: {exc}", file=sys.stderr)
         return 2
@@ -272,7 +296,7 @@ def main() -> int:
                 copies.append(("", path.read_bytes()))
             except OSError as exc:
                 unreadable.append(f"working copy ({exc})")
-        if rel in staged and (rel in differs or not copies):
+        if rel in staged and working.get(rel) != staged[rel]:
             try:
                 copies.append((" (staged copy)", staged_bytes(staged[rel])))
             except (OSError, subprocess.CalledProcessError) as exc:

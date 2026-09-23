@@ -220,6 +220,48 @@ class TestPiiGuard:
         assert "README.md" in result.stderr
         assert "staged copy" in result.stderr
 
+    @pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+    def test_fails_on_an_address_staged_behind_an_index_flag(
+            self, sandbox, flag):
+        """Codex review of PR #5: `git diff-files` omits a path marked
+        assume-unchanged or skip-worktree, so its staged copy went unread."""
+        readme = sandbox / "README.md"
+        clean = readme.read_bytes()
+        readme.write_bytes(clean + f"Contact a.person{'@'}company.io\n".encode())
+        subprocess.run(["git", "add", "README.md"], cwd=sandbox, check=True)
+        subprocess.run(["git", "update-index", flag, "README.md"],
+                       cwd=sandbox, check=True)
+        readme.write_bytes(clean)
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 1, (
+            f"GUARD IS BLIND: an address staged behind {flag} passed.")
+        assert "staged copy" in result.stderr
+
+    def test_one_unreadable_working_copy_does_not_stop_the_rest(
+            self, sandbox, monkeypatch):
+        """Review of PR #5: one file git could not open (on Windows, one that
+        another program holds) failed the batch hash of EVERY file, and the
+        whole guard stopped with no file named. Modelled as a file that
+        vanishes between the is_file() check and git reading it."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "check_no_pii_sandbox", sandbox / "scripts" / "check_no_pii.py")
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        monkeypatch.setattr(guard.Path, "is_file", lambda self: True)
+        blobs = guard.working_blobs(["README.md", "locked.txt", "CLAUDE.md"])
+        assert set(blobs) == {"README.md", "CLAUDE.md"}, blobs
+
+    def test_passes_on_a_submodule_entry(self, sandbox):
+        """A gitlink records a commit, not a file: there is no blob to read,
+        and it must not be reported as an unreadable copy."""
+        commit = "1" * 40
+        subprocess.run(["git", "update-index", "--add", "--cacheinfo",
+                        f"160000,{commit},vendor/lib"], cwd=sandbox, check=True)
+        result = run_guard("check_no_pii.py", sandbox)
+        assert result.returncode == 0, (
+            f"FALSE POSITIVE on a submodule entry:\n{result.stderr}")
+
     def test_fails_on_a_staged_file_whose_working_copy_is_gone(self, sandbox):
         """A staged file with no working copy was skipped entirely, so a
         database staged and then deleted from disk passed."""
