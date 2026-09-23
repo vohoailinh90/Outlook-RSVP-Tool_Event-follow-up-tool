@@ -138,19 +138,30 @@ generated budget strings, turned up one genuine defect and one overstatement:
 - **`0.500` became `500.0`** — wrong by 1000x *upward*, a worse failure than the
   understatement the thousands rule exists to fix. A leading zero before the separator is a
   decimal signal; nobody writes `0.500` for five hundred. Fixed.
-- **The rule is locale-blind**, so `$3.500` reads as three thousand five hundred. That is
-  correct for JPY and VND, the two currencies this tool is used for, and wrong for a USD
-  amount written with a trailing zero. Making it currency-dependent would need a currency to
-  be present, and the commonest input of all (`3000`) has none — the ambiguity would just
-  move somewhere less visible. Kept, and pinned by `TestKnownAmbiguousCases` so it is a
-  decision on the record rather than an accident.
+- **The rule was locale-blind**, so `$3.500` read as three thousand five hundred — correct
+  for JPY and VND, wrong for a USD amount written to three decimal places. First kept as-is;
+  then the repository owner decided on the PR #1 review thread that **a single dot beside an
+  explicit USD marker (`USD`, `US$`) is a decimal point**, so `12.500 USD` is `12.5`. A bare
+  `$` was first included too, then dropped after Codex review of PR #2: `$` is shared by
+  currencies that group with the dot (a Chilean `$3.000` is three thousand pesos). Everything
+  else keeps the thousands reading: bare `3.000`, `$3.000`, JPY/VND/¥/円/đ, EUR (European
+  formatting uses the dot for grouping), a comma (`3,000 USD`) and a repeated dot
+  (`1.234.567 USD`). The cost is the other direction: `3.000 USD` written with Vietnamese
+  grouping now reads as `3.0`. Two refinements came out of later Codex rounds on PR #2: the
+  decision looks at both sides of the chosen number, so `$3.000 USD` and `USD $3.000` read
+  as `3.0`; and alphabetic codes may touch a digit but not a letter, so glued forms
+  (`12.500USD`, `USD12.500`, `3000JPY`) are markers rather than falling back to the first
+  number. Against the 2,260-entry corpus as it stood at `0828e12`, 42 entries moved: 39 of
+  the form `N.NNN USD` and 3 of the form `USDN.NNN`, all from `N×1000` to `N`. The corpus
+  now also covers `$`, `US$` and ` EUR`, for 3,016 entries in total. Pinned by
+  `TestKnownAmbiguousCases`.
 - **The docstring overstated the fix**, claiming the first number is used when no marker
   appears "anywhere". Adjacency is required, so `JPY quota is 10 max, paid 3000` yields
   `10.0`. Corrected; widening adjacency is deliberately not done, since a marker in one
   clause would then capture a number from another.
 
-The diff itself is now `tests/golden/money_snapshot.json`: 2,260 generated inputs and their
-parsed values. Any future change to amount parsing surfaces as a concrete list of figures
+The diff itself is now `tests/golden/money_snapshot.json`: 3,016 generated inputs and their
+parsed values (2,260 when first written at `0828e12`). Any future change to amount parsing surfaces as a concrete list of figures
 that would be shown differently, rather than as a surprise on someone's screen.
 
 Worth noting how the defect was found. The review agent was originally asked to do the
