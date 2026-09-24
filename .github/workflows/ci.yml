@@ -1,0 +1,75 @@
+name: CI
+
+# Runs on windows-latest, not ubuntu. CLAUDE.md declares this tool Windows-only
+# and forbids spending effort on Linux-only behavior; a Linux runner would
+# manufacture exactly the portability failures that policy says must never
+# block a merge. windows-latest is free for public repositories and matches the
+# target platform, so every failure it reports is in scope by definition.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  guards:
+    name: Deterministic guards
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # check_no_pii.py needs the full index
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # These three need no dependencies — they are stdlib AST/regex checks.
+      # They answer questions that are computable, so they are scripts rather
+      # than review instructions. See CLAUDE.md, "Deterministic work is not
+      # agent work".
+      - name: No personal data is tracked
+        run: python scripts/check_no_pii.py
+
+      - name: Every language table is complete
+        run: python scripts/check_i18n_matrix.py
+
+      - name: Layer boundaries hold
+        run: python scripts/check_layering.py
+
+      - name: Text I/O names an encoding
+        # cp1252 is the Windows default and this repo is full of Japanese and
+        # Vietnamese. Caught verify_golden_baseline.py after it broke this job.
+        run: python scripts/check_windows_encoding.py
+
+      - name: Every global name resolves
+        # Catches a name dropped from a re-export shim during the staged
+        # extraction. No test constructs RSVPApp, so the suite cannot see it.
+        run: python scripts/check_names_resolve.py
+
+  tests:
+    name: Characterization tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # verify_golden_baseline.py reads the parent commit
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Golden file really is pre-extraction behaviour
+        # Re-derives every entry from rsvp_app.py at the parent commit, so the
+        # parity fixture is reproducible evidence rather than an assertion.
+        run: python scripts/verify_golden_baseline.py
+
+      - name: Run tests
+        # RSVP_REQUIRE_APP_IMPORT=1 turns an unimportable rsvp_app into an
+        # ERROR instead of a skip. Without it a broken environment would
+        # report a green suite that ran nothing — see tests/conftest.py.
+        env:
+          RSVP_REQUIRE_APP_IMPORT: "1"
+        run: python -m pytest tests/ -v

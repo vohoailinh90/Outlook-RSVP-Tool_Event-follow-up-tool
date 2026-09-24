@@ -1,0 +1,45 @@
+# ─── Personal data — NEVER commit ────────────────────────────────────────
+# rsvp_data.db is written next to the app on every run and holds real
+# colleagues' names, email addresses and gift-contribution amounts. It was
+# committed to this public repository once already; scripts/check_no_pii.py
+# now fails CI if it comes back.
+rsvp_data.db
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Exported reports and rosters contain the same personal data. Every
+# spreadsheet this app reads or writes is one of them - Participant_List_*,
+# *_Report, RSVP_History_export, the recipient template - so all of them are
+# ignored, not a list of names. A list of names missed four of the files the
+# app actually writes (Codex review of PR #1). A spreadsheet that genuinely
+# belongs in git is added with `git add -f` and still has to pass
+# .pii-allowlist.
+*.xlsx
+*.xlsm
+*.xls
+
+# Local user overrides written by history.py
+fixed_wording_overrides.json
+prompt_overrides.json
+
+# ─── Python ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# ─── OS / editor ─────────────────────────────────────────────────────────
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
+
+# Internal classified document with real employee PII in screenshots.
+# See docs/agentic/ARCHITECTURE.md D4. Kept locally, never tracked.
+RSVP_tool.pdf

@@ -1,0 +1,13 @@
+# Tracked binary files a human has LOOKED AT and confirmed carry no personal data.
+#
+# scripts/check_no_pii.py cannot read text baked into raster images, so it must
+# not pretend to. Instead it refuses to pass while any tracked binary document
+# is unaccounted for. Adding a line here is a human asserting they opened the
+# file and saw no real names, addresses, amounts or corporate classification
+# markings. Do not add a line to make the build green.
+#
+# format:  <path>  blob=<git hash-object of the file>  # <who checked, what they saw>
+#
+# The blob= digest ties the approval to the exact bytes that were reviewed:
+# if the file changes, the check fails until someone looks again.
+how_to_vote.png  blob=0a065618de82776e5f70dde4de6e3de14009b4ab  # reviewed 2026-09-21: synthetic placeholders only ("Your Event Name", "[Confirm-EventID]"), no real recipients

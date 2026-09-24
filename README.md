@@ -42,8 +42,10 @@ share a report — it's no longer where "live" data is stored, unlike the older 
 | File | Role |
 |---|---|
 | `how_to_vote.png` | Instructional image showing how to click the Vote buttons — auto-attached to every invite/reminder email |
-| `send_scheduled_reminders.py` + `run_scheduled_reminders.bat` | Background script for Windows Task Scheduler to send reminders on a schedule |
-| `rsvp_data.db` | The main database — **back this up regularly** |
+| `rsvp_data.db` | The main database — **back this up regularly**. Not in git: it holds real names and addresses, so it is gitignored and `scripts/check_no_pii.py` fails the build if it is committed |
+| `scripts/check_*.py` | Guards that run in CI — see `CLAUDE.md` |
+| `.claude/agents/` | Agent roster for Claude Code — see `CLAUDE.md` |
+| `docs/agentic/ARCHITECTURE.md` | Target structure and the staged plan to reach it |
 
 > 💡 Old Excel files (`RSVP_History.xlsx`, etc.), if left over from a previous version,
 > are **automatically migrated once** into `rsvp_data.db` the first time the app starts,
@@ -107,11 +109,15 @@ Review the full history of all created events, Yes/No/Maybe counts, and send sta
 
 ---
 
-## 4. Automated reminders (Task Scheduler)
+## 4. Automated reminders (Task Scheduler) — NOT IMPLEMENTED
 
-`send_scheduled_reminders.py` runs independently, reading `rsvp_data.db` to find people
-who "haven't responded" and sending them individual reminder emails. Set it up to run
-daily via `run_scheduled_reminders.bat` + Windows Task Scheduler.
+> ⚠️ Earlier versions of this README described a `send_scheduled_reminders.py` script and
+> a `run_scheduled_reminders.bat` launcher for Windows Task Scheduler. **Neither file
+> exists in this repository.** The description is kept here only to say so, because the
+> previous wording read as though the feature shipped.
+>
+> Reminders are sent manually today, from the "Collect Responses" and "Gift Contribution"
+> tabs. Scheduled sending is an unbuilt feature, not a broken one.
 
 ---
 
