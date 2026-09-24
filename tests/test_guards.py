@@ -159,6 +159,25 @@ class TestLayeringGuard:
             f"GUARD IS BLIND: {prefix.strip() or call!r} bypassed the seam.")
         assert "bypassing the OutlookPort" in result.stderr
 
+    @pytest.mark.parametrize("wiring", [
+        "outlook if False else outlook_com",
+        "None if outlook is not None else outlook_com",
+        "outlook if outlook is None else outlook_com",
+    ])
+    def test_fails_when_the_wiring_discards_the_injected_port(
+            self, sandbox, wiring):
+        """Codex review of PR #8: any conditional with outlook_com as its
+        else branch passed, including ones that throw the fake away."""
+        app = sandbox / "rsvp_app.py"
+        text = app.read_text(encoding="utf-8")
+        mutated = text.replace("outlook if outlook is not None else outlook_com",
+                               wiring, 1)
+        assert mutated != text, "mutation did not apply - the wiring moved"
+        app.write_text(mutated, encoding="utf-8")
+        result = run_guard("check_layering.py", sandbox)
+        assert result.returncode == 1, (
+            f"GUARD IS BLIND: {wiring!r} discards the injected OutlookPort.")
+
     def test_fails_when_the_wiring_also_binds_an_alias(self, sandbox):
         """Codex review of PR #8: the one allowed use was whichever came
         first, so a walrus inside the wiring kept a hidden alias."""

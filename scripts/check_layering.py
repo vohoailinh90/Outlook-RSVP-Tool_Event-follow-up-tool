@@ -137,10 +137,24 @@ def seam_bypasses(path: Path) -> list[tuple[int, str]]:
 
 
 def _is_default_wiring(node: ast.Name, parent: dict[int, ast.AST]) -> bool:
-    """True for `outlook_com` as the else-branch of an IfExp that is the
-    whole value assigned to `self.outlook`."""
+    """True only for the exact injection expression
+
+        self.outlook = outlook if outlook is not None else outlook_com
+
+    (annotation allowed). Checking only that outlook_com was the else
+    branch passed `outlook if False else outlook_com`, which throws the
+    injected fake away (Codex review of PR #8)."""
     ifexp = parent.get(id(node))
     if not (isinstance(ifexp, ast.IfExp) and ifexp.orelse is node):
+        return False
+    test = ifexp.test
+    if not (isinstance(ifexp.body, ast.Name) and ifexp.body.id == "outlook"
+            and isinstance(test, ast.Compare)
+            and isinstance(test.left, ast.Name) and test.left.id == "outlook"
+            and len(test.ops) == 1 and isinstance(test.ops[0], ast.IsNot)
+            and len(test.comparators) == 1
+            and isinstance(test.comparators[0], ast.Constant)
+            and test.comparators[0].value is None):
         return False
     assign = parent.get(id(ifexp))
     if isinstance(assign, ast.AnnAssign):
