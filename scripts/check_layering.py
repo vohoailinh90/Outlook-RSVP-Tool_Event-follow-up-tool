@@ -96,17 +96,18 @@ def seam_bypasses(path: Path) -> list[tuple[int, str]]:
         for child in ast.iter_child_nodes(node):
             parent[id(child)] = node
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and node.args:
-            fn = node.func
-            name = (fn.attr if isinstance(fn, ast.Attribute)
-                    else fn.id if isinstance(fn, ast.Name) else None)
-            arg = node.args[0]
-            if (name in {"import_module", "__import__"}
-                    and isinstance(arg, ast.Constant)
-                    and isinstance(arg.value, str)
-                    and arg.value.split(".")[0] == SEAM_MODULE):
-                found.append((node.lineno,
-                              f"imports {SEAM_MODULE} dynamically"))
+        # The module named as a string - import_module("outlook_com"),
+        # import_module(name="outlook_com"), __import__, sys.modules[...] -
+        # is a way to reach it without an import statement. Any string
+        # constant that IS the module name counts, whatever consumes it, so
+        # a new call shape cannot slip past (Codex review of PR #8). Prose
+        # that merely mentions the module in a longer string is not matched.
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and (node.value == SEAM_MODULE
+                     or node.value.startswith(SEAM_MODULE + "."))):
+            found.append((node.lineno,
+                          f"names {SEAM_MODULE} as a string (a dynamic "
+                          f"import)"))
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if (alias.name.split(".")[0] == SEAM_MODULE

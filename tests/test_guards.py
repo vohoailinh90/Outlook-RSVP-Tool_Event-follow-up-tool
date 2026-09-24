@@ -141,6 +141,9 @@ class TestLayeringGuard:
         ("", "__import__('outlook_com').send_reminder_email("),
         ("import importlib\n",
          "importlib.import_module('outlook_com').send_reminder_email("),
+        ("import importlib\n",
+         "importlib.import_module(name='outlook_com').send_reminder_email("),
+        ("import sys\n", "sys.modules['outlook_com'].send_reminder_email("),
     ])
     def test_fails_when_the_app_aliases_outlook_com(self, sandbox, prefix, call):
         """Codex review of PR #1: an aliased or from-import reached the
