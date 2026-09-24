@@ -183,8 +183,21 @@ def _is_default_wiring(node: ast.Name, parent: dict[int, ast.AST]) -> bool:
     cls = parent.get(id(func)) if func is not None else None
     return (func is not None and func.name == "__init__"
             and isinstance(cls, ast.ClassDef) and cls.name == WIRING_CLASS
-            and any(a.arg == "outlook"
-                    for a in func.args.args + func.args.kwonlyargs))
+            and _outlook_defaults_to_none(func.args))
+
+
+def _outlook_defaults_to_none(args: ast.arguments) -> bool:
+    """`outlook` is a parameter whose default is the literal None.
+
+    The app's entry point calls RSVPApp() with no argument, so losing the
+    default would stop the app starting, and any other default would wire a
+    non-port in, while the guard stayed green (Codex review of PR #1)."""
+    positional = args.posonlyargs + args.args
+    defaults = [None] * (len(positional) - len(args.defaults)) + list(args.defaults)
+    pairs = list(zip(positional, defaults)) + list(zip(args.kwonlyargs,
+                                                       args.kw_defaults))
+    return any(a.arg == "outlook" and isinstance(d, ast.Constant)
+               and d.value is None for a, d in pairs)
 
 
 def imported_roots(path: Path) -> tuple[set[str], set[str]]:
