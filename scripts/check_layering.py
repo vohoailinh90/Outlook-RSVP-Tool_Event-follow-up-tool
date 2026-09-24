@@ -165,9 +165,12 @@ def _is_default_wiring(node: ast.Name, parent: dict[int, ast.AST]) -> bool:
         return False
     if assign.value is not ifexp:
         return False
-    return any(isinstance(t, ast.Attribute) and t.attr == "outlook"
-               and isinstance(t.value, ast.Name) and t.value.id == "self"
-               for t in targets)
+    # self.outlook must be the ONLY target: `self.outlook = oc = ...` kept an
+    # alias through the second one (Codex review of PR #8).
+    return (len(targets) == 1 and isinstance(targets[0], ast.Attribute)
+            and targets[0].attr == "outlook"
+            and isinstance(targets[0].value, ast.Name)
+            and targets[0].value.id == "self")
 
 
 def imported_roots(path: Path) -> tuple[set[str], set[str]]:

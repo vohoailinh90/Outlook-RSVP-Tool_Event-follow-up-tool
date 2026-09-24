@@ -178,12 +178,17 @@ class TestLayeringGuard:
         assert result.returncode == 1, (
             f"GUARD IS BLIND: {wiring!r} discards the injected OutlookPort.")
 
-    def test_fails_when_the_wiring_also_binds_an_alias(self, sandbox):
-        """Codex review of PR #8: the one allowed use was whichever came
-        first, so a walrus inside the wiring kept a hidden alias."""
+    @pytest.mark.parametrize("old, new", [
+        ("else outlook_com\n", "else (oc := outlook_com)\n"),
+        ("self.outlook: OutlookPort = outlook if",
+         "self.outlook = oc = outlook if"),
+    ])
+    def test_fails_when_the_wiring_also_binds_an_alias(self, sandbox, old, new):
+        """Codex review of PR #8: a walrus inside the wiring, or a second
+        assignment target, kept a hidden alias to the adapter."""
         app = sandbox / "rsvp_app.py"
         text = app.read_text(encoding="utf-8")
-        mutated = text.replace("else outlook_com\n", "else (oc := outlook_com)\n", 1)
+        mutated = text.replace(old, new, 1)
         assert mutated != text, "mutation did not apply - the wiring moved"
         app.write_text(mutated, encoding="utf-8")
         result = run_guard("check_layering.py", sandbox)
