@@ -132,6 +132,26 @@ class TestLayeringGuard:
             "seam guard passed.")
         assert "bypassing the OutlookPort" in result.stderr
 
+    @pytest.mark.parametrize("prefix, call", [
+        ("import outlook_com as oc\n", "oc.send_reminder_email("),
+        ("from outlook_com import send_reminder_email\n",
+         "send_reminder_email("),
+        ("", "(lambda oc: oc)(outlook_com).send_reminder_email("),
+    ])
+    def test_fails_when_the_app_aliases_outlook_com(self, sandbox, prefix, call):
+        """Codex review of PR #1: an aliased or from-import reached the
+        adapter with no `outlook_com.<attr>` for the guard to see."""
+        app = sandbox / "rsvp_app.py"
+        text = app.read_text(encoding="utf-8")
+        mutated = prefix + text.replace("self.outlook.send_reminder_email(",
+                                        call, 1)
+        assert call in mutated, "mutation did not apply - the call site moved"
+        app.write_text(mutated, encoding="utf-8")
+        result = run_guard("check_layering.py", sandbox)
+        assert result.returncode == 1, (
+            f"GUARD IS BLIND: {prefix.strip() or call!r} bypassed the seam.")
+        assert "bypassing the OutlookPort" in result.stderr
+
     def test_fails_when_a_service_imports_outlook_com(self, sandbox):
         svc = sandbox / "rsvp" / "services" / "invite.py"
         svc.write_text("import outlook_com\n" + svc.read_text(encoding="utf-8"),

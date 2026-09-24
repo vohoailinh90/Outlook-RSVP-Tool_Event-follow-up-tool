@@ -76,16 +76,43 @@ SEAM_CLIENTS = ["rsvp_app.py"]
 SEAM_MODULE = "outlook_com"
 
 
-def seam_bypasses(path: Path) -> list[int]:
-    """Line numbers where `outlook_com.<attr>` is used in code."""
+def seam_bypasses(path: Path) -> list[tuple[int, str]]:
+    """(line, what) for every way `path` could reach outlook_com without
+    going through the injected OutlookPort.
+
+    Allowed: a plain `import outlook_com`, and ONE use of the name - the
+    default wiring. Anything else is a bypass: an attribute call, a second
+    use of the name (`oc = outlook_com` then `oc.send_...`), an aliased
+    import, or `from outlook_com import ...` (Codex review of PR #1: the
+    first version looked only for `outlook_com.<attr>`)."""
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (SyntaxError, OSError):
         return []
-    return sorted(
-        node.lineno for node in ast.walk(tree)
-        if isinstance(node, ast.Attribute)
-        and isinstance(node.value, ast.Name) and node.value.id == SEAM_MODULE)
+    found: list[tuple[int, str]] = []
+    uses: list[int] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if (alias.name.split(".")[0] == SEAM_MODULE
+                        and alias.asname is not None):
+                    found.append((node.lineno, f"imports {SEAM_MODULE} as "
+                                  f"{alias.asname!r}"))
+        elif (isinstance(node, ast.ImportFrom) and node.module
+              and node.module.split(".")[0] == SEAM_MODULE):
+            found.append((node.lineno, f"imports names from {SEAM_MODULE}"))
+        elif isinstance(node, ast.Attribute) and isinstance(
+                node.value, ast.Name) and node.value.id == SEAM_MODULE:
+            found.append((node.lineno, f"calls {SEAM_MODULE}.{node.attr}"))
+        elif isinstance(node, ast.Name) and node.id == SEAM_MODULE:
+            uses.append(node.lineno)
+    # The attribute accesses above are also Name uses; count only the rest.
+    attr_lines = {line for line, what in found if what.startswith("calls")}
+    bare = [line for line in uses if line not in attr_lines]
+    for line in bare[1:]:
+        found.append((line, f"uses {SEAM_MODULE} beyond the one default "
+                            f"wiring"))
+    return sorted(found)
 
 
 def imported_roots(path: Path) -> tuple[set[str], set[str]]:
@@ -201,10 +228,10 @@ def main() -> int:
             violations.append(f"{name}: listed in SEAM_CLIENTS but missing")
             continue
         checked += 1
-        for line in seam_bypasses(path):
+        for line, what in seam_bypasses(path):
             violations.append(
-                f"{name}:{line}: calls {SEAM_MODULE} directly, bypassing the "
-                f"OutlookPort. Use self.outlook, so a test's fake sees the call.")
+                f"{name}:{line}: {what}, bypassing the OutlookPort. Use "
+                f"self.outlook, so a test's fake sees the call.")
 
     if not checked:
         print("layering: FAIL - matched no files; LAYERS has drifted from the tree",
