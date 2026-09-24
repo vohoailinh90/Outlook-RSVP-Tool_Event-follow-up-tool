@@ -178,6 +178,25 @@ class TestLayeringGuard:
         assert result.returncode == 1, (
             f"GUARD IS BLIND: {wiring!r} discards the injected OutlookPort.")
 
+    @pytest.mark.parametrize("signature", [
+        "def __init__(self, outlook: OutlookPort | None):",
+        "def __init__(self, outlook: OutlookPort | None = False):",
+    ])
+    def test_fails_when_the_outlook_parameter_loses_its_none_default(
+            self, sandbox, signature):
+        """Codex review of PR #1: the entry point calls RSVPApp() with no
+        argument, so a missing default stops the app and any other default
+        wires a non-port in, and the guard stayed green."""
+        app = sandbox / "rsvp_app.py"
+        text = app.read_text(encoding="utf-8")
+        mutated = text.replace(
+            "def __init__(self, outlook: OutlookPort | None = None):", signature, 1)
+        assert mutated != text, "mutation did not apply - the signature moved"
+        app.write_text(mutated, encoding="utf-8")
+        result = run_guard("check_layering.py", sandbox)
+        assert result.returncode == 1, (
+            f"GUARD IS BLIND: {signature!r} passed.")
+
     def test_fails_when_the_wiring_moves_out_of_the_constructor(self, sandbox):
         """Codex review of PR #8: the exact wiring line in another method
         would replace an injected fake with the real adapter."""
