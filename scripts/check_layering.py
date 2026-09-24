@@ -74,18 +74,117 @@ LAYERS: list[tuple[str, set[str]]] = [
 # that bypasses the port, so a test's fake would never see it (phase 3).
 SEAM_CLIENTS = ["rsvp_app.py"]
 SEAM_MODULE = "outlook_com"
+WIRING_CLASS = "RSVPApp"
 
 
-def seam_bypasses(path: Path) -> list[int]:
-    """Line numbers where `outlook_com.<attr>` is used in code."""
+def seam_bypasses(path: Path) -> list[tuple[int, str]]:
+    """(line, what) for every way `path` could reach outlook_com without
+    going through the injected OutlookPort.
+
+    Allowed: a plain `import outlook_com`, and ONE use of the name - the
+    default wiring. Anything else is a bypass: an attribute call, a second
+    use of the name (`oc = outlook_com` then `oc.send_...`), an aliased
+    import, or `from outlook_com import ...` (Codex review of PR #1: the
+    first version looked only for `outlook_com.<attr>`)."""
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (SyntaxError, OSError):
         return []
-    return sorted(
-        node.lineno for node in ast.walk(tree)
-        if isinstance(node, ast.Attribute)
-        and isinstance(node.value, ast.Name) and node.value.id == SEAM_MODULE)
+    found: list[tuple[int, str]] = []
+    uses: list[ast.Name] = []
+    parent: dict[int, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parent[id(child)] = node
+    for node in ast.walk(tree):
+        # The module named as a string - import_module("outlook_com"),
+        # import_module(name="outlook_com"), __import__, sys.modules[...] -
+        # is a way to reach it without an import statement. Any string
+        # constant that IS the module name counts, whatever consumes it, so
+        # a new call shape cannot slip past (Codex review of PR #8). Prose
+        # that merely mentions the module in a longer string is not matched.
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and (node.value == SEAM_MODULE
+                     or node.value.startswith(SEAM_MODULE + "."))):
+            found.append((node.lineno,
+                          f"names {SEAM_MODULE} as a string (a dynamic "
+                          f"import)"))
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if (alias.name.split(".")[0] == SEAM_MODULE
+                        and alias.asname is not None):
+                    found.append((node.lineno, f"imports {SEAM_MODULE} as "
+                                  f"{alias.asname!r}"))
+        elif (isinstance(node, ast.ImportFrom) and node.module
+              and node.module.split(".")[0] == SEAM_MODULE):
+            found.append((node.lineno, f"imports names from {SEAM_MODULE}"))
+        elif isinstance(node, ast.Attribute) and isinstance(
+                node.value, ast.Name) and node.value.id == SEAM_MODULE:
+            found.append((node.lineno, f"calls {SEAM_MODULE}.{node.attr}"))
+        elif (isinstance(node, ast.Name) and node.id == SEAM_MODULE
+              and not isinstance(parent.get(id(node)), ast.Attribute)):
+            uses.append(node)
+    # Exactly one bare use is allowed, and only in the exact shape of the
+    # default wiring: the `else` branch of the conditional assigned to
+    # self.outlook. Allowing whichever use came first let
+    # `(oc := outlook_com)` inside the wiring keep a hidden alias (Codex
+    # review of PR #8).
+    wiring = [n for n in uses if _is_default_wiring(n, parent)]
+    for node in uses:
+        if node is not (wiring[0] if wiring else None):
+            found.append((node.lineno, f"uses {SEAM_MODULE} outside the "
+                                       f"default wiring of self.outlook"))
+    return sorted(found)
+
+
+def _is_default_wiring(node: ast.Name, parent: dict[int, ast.AST]) -> bool:
+    """True only for the exact injection expression
+
+        self.outlook = outlook if outlook is not None else outlook_com
+
+    (annotation allowed). Checking only that outlook_com was the else
+    branch passed `outlook if False else outlook_com`, which throws the
+    injected fake away (Codex review of PR #8)."""
+    ifexp = parent.get(id(node))
+    if not (isinstance(ifexp, ast.IfExp) and ifexp.orelse is node):
+        return False
+    test = ifexp.test
+    if not (isinstance(ifexp.body, ast.Name) and ifexp.body.id == "outlook"
+            and isinstance(test, ast.Compare)
+            and isinstance(test.left, ast.Name) and test.left.id == "outlook"
+            and len(test.ops) == 1 and isinstance(test.ops[0], ast.IsNot)
+            and len(test.comparators) == 1
+            and isinstance(test.comparators[0], ast.Constant)
+            and test.comparators[0].value is None):
+        return False
+    assign = parent.get(id(ifexp))
+    if isinstance(assign, ast.AnnAssign):
+        targets = [assign.target]
+    elif isinstance(assign, ast.Assign):
+        targets = assign.targets
+    else:
+        return False
+    if assign.value is not ifexp:
+        return False
+    # self.outlook must be the ONLY target: `self.outlook = oc = ...` kept an
+    # alias through the second one (Codex review of PR #8).
+    if not (len(targets) == 1 and isinstance(targets[0], ast.Attribute)
+            and targets[0].attr == "outlook"
+            and isinstance(targets[0].value, ast.Name)
+            and targets[0].value.id == "self"):
+        return False
+    # And it must be the constructor's wiring, taking `outlook` as its
+    # parameter: the same line in another method would swap an injected fake
+    # for the real adapter whenever that method ran (Codex review of PR #8).
+    func = parent.get(id(assign))
+    while func is not None and not isinstance(
+            func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        func = parent.get(id(func))
+    cls = parent.get(id(func)) if func is not None else None
+    return (func is not None and func.name == "__init__"
+            and isinstance(cls, ast.ClassDef) and cls.name == WIRING_CLASS
+            and any(a.arg == "outlook"
+                    for a in func.args.args + func.args.kwonlyargs))
 
 
 def imported_roots(path: Path) -> tuple[set[str], set[str]]:
@@ -201,10 +300,10 @@ def main() -> int:
             violations.append(f"{name}: listed in SEAM_CLIENTS but missing")
             continue
         checked += 1
-        for line in seam_bypasses(path):
+        for line, what in seam_bypasses(path):
             violations.append(
-                f"{name}:{line}: calls {SEAM_MODULE} directly, bypassing the "
-                f"OutlookPort. Use self.outlook, so a test's fake sees the call.")
+                f"{name}:{line}: {what}, bypassing the OutlookPort. Use "
+                f"self.outlook, so a test's fake sees the call.")
 
     if not checked:
         print("layering: FAIL - matched no files; LAYERS has drifted from the tree",

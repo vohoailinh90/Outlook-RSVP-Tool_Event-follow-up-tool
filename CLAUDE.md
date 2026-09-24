@@ -90,6 +90,13 @@ are what remains after that.
   to the AST check.
 - **A wrong translation.** The matrix check proves a language is *present*, never that it
   is correct.
+- **What the Outlook wiring does at run time.** `check_layering.py` fails every ordinary way
+  for `rsvp_app.py` to reach `outlook_com` except through `self.outlook`: an attribute call,
+  an alias, a from-import, a second binding, the module name as a string. It also pins the
+  one allowed use to `self.outlook = outlook if outlook is not None else outlook_com` in
+  `RSVPApp.__init__`. It checks the shape of that line, not the data flow into it. Code that
+  deliberately defeats it, for example `outlook = None` just above, or a module name built
+  from pieces, is beyond static analysis and belongs to human review.
 - **When a closure is called.** `check_names_resolve.py` lets a nested function read any
   name its enclosing function binds, anywhere, because a closure resolves it at call time.
   If the closure is called *before* that binding runs (`if flag: return inner()` above

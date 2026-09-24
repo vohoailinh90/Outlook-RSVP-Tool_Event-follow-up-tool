@@ -132,6 +132,90 @@ class TestLayeringGuard:
             "seam guard passed.")
         assert "bypassing the OutlookPort" in result.stderr
 
+    @pytest.mark.parametrize("prefix, call", [
+        ("import outlook_com as oc\n", "oc.send_reminder_email("),
+        ("from outlook_com import send_reminder_email\n",
+         "send_reminder_email("),
+        ("", "(lambda oc: oc)(outlook_com).send_reminder_email("),
+        # Codex review of PR #8: dynamic imports.
+        ("", "__import__('outlook_com').send_reminder_email("),
+        ("import importlib\n",
+         "importlib.import_module('outlook_com').send_reminder_email("),
+        ("import importlib\n",
+         "importlib.import_module(name='outlook_com').send_reminder_email("),
+        ("import sys\n", "sys.modules['outlook_com'].send_reminder_email("),
+    ])
+    def test_fails_when_the_app_aliases_outlook_com(self, sandbox, prefix, call):
+        """Codex review of PR #1: an aliased or from-import reached the
+        adapter with no `outlook_com.<attr>` for the guard to see."""
+        app = sandbox / "rsvp_app.py"
+        text = app.read_text(encoding="utf-8")
+        mutated = prefix + text.replace("self.outlook.send_reminder_email(",
+                                        call, 1)
+        assert call in mutated, "mutation did not apply - the call site moved"
+        app.write_text(mutated, encoding="utf-8")
+        result = run_guard("check_layering.py", sandbox)
+        assert result.returncode == 1, (
+            f"GUARD IS BLIND: {prefix.strip() or call!r} bypassed the seam.")
+        assert "bypassing the OutlookPort" in result.stderr
+
+    @pytest.mark.parametrize("wiring", [
+        "outlook if False else outlook_com",
+        "None if outlook is not None else outlook_com",
+        "outlook if outlook is None else outlook_com",
+    ])
+    def test_fails_when_the_wiring_discards_the_injected_port(
+            self, sandbox, wiring):
+        """Codex review of PR #8: any conditional with outlook_com as its
+        else branch passed, including ones that throw the fake away."""
+        app = sandbox / "rsvp_app.py"
+        text = app.read_text(encoding="utf-8")
+        mutated = text.replace("outlook if outlook is not None else outlook_com",
+                               wiring, 1)
+        assert mutated != text, "mutation did not apply - the wiring moved"
+        app.write_text(mutated, encoding="utf-8")
+        result = run_guard("check_layering.py", sandbox)
+        assert result.returncode == 1, (
+            f"GUARD IS BLIND: {wiring!r} discards the injected OutlookPort.")
+
+    def test_fails_when_the_wiring_moves_out_of_the_constructor(self, sandbox):
+        """Codex review of PR #8: the exact wiring line in another method
+        would replace an injected fake with the real adapter."""
+        app = sandbox / "rsvp_app.py"
+        text = app.read_text(encoding="utf-8")
+        line = ("        self.outlook: OutlookPort = outlook if outlook is not None "
+                "else outlook_com\n")
+        assert line in text, "the wiring line moved"
+        mutated = text.replace(line, "        self.outlook = outlook\n", 1)
+        mutated = mutated.replace(
+            "    def _send_invite(self):\n",
+            "    def _rewire(self, outlook=None):\n" + line + "\n"
+            "    def _send_invite(self):\n", 1)
+        assert "_rewire" in mutated, "mutation did not apply"
+        app.write_text(mutated, encoding="utf-8")
+        result = run_guard("check_layering.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: the wiring moved out of RSVPApp.__init__.")
+        assert "outside the default wiring" in result.stderr
+
+    @pytest.mark.parametrize("old, new", [
+        ("else outlook_com\n", "else (oc := outlook_com)\n"),
+        ("self.outlook: OutlookPort = outlook if",
+         "self.outlook = oc = outlook if"),
+    ])
+    def test_fails_when_the_wiring_also_binds_an_alias(self, sandbox, old, new):
+        """Codex review of PR #8: a walrus inside the wiring, or a second
+        assignment target, kept a hidden alias to the adapter."""
+        app = sandbox / "rsvp_app.py"
+        text = app.read_text(encoding="utf-8")
+        mutated = text.replace(old, new, 1)
+        assert mutated != text, "mutation did not apply - the wiring moved"
+        app.write_text(mutated, encoding="utf-8")
+        result = run_guard("check_layering.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: the wiring bound an alias to outlook_com.")
+        assert "outside the default wiring" in result.stderr
+
     def test_fails_when_a_service_imports_outlook_com(self, sandbox):
         svc = sandbox / "rsvp" / "services" / "invite.py"
         svc.write_text("import outlook_com\n" + svc.read_text(encoding="utf-8"),
