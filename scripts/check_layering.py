@@ -90,8 +90,23 @@ def seam_bypasses(path: Path) -> list[tuple[int, str]]:
     except (SyntaxError, OSError):
         return []
     found: list[tuple[int, str]] = []
-    uses: list[int] = []
+    uses: list[ast.Name] = []
+    parent: dict[int, ast.AST] = {}
     for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parent[id(child)] = node
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and node.args:
+            fn = node.func
+            name = (fn.attr if isinstance(fn, ast.Attribute)
+                    else fn.id if isinstance(fn, ast.Name) else None)
+            arg = node.args[0]
+            if (name in {"import_module", "__import__"}
+                    and isinstance(arg, ast.Constant)
+                    and isinstance(arg.value, str)
+                    and arg.value.split(".")[0] == SEAM_MODULE):
+                found.append((node.lineno,
+                              f"imports {SEAM_MODULE} dynamically"))
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if (alias.name.split(".")[0] == SEAM_MODULE
@@ -104,15 +119,40 @@ def seam_bypasses(path: Path) -> list[tuple[int, str]]:
         elif isinstance(node, ast.Attribute) and isinstance(
                 node.value, ast.Name) and node.value.id == SEAM_MODULE:
             found.append((node.lineno, f"calls {SEAM_MODULE}.{node.attr}"))
-        elif isinstance(node, ast.Name) and node.id == SEAM_MODULE:
-            uses.append(node.lineno)
-    # The attribute accesses above are also Name uses; count only the rest.
-    attr_lines = {line for line, what in found if what.startswith("calls")}
-    bare = [line for line in uses if line not in attr_lines]
-    for line in bare[1:]:
-        found.append((line, f"uses {SEAM_MODULE} beyond the one default "
-                            f"wiring"))
+        elif (isinstance(node, ast.Name) and node.id == SEAM_MODULE
+              and not isinstance(parent.get(id(node)), ast.Attribute)):
+            uses.append(node)
+    # Exactly one bare use is allowed, and only in the exact shape of the
+    # default wiring: the `else` branch of the conditional assigned to
+    # self.outlook. Allowing whichever use came first let
+    # `(oc := outlook_com)` inside the wiring keep a hidden alias (Codex
+    # review of PR #8).
+    wiring = [n for n in uses if _is_default_wiring(n, parent)]
+    for node in uses:
+        if node is not (wiring[0] if wiring else None):
+            found.append((node.lineno, f"uses {SEAM_MODULE} outside the "
+                                       f"default wiring of self.outlook"))
     return sorted(found)
+
+
+def _is_default_wiring(node: ast.Name, parent: dict[int, ast.AST]) -> bool:
+    """True for `outlook_com` as the else-branch of an IfExp that is the
+    whole value assigned to `self.outlook`."""
+    ifexp = parent.get(id(node))
+    if not (isinstance(ifexp, ast.IfExp) and ifexp.orelse is node):
+        return False
+    assign = parent.get(id(ifexp))
+    if isinstance(assign, ast.AnnAssign):
+        targets = [assign.target]
+    elif isinstance(assign, ast.Assign):
+        targets = assign.targets
+    else:
+        return False
+    if assign.value is not ifexp:
+        return False
+    return any(isinstance(t, ast.Attribute) and t.attr == "outlook"
+               and isinstance(t.value, ast.Name) and t.value.id == "self"
+               for t in targets)
 
 
 def imported_roots(path: Path) -> tuple[set[str], set[str]]:

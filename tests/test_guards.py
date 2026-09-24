@@ -137,6 +137,10 @@ class TestLayeringGuard:
         ("from outlook_com import send_reminder_email\n",
          "send_reminder_email("),
         ("", "(lambda oc: oc)(outlook_com).send_reminder_email("),
+        # Codex review of PR #8: dynamic imports.
+        ("", "__import__('outlook_com').send_reminder_email("),
+        ("import importlib\n",
+         "importlib.import_module('outlook_com').send_reminder_email("),
     ])
     def test_fails_when_the_app_aliases_outlook_com(self, sandbox, prefix, call):
         """Codex review of PR #1: an aliased or from-import reached the
@@ -151,6 +155,19 @@ class TestLayeringGuard:
         assert result.returncode == 1, (
             f"GUARD IS BLIND: {prefix.strip() or call!r} bypassed the seam.")
         assert "bypassing the OutlookPort" in result.stderr
+
+    def test_fails_when_the_wiring_also_binds_an_alias(self, sandbox):
+        """Codex review of PR #8: the one allowed use was whichever came
+        first, so a walrus inside the wiring kept a hidden alias."""
+        app = sandbox / "rsvp_app.py"
+        text = app.read_text(encoding="utf-8")
+        mutated = text.replace("else outlook_com\n", "else (oc := outlook_com)\n", 1)
+        assert mutated != text, "mutation did not apply - the wiring moved"
+        app.write_text(mutated, encoding="utf-8")
+        result = run_guard("check_layering.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: the wiring bound an alias to outlook_com.")
+        assert "outside the default wiring" in result.stderr
 
     def test_fails_when_a_service_imports_outlook_com(self, sandbox):
         svc = sandbox / "rsvp" / "services" / "invite.py"
