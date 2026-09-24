@@ -74,6 +74,7 @@ LAYERS: list[tuple[str, set[str]]] = [
 # that bypasses the port, so a test's fake would never see it (phase 3).
 SEAM_CLIENTS = ["rsvp_app.py"]
 SEAM_MODULE = "outlook_com"
+WIRING_CLASS = "RSVPApp"
 
 
 def seam_bypasses(path: Path) -> list[tuple[int, str]]:
@@ -167,10 +168,23 @@ def _is_default_wiring(node: ast.Name, parent: dict[int, ast.AST]) -> bool:
         return False
     # self.outlook must be the ONLY target: `self.outlook = oc = ...` kept an
     # alias through the second one (Codex review of PR #8).
-    return (len(targets) == 1 and isinstance(targets[0], ast.Attribute)
+    if not (len(targets) == 1 and isinstance(targets[0], ast.Attribute)
             and targets[0].attr == "outlook"
             and isinstance(targets[0].value, ast.Name)
-            and targets[0].value.id == "self")
+            and targets[0].value.id == "self"):
+        return False
+    # And it must be the constructor's wiring, taking `outlook` as its
+    # parameter: the same line in another method would swap an injected fake
+    # for the real adapter whenever that method ran (Codex review of PR #8).
+    func = parent.get(id(assign))
+    while func is not None and not isinstance(
+            func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        func = parent.get(id(func))
+    cls = parent.get(id(func)) if func is not None else None
+    return (func is not None and func.name == "__init__"
+            and isinstance(cls, ast.ClassDef) and cls.name == WIRING_CLASS
+            and any(a.arg == "outlook"
+                    for a in func.args.args + func.args.kwonlyargs))
 
 
 def imported_roots(path: Path) -> tuple[set[str], set[str]]:

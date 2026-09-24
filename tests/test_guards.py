@@ -178,6 +178,26 @@ class TestLayeringGuard:
         assert result.returncode == 1, (
             f"GUARD IS BLIND: {wiring!r} discards the injected OutlookPort.")
 
+    def test_fails_when_the_wiring_moves_out_of_the_constructor(self, sandbox):
+        """Codex review of PR #8: the exact wiring line in another method
+        would replace an injected fake with the real adapter."""
+        app = sandbox / "rsvp_app.py"
+        text = app.read_text(encoding="utf-8")
+        line = ("        self.outlook: OutlookPort = outlook if outlook is not None "
+                "else outlook_com\n")
+        assert line in text, "the wiring line moved"
+        mutated = text.replace(line, "        self.outlook = outlook\n", 1)
+        mutated = mutated.replace(
+            "    def _send_invite(self):\n",
+            "    def _rewire(self, outlook=None):\n" + line + "\n"
+            "    def _send_invite(self):\n", 1)
+        assert "_rewire" in mutated, "mutation did not apply"
+        app.write_text(mutated, encoding="utf-8")
+        result = run_guard("check_layering.py", sandbox)
+        assert result.returncode == 1, (
+            "GUARD IS BLIND: the wiring moved out of RSVPApp.__init__.")
+        assert "outside the default wiring" in result.stderr
+
     @pytest.mark.parametrize("old, new", [
         ("else outlook_com\n", "else (oc := outlook_com)\n"),
         ("self.outlook: OutlookPort = outlook if",
