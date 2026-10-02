@@ -182,6 +182,14 @@ class TestLayeringGuard:
         "from rsvp import adapters\n",
         "import rsvp.adapters.outlook_com\n",
         "import rsvp\nSEND = rsvp.adapters.outlook_com.send_reminder_email\n",
+        "import importlib\n"
+        "OC = importlib.import_module('..adapters.outlook_com', __package__)\n",
+        "import importlib\n"
+        "OC = importlib.import_module('..adapters', __package__)\n",
+        "import importlib\n"
+        "OC = importlib.import_module(name='rsvp.adapters.outlook_com')\n",
+        "OC = __import__('adapters.outlook_com', globals(), locals(), [], 2)\n",
+        "OC = __import__('adapters', level=2)\n",
     ])
     def test_fails_when_a_service_imports_the_adapter(self, sandbox, line):
         """The adapter now sits inside the rsvp package, so a layer above the

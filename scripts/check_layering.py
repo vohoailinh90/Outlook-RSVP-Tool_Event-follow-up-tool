@@ -58,16 +58,33 @@ def absolute_from(path: Path, node: ast.ImportFrom) -> str | None:
     import (`from ..adapters import outlook_com`) against the file's package.
     Skipping relative imports would let any module inside rsvp/ reach the
     adapter without a name the guard recognises."""
-    if node.level == 0:
-        return node.module
+    return resolve_relative(path, node.level, node.module)
+
+
+def resolve_relative(path: Path, level: int, module: str | None) -> str | None:
+    """`level` leading dots plus `module`, read from the package of `path`."""
+    if level == 0:
+        return module
     try:
         parts = list(path.resolve().relative_to(ROOT).parent.parts)
     except ValueError:
-        return node.module
-    if node.level - 1 > len(parts):
+        return module
+    if level - 1 > len(parts):
         return None
-    base = parts[:len(parts) - (node.level - 1)]
-    return ".".join(base + ([node.module] if node.module else [])) or None
+    base = parts[:len(parts) - (level - 1)]
+    return ".".join(base + ([module] if module else [])) or None
+
+
+def dynamic_root(path: Path, name: str) -> str:
+    """layer_root of a constant import_module/__import__ name. A relative
+    name (`import_module("..adapters.outlook_com", __package__)`) is resolved
+    against the calling file's package, like `from .. import`; without that a
+    leading dot gave an empty root and the adapter passed (Codex review of
+    PR #10)."""
+    stripped = name.lstrip(".")
+    level = len(name) - len(stripped)
+    resolved = resolve_relative(path, level, stripped or None) if level else name
+    return layer_root(resolved or "")
 
 # Function-local imports of a heavy dependency are NOT automatically fine.
 # Deferring an import keeps the module importable, but the layer still depends
@@ -308,17 +325,27 @@ def imported_roots(path: Path) -> tuple[set[str], set[str]]:
     # statically - a computed module name is beyond any static check, and this
     # guard does not pretend otherwise.
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not node.args:
+        if not isinstance(node, ast.Call):
             continue
         fn = node.func
         name = (fn.attr if isinstance(fn, ast.Attribute)
                 else fn.id if isinstance(fn, ast.Name) else None)
         if name not in {"import_module", "__import__"}:
             continue
-        arg = node.args[0]
-        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-            local.add((call_scope.get(id(node), "<module>"),
-                       layer_root(arg.value)))
+        keywords = {k.arg: k.value for k in node.keywords if k.arg}
+        # The module name may be passed by keyword: import_module(name=...).
+        arg = node.args[0] if node.args else keywords.get("name")
+        if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
+            continue
+        module = arg.value
+        # __import__(name, globals, locals, fromlist, level): a positive
+        # level makes a bare name relative, `__import__("adapters", ..., 1)`.
+        level = node.args[4] if name == "__import__" and len(node.args) > 4 else keywords.get("level")
+        if (isinstance(level, ast.Constant) and isinstance(level.value, int)
+                and level.value > 0 and not module.startswith(".")):
+            module = "." * level.value + module
+        local.add((call_scope.get(id(node), "<module>"),
+                   dynamic_root(path, module)))
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
