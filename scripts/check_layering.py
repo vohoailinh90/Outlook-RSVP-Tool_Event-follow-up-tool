@@ -21,6 +21,7 @@ Exit 0 clean, 1 violation, 2 could not run.
 from __future__ import annotations
 
 import ast
+import re
 import sys
 from pathlib import Path
 
@@ -279,17 +280,41 @@ def _outlook_defaults_to_none(args: ast.arguments) -> bool:
                and d.value is None for a, d in pairs)
 
 
-def adapter_attributes(path: Path) -> list[int]:
-    """Lines where a layer reaches the adapter through an attribute:
-    `import rsvp` then `rsvp.adapters.outlook_com.send_...`. The import
-    statement alone names only `rsvp`, which every layer may import."""
+# A string that reads as a module path: dotted identifiers, optional leading
+# dots for a relative name. Prose has spaces and is never matched.
+MODULE_PATH = re.compile(r"\.*[A-Za-z_]\w*(\.[A-Za-z_]\w*)*")
+
+
+def adapter_references(path: Path, strings: bool = True) -> list[int]:
+    """Lines where a layer names the adapter without an import statement.
+
+    - An attribute: `import rsvp` then `rsvp.adapters.outlook_com.send_...`;
+      the import alone names only `rsvp`, which every layer may import.
+    - A string constant that is a module path with an `adapters` /
+      `outlook_com` component: `load("rsvp.adapters.outlook_com")` after
+      `from importlib import import_module as load`, `getattr(rsvp,
+      "adapters")`, a package argument. Matching the NAME rather than the
+      function that consumes it ends a run of review rounds (Codex, PR #10)
+      that each found one more way to spell the call. Docstrings are skipped,
+      and so are scripts/ (`strings=False`): the guards there must name the
+      adapter to guard it, and none of them runs inside the app.
+    """
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (SyntaxError, OSError):
         return []
-    return sorted({node.lineno for node in ast.walk(tree)
-                   if isinstance(node, ast.Attribute)
-                   and node.attr in ("adapters", SEAM_MODULE)})
+    docstrings = {id(node.value) for node in ast.walk(tree)
+                  if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)}
+    lines = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in ("adapters", SEAM_MODULE):
+            lines.add(node.lineno)
+        elif (strings and isinstance(node, ast.Constant) and isinstance(node.value, str)
+              and id(node) not in docstrings
+              and MODULE_PATH.fullmatch(node.value)
+              and {"adapters", SEAM_MODULE} & set(node.value.split("."))):
+            lines.add(node.lineno)
+    return sorted(lines)
 
 
 def imported_roots(path: Path) -> tuple[set[str], set[str]]:
@@ -403,10 +428,11 @@ def main() -> int:
                 )
             rel = path.relative_to(ROOT).as_posix()
             if "outlook_com" in forbidden:
-                for line in adapter_attributes(path):
+                for line in adapter_references(path, strings=rel.startswith("rsvp/")):
                     violations.append(
-                        f"{rel}:{line}: reaches rsvp.adapters (outlook_com) as an "
-                        f"attribute, which needs {HEAVY['outlook_com']}.")
+                        f"{rel}:{line}: names rsvp.adapters (outlook_com) as an "
+                        f"attribute or a module-path string, which needs "
+                        f"{HEAVY['outlook_com']}.")
             for func, lazy in sorted(local):
                 if lazy not in forbidden:
                     continue

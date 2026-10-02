@@ -225,6 +225,10 @@ class TestLayeringGuard:
         "OC = importlib.import_module('.outlook_com', package='rsvp.adapters')\n",
         "import importlib\n"
         "OC = importlib.import_module(name='.adapters', package='rsvp')\n",
+        # Round 4: the import function aliased; the name is what is matched.
+        "from importlib import import_module as load\n"
+        "OC = load('rsvp.adapters.outlook_com')\n",
+        "import rsvp\nOC = getattr(rsvp, 'adapters')\n",
     ])
     def test_fails_when_a_service_imports_the_adapter(self, sandbox, line):
         """The adapter now sits inside the rsvp package, so a layer above the
@@ -237,6 +241,14 @@ class TestLayeringGuard:
         assert result.returncode == 1, (
             f"GUARD IS BLIND: {line.strip()!r} in rsvp/services/ passed.")
         assert "outlook_com" in result.stderr
+
+    def test_prose_naming_the_adapter_is_not_an_import(self, sandbox):
+        """A message that mentions the adapter, or a docstring, is prose."""
+        target = sandbox / "rsvp" / "services" / "invite.py"
+        target.write_text(
+            'NOTE = "see rsvp.adapters.outlook_com for the COM side"\n'
+            + target.read_text(encoding="utf-8"), encoding="utf-8")
+        assert run_guard("check_layering.py", sandbox).returncode == 0
 
     @pytest.mark.parametrize("wiring", [
         "outlook if False else outlook_com",
