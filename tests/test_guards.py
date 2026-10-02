@@ -218,6 +218,13 @@ class TestLayeringGuard:
         "OC = importlib.import_module(name='rsvp.adapters.outlook_com')\n",
         "OC = __import__('adapters.outlook_com', globals(), locals(), [], 2)\n",
         "OC = __import__('adapters', level=2)\n",
+        # Codex review of PR #10, round 3: an explicit package argument.
+        "import importlib\n"
+        "OC = importlib.import_module('.adapters.outlook_com', 'rsvp')\n",
+        "import importlib\n"
+        "OC = importlib.import_module('.outlook_com', package='rsvp.adapters')\n",
+        "import importlib\n"
+        "OC = importlib.import_module(name='.adapters', package='rsvp')\n",
     ])
     def test_fails_when_a_service_imports_the_adapter(self, sandbox, line):
         """The adapter now sits inside the rsvp package, so a layer above the

@@ -75,16 +75,31 @@ def resolve_relative(path: Path, level: int, module: str | None) -> str | None:
     return ".".join(base + ([module] if module else [])) or None
 
 
-def dynamic_root(path: Path, name: str) -> str:
+def dynamic_root(path: Path, name: str, package: str | None = None) -> str:
     """layer_root of a constant import_module/__import__ name. A relative
     name (`import_module("..adapters.outlook_com", __package__)`) is resolved
     against the calling file's package, like `from .. import`; without that a
     leading dot gave an empty root and the adapter passed (Codex review of
-    PR #10)."""
+    PR #10).
+
+    Root cause of two rounds of findings: modelling every way Python resolves
+    a dynamic name is a race the guard keeps losing. So a name or `package`
+    with an `adapters` / `outlook_com` component is the adapter, whatever it
+    resolves against; only then is the rest resolved, against a constant
+    `package` when one is given (`import_module(".x", "rsvp")`), else the
+    caller's own package."""
+    components = {part for text in (name, package or "") for part in text.split(".")}
+    if components & {"adapters", SEAM_MODULE}:
+        return "outlook_com"
     stripped = name.lstrip(".")
     level = len(name) - len(stripped)
-    resolved = resolve_relative(path, level, stripped or None) if level else name
-    return layer_root(resolved or "")
+    if not level:
+        return layer_root(name)
+    if package:
+        base = package.split(".")
+        base = base[:len(base) - (level - 1)] if level - 1 <= len(base) else []
+        return layer_root(".".join(base + ([stripped] if stripped else [])))
+    return layer_root(resolve_relative(path, level, stripped or None) or "")
 
 # Function-local imports of a heavy dependency are NOT automatically fine.
 # Deferring an import keeps the module importable, but the layer still depends
@@ -344,8 +359,11 @@ def imported_roots(path: Path) -> tuple[set[str], set[str]]:
         if (isinstance(level, ast.Constant) and isinstance(level.value, int)
                 and level.value > 0 and not module.startswith(".")):
             module = "." * level.value + module
+        package = node.args[1] if name == "import_module" and len(node.args) > 1 else keywords.get("package")
+        package = (package.value if isinstance(package, ast.Constant)
+                   and isinstance(package.value, str) else None)
         local.add((call_scope.get(id(node), "<module>"),
-                   dynamic_root(path, module)))
+                   dynamic_root(path, module, package)))
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
