@@ -142,3 +142,17 @@ class TestSendInvite:
         with pytest.raises(ValueError):
             send_invite(outlook, lambda r: None, _request(mode="invte"))
         assert outlook.calls == []
+
+
+def test_the_vote_illustration_resolves_to_a_real_file():
+    """outlook_com attaches how_to_vote.png only `if os.path.exists(...)`, so a
+    wrong APP_ROOT drops the image from every invite without an error. The
+    module needs pywin32, so evaluate its APP_ROOT expression from source."""
+    import os
+    adapter = ROOT / "rsvp" / "adapters" / "outlook_com.py"
+    tree = ast.parse(adapter.read_text(encoding="utf-8"))
+    expr = next(node.value for node in tree.body if isinstance(node, ast.Assign)
+                and any(getattr(t, "id", None) == "APP_ROOT" for t in node.targets))
+    app_root = eval(compile(ast.Expression(expr), str(adapter), "eval"),
+                    {"os": os, "__file__": str(adapter)})
+    assert os.path.isfile(os.path.join(app_root, "how_to_vote.png"))

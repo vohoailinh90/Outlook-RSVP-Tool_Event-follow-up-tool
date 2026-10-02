@@ -247,6 +247,19 @@ def _outlook_defaults_to_none(args: ast.arguments) -> bool:
                and d.value is None for a, d in pairs)
 
 
+def adapter_attributes(path: Path) -> list[int]:
+    """Lines where a layer reaches the adapter through an attribute:
+    `import rsvp` then `rsvp.adapters.outlook_com.send_...`. The import
+    statement alone names only `rsvp`, which every layer may import."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (SyntaxError, OSError):
+        return []
+    return sorted({node.lineno for node in ast.walk(tree)
+                   if isinstance(node, ast.Attribute)
+                   and node.attr in ("adapters", SEAM_MODULE)})
+
+
 def imported_roots(path: Path) -> tuple[set[str], set[str]]:
     """Return (module_level, function_local) top-level import names.
 
@@ -344,6 +357,11 @@ def main() -> int:
                     f"without it - move it inside the function that needs it."
                 )
             rel = path.relative_to(ROOT).as_posix()
+            if "outlook_com" in forbidden:
+                for line in adapter_attributes(path):
+                    violations.append(
+                        f"{rel}:{line}: reaches rsvp.adapters (outlook_com) as an "
+                        f"attribute, which needs {HEAVY['outlook_com']}.")
             for func, lazy in sorted(local):
                 if lazy not in forbidden:
                     continue

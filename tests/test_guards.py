@@ -181,6 +181,7 @@ class TestLayeringGuard:
         "from .. import adapters\n",
         "from rsvp import adapters\n",
         "import rsvp.adapters.outlook_com\n",
+        "import rsvp\nSEND = rsvp.adapters.outlook_com.send_reminder_email\n",
     ])
     def test_fails_when_a_service_imports_the_adapter(self, sandbox, line):
         """The adapter now sits inside the rsvp package, so a layer above the
