@@ -90,6 +90,34 @@ class TestI18nMatrixGuard:
         assert "vi" in result.stderr
 
 
+class TestLayoutGuard:
+    def test_passes_on_clean_tree(self, sandbox):
+        assert run_guard("layout_check.py", sandbox).returncode == 0
+
+    @pytest.mark.parametrize("name, text, verdict", [
+        ("helpers.py", "def helper():\n    return 1\n", "library module in the root"),
+        ("test_smoke.py", "def test_x():\n    pass\n", "test file in the root"),
+    ])
+    def test_fails_on_a_forbidden_root_file(self, sandbox, name, text, verdict):
+        """A root module the launcher would import, or a test beside the app,
+        is the clutter this gate keeps out; CI runs it on a tree that is
+        already clean, so only this proves it still fires."""
+        (sandbox / name).write_text(text, encoding="utf-8")
+        result = run_guard("layout_check.py", sandbox)
+        assert result.returncode == 1, (
+            f"GUARD IS BLIND: {name} in the root passed layout_check.py.")
+        assert f"{name}: {verdict}" in result.stdout
+
+    def test_fails_when_a_moved_module_returns_to_the_root(self, sandbox):
+        """The restructure's own regression: db.py back beside rsvp_app.py."""
+        (sandbox / "db.py").write_text(
+            (sandbox / "rsvp" / "storage" / "db.py").read_text(encoding="utf-8"),
+            encoding="utf-8")
+        result = run_guard("layout_check.py", sandbox)
+        assert result.returncode == 1
+        assert "db.py: library module in the root" in result.stdout
+
+
 class TestLayeringGuard:
     def test_passes_on_clean_tree(self, sandbox):
         assert run_guard("check_layering.py", sandbox).returncode == 0
