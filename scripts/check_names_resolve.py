@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-TARGETS = ("rsvp_app.py", "db.py", "history.py", "outlook_com.py", "rsvp/**/*.py")
+TARGETS = ("rsvp_app.py", "rsvp/**/*.py")
 BUILTINS = set(dir(builtins)) | {"__file__", "__name__", "__doc__", "__package__"}
 
 

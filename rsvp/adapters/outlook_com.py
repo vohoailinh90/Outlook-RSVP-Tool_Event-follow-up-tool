@@ -31,11 +31,16 @@ def _outlook_app():
     return win32com.client.Dispatch("Outlook.Application")
 
 
+# rsvp/adapters/outlook_com.py -> the app root, where how_to_vote.png lives.
+APP_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
 def _asset_path(filename):
-    """Đường dẫn tuyệt đối tới file asset (vd ảnh minh hoạ) nằm CÙNG THƯ MỤC
-    với outlook_com.py — để hoạt động đúng dù app được chạy từ thư mục nào
-    (Windows Task Scheduler, shortcut, v.v.)."""
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+    """Đường dẫn tuyệt đối tới file asset (vd ảnh minh hoạ) nằm ở THƯ MỤC GỐC
+    của app, cạnh rsvp_app.py — để hoạt động đúng dù app được chạy từ thư mục
+    nào (Windows Task Scheduler, shortcut, v.v.). File này nằm ở
+    rsvp/adapters/, nên thư mục gốc là ba cấp dirname phía trên nó."""
+    return os.path.join(APP_ROOT, filename)
 
 
 def _attach_vote_illustration(mail):

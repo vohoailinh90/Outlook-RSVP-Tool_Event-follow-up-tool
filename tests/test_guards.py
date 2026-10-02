@@ -90,12 +90,40 @@ class TestI18nMatrixGuard:
         assert "vi" in result.stderr
 
 
+class TestLayoutGuard:
+    def test_passes_on_clean_tree(self, sandbox):
+        assert run_guard("layout_check.py", sandbox).returncode == 0
+
+    @pytest.mark.parametrize("name, text, verdict", [
+        ("helpers.py", "def helper():\n    return 1\n", "library module in the root"),
+        ("test_smoke.py", "def test_x():\n    pass\n", "test file in the root"),
+    ])
+    def test_fails_on_a_forbidden_root_file(self, sandbox, name, text, verdict):
+        """A root module the launcher would import, or a test beside the app,
+        is the clutter this gate keeps out; CI runs it on a tree that is
+        already clean, so only this proves it still fires."""
+        (sandbox / name).write_text(text, encoding="utf-8")
+        result = run_guard("layout_check.py", sandbox)
+        assert result.returncode == 1, (
+            f"GUARD IS BLIND: {name} in the root passed layout_check.py.")
+        assert f"{name}: {verdict}" in result.stdout
+
+    def test_fails_when_a_moved_module_returns_to_the_root(self, sandbox):
+        """The restructure's own regression: db.py back beside rsvp_app.py."""
+        (sandbox / "db.py").write_text(
+            (sandbox / "rsvp" / "storage" / "db.py").read_text(encoding="utf-8"),
+            encoding="utf-8")
+        result = run_guard("layout_check.py", sandbox)
+        assert result.returncode == 1
+        assert "db.py: library module in the root" in result.stdout
+
+
 class TestLayeringGuard:
     def test_passes_on_clean_tree(self, sandbox):
         assert run_guard("check_layering.py", sandbox).returncode == 0
 
     def test_fails_on_module_level_heavy_import(self, sandbox):
-        db = sandbox / "db.py"
+        db = sandbox / "rsvp" / "storage" / "db.py"
         db.write_text("import tkinter\n" + db.read_text(encoding="utf-8"), encoding="utf-8")
         assert run_guard("check_layering.py", sandbox).returncode == 1, (
             "GUARD IS BLIND: the storage layer imported tkinter at module level."
@@ -103,7 +131,7 @@ class TestLayeringGuard:
 
     def test_fails_on_undeclared_lazy_heavy_import(self, sandbox):
         """The laundering path: deferring an import must not evade the guard."""
-        db = sandbox / "db.py"
+        db = sandbox / "rsvp" / "storage" / "db.py"
         text = db.read_text(encoding="utf-8")
         mutated = text.replace(
             "def load_history(path=DB_FILE_DEFAULT):",
@@ -144,6 +172,22 @@ class TestLayeringGuard:
         ("import importlib\n",
          "importlib.import_module(name='outlook_com').send_reminder_email("),
         ("import sys\n", "sys.modules['outlook_com'].send_reminder_email("),
+        # The adapter moved into rsvp/adapters/: every route to it there.
+        ("from rsvp.adapters import outlook_com as oc\n",
+         "oc.send_reminder_email("),
+        ("from rsvp.adapters.outlook_com import send_reminder_email\n",
+         "send_reminder_email("),
+        ("import rsvp.adapters.outlook_com\n",
+         "rsvp.adapters.outlook_com.send_reminder_email("),
+        ("from rsvp import adapters\n",
+         "adapters.outlook_com.send_reminder_email("),
+        ("import rsvp.adapters as ad\n", "ad.outlook_com.send_reminder_email("),
+        ("", "__import__('rsvp.adapters.outlook_com').send_reminder_email("),
+        ("import importlib\n",
+         "importlib.import_module('rsvp.adapters.outlook_com')"
+         ".send_reminder_email("),
+        ("import sys\n",
+         "sys.modules['rsvp.adapters.outlook_com'].send_reminder_email("),
     ])
     def test_fails_when_the_app_aliases_outlook_com(self, sandbox, prefix, call):
         """Codex review of PR #1: an aliased or from-import reached the
@@ -158,6 +202,53 @@ class TestLayeringGuard:
         assert result.returncode == 1, (
             f"GUARD IS BLIND: {prefix.strip() or call!r} bypassed the seam.")
         assert "bypassing the OutlookPort" in result.stderr
+
+    @pytest.mark.parametrize("line", [
+        "from rsvp.adapters import outlook_com\n",
+        "from ..adapters import outlook_com\n",
+        "from .. import adapters\n",
+        "from rsvp import adapters\n",
+        "import rsvp.adapters.outlook_com\n",
+        "import rsvp\nSEND = rsvp.adapters.outlook_com.send_reminder_email\n",
+        "import importlib\n"
+        "OC = importlib.import_module('..adapters.outlook_com', __package__)\n",
+        "import importlib\n"
+        "OC = importlib.import_module('..adapters', __package__)\n",
+        "import importlib\n"
+        "OC = importlib.import_module(name='rsvp.adapters.outlook_com')\n",
+        "OC = __import__('adapters.outlook_com', globals(), locals(), [], 2)\n",
+        "OC = __import__('adapters', level=2)\n",
+        # Codex review of PR #10, round 3: an explicit package argument.
+        "import importlib\n"
+        "OC = importlib.import_module('.adapters.outlook_com', 'rsvp')\n",
+        "import importlib\n"
+        "OC = importlib.import_module('.outlook_com', package='rsvp.adapters')\n",
+        "import importlib\n"
+        "OC = importlib.import_module(name='.adapters', package='rsvp')\n",
+        # Round 4: the import function aliased; the name is what is matched.
+        "from importlib import import_module as load\n"
+        "OC = load('rsvp.adapters.outlook_com')\n",
+        "import rsvp\nOC = getattr(rsvp, 'adapters')\n",
+    ])
+    def test_fails_when_a_service_imports_the_adapter(self, sandbox, line):
+        """The adapter now sits inside the rsvp package, so a layer above the
+        seam can reach it by an absolute or a relative import; both must
+        fail, or the port is optional."""
+        target = sandbox / "rsvp" / "services" / "invite.py"
+        target.write_text(line + target.read_text(encoding="utf-8"),
+                          encoding="utf-8")
+        result = run_guard("check_layering.py", sandbox)
+        assert result.returncode == 1, (
+            f"GUARD IS BLIND: {line.strip()!r} in rsvp/services/ passed.")
+        assert "outlook_com" in result.stderr
+
+    def test_prose_naming_the_adapter_is_not_an_import(self, sandbox):
+        """A message that mentions the adapter, or a docstring, is prose."""
+        target = sandbox / "rsvp" / "services" / "invite.py"
+        target.write_text(
+            'NOTE = "see rsvp.adapters.outlook_com for the COM side"\n'
+            + target.read_text(encoding="utf-8"), encoding="utf-8")
+        assert run_guard("check_layering.py", sandbox).returncode == 0
 
     @pytest.mark.parametrize("wiring", [
         "outlook if False else outlook_com",
@@ -848,7 +939,7 @@ class TestGuardsResistEvasion:
         )
 
     def test_layering_catches_a_dynamic_import(self, sandbox):
-        db = sandbox / "db.py"
+        db = sandbox / "rsvp" / "storage" / "db.py"
         text = db.read_text(encoding="utf-8")
         mutated = text.replace(
             "def load_history(path=DB_FILE_DEFAULT):",
@@ -944,7 +1035,7 @@ class TestNameResolutionGuard:
         module globals, so `import win32com.client` inside
         scan_voting_responses() hid its loss from _outlook_app() - which then
         raises NameError on every Outlook path."""
-        target = sandbox / "outlook_com.py"
+        target = sandbox / "rsvp" / "adapters" / "outlook_com.py"
         text = target.read_text(encoding="utf-8")
         mutated = text.replace(
             "def _outlook_app():\n    import win32com.client\n",

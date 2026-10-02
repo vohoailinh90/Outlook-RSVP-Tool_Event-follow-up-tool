@@ -149,6 +149,15 @@ calls `CoInitialize` inside each function, on the calling thread.
 Left for Phase 4: the other send paths (reminders, gift reminder and report, calendar
 invite, thank-you) call `self.outlook` but their orchestration is still in the UI class.
 
+**Root layout (done).** `db.py`, `outlook_com.py` and `history.py` moved out of the root
+into `rsvp/storage/`, `rsvp/adapters/` and `rsvp/export/` (pure `git mv`; the tables above
+describe them under their old names). `rsvp_app.py` imports the adapter as
+`from rsvp.adapters import outlook_com`, and `check_layering.py` reports every route to
+`rsvp.adapters` — absolute, relative, `from rsvp import adapters`, a string — as
+`outlook_com`. `outlook_com._asset_path` now resolves `how_to_vote.png` from the app root,
+which the move would otherwise have broken silently. `scripts/layout_check.py` keeps the
+root to what a user runs.
+
 **Phase 4 — split `ui/`.** Seven tabs, seven modules, out of the 4,673-line class. Largest
 and last, because it is worth least until the layers beneath it are real.
 

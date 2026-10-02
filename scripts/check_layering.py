@@ -11,8 +11,8 @@ which is precisely how rsvp_app.py's 766 lines of platform-neutral template
 code ended up untestable: they sit in a module that imports outlook_com at
 the top.
 
-This guard is written to be meaningful TODAY (db.py is already stdlib-only and
-must stay that way) and to keep being meaningful as each extraction phase
+This guard is written to be meaningful TODAY (rsvp/storage/db.py is already
+stdlib-only and must stay that way) and to keep being meaningful as each extraction phase
 lands, by adding the new package to LAYERS. A guard that only describes a
 future state enforces nothing.
 
@@ -21,6 +21,7 @@ Exit 0 clean, 1 violation, 2 could not run.
 from __future__ import annotations
 
 import ast
+import re
 import sys
 from pathlib import Path
 
@@ -37,6 +38,69 @@ HEAVY = {
     # adapter. Code above the seam takes an OutlookPort (rsvp/ports/) instead.
     "outlook_com": "Windows + Outlook (take an OutlookPort instead)",
 }
+
+# The COM adapter lives at rsvp/adapters/outlook_com.py. Its top-level import
+# name is `rsvp`, which says nothing, so every import of the adapters package
+# (absolute or relative) is reported under the HEAVY key "outlook_com".
+ADAPTERS_PACKAGE = "rsvp.adapters"
+ADAPTER_MODULE = "rsvp.adapters.outlook_com"
+
+
+def layer_root(dotted: str) -> str:
+    """The HEAVY key an absolute import name falls under: the adapters
+    package counts as outlook_com, anything else by its top-level name."""
+    if dotted == ADAPTERS_PACKAGE or dotted.startswith(ADAPTERS_PACKAGE + "."):
+        return "outlook_com"
+    return dotted.split(".")[0]
+
+
+def absolute_from(path: Path, node: ast.ImportFrom) -> str | None:
+    """The absolute module a `from X import ...` reads, resolving a relative
+    import (`from ..adapters import outlook_com`) against the file's package.
+    Skipping relative imports would let any module inside rsvp/ reach the
+    adapter without a name the guard recognises."""
+    return resolve_relative(path, node.level, node.module)
+
+
+def resolve_relative(path: Path, level: int, module: str | None) -> str | None:
+    """`level` leading dots plus `module`, read from the package of `path`."""
+    if level == 0:
+        return module
+    try:
+        parts = list(path.resolve().relative_to(ROOT).parent.parts)
+    except ValueError:
+        return module
+    if level - 1 > len(parts):
+        return None
+    base = parts[:len(parts) - (level - 1)]
+    return ".".join(base + ([module] if module else [])) or None
+
+
+def dynamic_root(path: Path, name: str, package: str | None = None) -> str:
+    """layer_root of a constant import_module/__import__ name. A relative
+    name (`import_module("..adapters.outlook_com", __package__)`) is resolved
+    against the calling file's package, like `from .. import`; without that a
+    leading dot gave an empty root and the adapter passed (Codex review of
+    PR #10).
+
+    Root cause of two rounds of findings: modelling every way Python resolves
+    a dynamic name is a race the guard keeps losing. So a name or `package`
+    with an `adapters` / `outlook_com` component is the adapter, whatever it
+    resolves against; only then is the rest resolved, against a constant
+    `package` when one is given (`import_module(".x", "rsvp")`), else the
+    caller's own package."""
+    components = {part for text in (name, package or "") for part in text.split(".")}
+    if components & {"adapters", SEAM_MODULE}:
+        return "outlook_com"
+    stripped = name.lstrip(".")
+    level = len(name) - len(stripped)
+    if not level:
+        return layer_root(name)
+    if package:
+        base = package.split(".")
+        base = base[:len(base) - (level - 1)] if level - 1 <= len(base) else []
+        return layer_root(".".join(base + ([stripped] if stripped else [])))
+    return layer_root(resolve_relative(path, level, stripped or None) or "")
 
 # Function-local imports of a heavy dependency are NOT automatically fine.
 # Deferring an import keeps the module importable, but the layer still depends
@@ -60,7 +124,6 @@ LAZY_ALLOWED: dict[tuple[str, str, str], str] = {}
 # path glob -> set of top-level module names it may NOT import.
 # Phase 1 adds "rsvp/i18n/**", phase 2 "rsvp/domain/**", and so on.
 LAYERS: list[tuple[str, set[str]]] = [
-    ("db.py", set(HEAVY)),
     ("scripts/*.py", set(HEAVY)),
     ("rsvp/domain/**/*.py", set(HEAVY)),
     ("rsvp/i18n/**/*.py", set(HEAVY)),
@@ -70,7 +133,8 @@ LAYERS: list[tuple[str, set[str]]] = [
 ]
 
 # The application above the Outlook seam may name outlook_com only to wire it
-# in as the default OutlookPort. Any `outlook_com.<attr>` access is a call
+# in as the default OutlookPort, imported exactly as
+# `from rsvp.adapters import outlook_com`. Any `outlook_com.<attr>` access is a call
 # that bypasses the port, so a test's fake would never see it (phase 3).
 SEAM_CLIENTS = ["rsvp_app.py"]
 SEAM_MODULE = "outlook_com"
@@ -81,11 +145,13 @@ def seam_bypasses(path: Path) -> list[tuple[int, str]]:
     """(line, what) for every way `path` could reach outlook_com without
     going through the injected OutlookPort.
 
-    Allowed: a plain `import outlook_com`, and ONE use of the name - the
-    default wiring. Anything else is a bypass: an attribute call, a second
-    use of the name (`oc = outlook_com` then `oc.send_...`), an aliased
-    import, or `from outlook_com import ...` (Codex review of PR #1: the
-    first version looked only for `outlook_com.<attr>`)."""
+    Allowed: `from rsvp.adapters import outlook_com`, and ONE use of the
+    name - the default wiring. Anything else is a bypass: an attribute call,
+    a second use of the name (`oc = outlook_com` then `oc.send_...`), an
+    aliased import, `from rsvp.adapters.outlook_com import ...` (Codex
+    review of PR #1: the first version looked only for `outlook_com.<attr>`),
+    or any other route to the adapters package (`import rsvp.adapters...`,
+    `from rsvp import adapters`, `<x>.adapters`, `<x>.outlook_com`)."""
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (SyntaxError, OSError):
@@ -104,23 +170,37 @@ def seam_bypasses(path: Path) -> list[tuple[int, str]]:
         # a new call shape cannot slip past (Codex review of PR #8). Prose
         # that merely mentions the module in a longer string is not matched.
         if (isinstance(node, ast.Constant) and isinstance(node.value, str)
-                and (node.value == SEAM_MODULE
-                     or node.value.startswith(SEAM_MODULE + "."))):
+                and any(node.value == name or node.value.startswith(name + ".")
+                        for name in (SEAM_MODULE, ADAPTERS_PACKAGE))):
             found.append((node.lineno,
-                          f"names {SEAM_MODULE} as a string (a dynamic "
+                          f"names {node.value!r} as a string (a dynamic "
                           f"import)"))
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if (alias.name.split(".")[0] == SEAM_MODULE
-                        and alias.asname is not None):
-                    found.append((node.lineno, f"imports {SEAM_MODULE} as "
-                                  f"{alias.asname!r}"))
-        elif (isinstance(node, ast.ImportFrom) and node.module
-              and node.module.split(".")[0] == SEAM_MODULE):
-            found.append((node.lineno, f"imports names from {SEAM_MODULE}"))
+                if layer_root(alias.name) == SEAM_MODULE:
+                    found.append((node.lineno, f"imports {alias.name}"
+                                  " (only `from rsvp.adapters import "
+                                  "outlook_com` is the wiring import)"))
+        elif isinstance(node, ast.ImportFrom):
+            module = absolute_from(path, node) or ""
+            if module == ADAPTERS_PACKAGE:
+                for alias in node.names:
+                    if alias.name != SEAM_MODULE or alias.asname is not None:
+                        found.append((node.lineno, f"imports {alias.name} as "
+                                      f"{alias.asname or alias.name!r} from "
+                                      f"{ADAPTERS_PACKAGE}"))
+            elif (layer_root(module) == SEAM_MODULE
+                  or module.split(".")[0] == SEAM_MODULE):
+                found.append((node.lineno, f"imports names from {module}"))
+            elif module == "rsvp" and any(
+                    a.name == "adapters" for a in node.names):
+                found.append((node.lineno, "imports the adapters package"))
         elif isinstance(node, ast.Attribute) and isinstance(
                 node.value, ast.Name) and node.value.id == SEAM_MODULE:
             found.append((node.lineno, f"calls {SEAM_MODULE}.{node.attr}"))
+        elif isinstance(node, ast.Attribute) and node.attr in (
+                SEAM_MODULE, "adapters"):
+            found.append((node.lineno, f"reaches .{node.attr} as an attribute"))
         elif (isinstance(node, ast.Name) and node.id == SEAM_MODULE
               and not isinstance(parent.get(id(node)), ast.Attribute)):
             uses.append(node)
@@ -200,6 +280,43 @@ def _outlook_defaults_to_none(args: ast.arguments) -> bool:
                and d.value is None for a, d in pairs)
 
 
+# A string that reads as a module path: dotted identifiers, optional leading
+# dots for a relative name. Prose has spaces and is never matched.
+MODULE_PATH = re.compile(r"\.*[A-Za-z_]\w*(\.[A-Za-z_]\w*)*")
+
+
+def adapter_references(path: Path, strings: bool = True) -> list[int]:
+    """Lines where a layer names the adapter without an import statement.
+
+    - An attribute: `import rsvp` then `rsvp.adapters.outlook_com.send_...`;
+      the import alone names only `rsvp`, which every layer may import.
+    - A string constant that is a module path with an `adapters` /
+      `outlook_com` component: `load("rsvp.adapters.outlook_com")` after
+      `from importlib import import_module as load`, `getattr(rsvp,
+      "adapters")`, a package argument. Matching the NAME rather than the
+      function that consumes it ends a run of review rounds (Codex, PR #10)
+      that each found one more way to spell the call. Docstrings are skipped,
+      and so are scripts/ (`strings=False`): the guards there must name the
+      adapter to guard it, and none of them runs inside the app.
+    """
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (SyntaxError, OSError):
+        return []
+    docstrings = {id(node.value) for node in ast.walk(tree)
+                  if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)}
+    lines = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in ("adapters", SEAM_MODULE):
+            lines.add(node.lineno)
+        elif (strings and isinstance(node, ast.Constant) and isinstance(node.value, str)
+              and id(node) not in docstrings
+              and MODULE_PATH.fullmatch(node.value)
+              and {"adapters", SEAM_MODULE} & set(node.value.split("."))):
+            lines.add(node.lineno)
+    return sorted(lines)
+
+
 def imported_roots(path: Path) -> tuple[set[str], set[str]]:
     """Return (module_level, function_local) top-level import names.
 
@@ -248,23 +365,41 @@ def imported_roots(path: Path) -> tuple[set[str], set[str]]:
     # statically - a computed module name is beyond any static check, and this
     # guard does not pretend otherwise.
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not node.args:
+        if not isinstance(node, ast.Call):
             continue
         fn = node.func
         name = (fn.attr if isinstance(fn, ast.Attribute)
                 else fn.id if isinstance(fn, ast.Name) else None)
         if name not in {"import_module", "__import__"}:
             continue
-        arg = node.args[0]
-        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-            local.add((call_scope.get(id(node), "<module>"),
-                       arg.value.split(".")[0]))
+        keywords = {k.arg: k.value for k in node.keywords if k.arg}
+        # The module name may be passed by keyword: import_module(name=...).
+        arg = node.args[0] if node.args else keywords.get("name")
+        if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
+            continue
+        module = arg.value
+        # __import__(name, globals, locals, fromlist, level): a positive
+        # level makes a bare name relative, `__import__("adapters", ..., 1)`.
+        level = node.args[4] if name == "__import__" and len(node.args) > 4 else keywords.get("level")
+        if (isinstance(level, ast.Constant) and isinstance(level.value, int)
+                and level.value > 0 and not module.startswith(".")):
+            module = "." * level.value + module
+        package = node.args[1] if name == "import_module" and len(node.args) > 1 else keywords.get("package")
+        package = (package.value if isinstance(package, ast.Constant)
+                   and isinstance(package.value, str) else None)
+        local.add((call_scope.get(id(node), "<module>"),
+                   dynamic_root(path, module, package)))
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            names = {a.name.split(".")[0] for a in node.names}
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            names = {node.module.split(".")[0]}
+            names = {layer_root(a.name) for a in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            module = absolute_from(path, node)
+            if not module:
+                continue
+            # `from rsvp import adapters` names the package in the alias.
+            names = {layer_root(f"{module}.{a.name}") if module == "rsvp"
+                     else layer_root(module) for a in node.names}
         else:
             continue
         enclosing = enclosing_of(node)
@@ -292,6 +427,12 @@ def main() -> int:
                     f"without it - move it inside the function that needs it."
                 )
             rel = path.relative_to(ROOT).as_posix()
+            if "outlook_com" in forbidden:
+                for line in adapter_references(path, strings=rel.startswith("rsvp/")):
+                    violations.append(
+                        f"{rel}:{line}: names rsvp.adapters (outlook_com) as an "
+                        f"attribute or a module-path string, which needs "
+                        f"{HEAVY['outlook_com']}.")
             for func, lazy in sorted(local):
                 if lazy not in forbidden:
                     continue

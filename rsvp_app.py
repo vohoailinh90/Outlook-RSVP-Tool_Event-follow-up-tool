@@ -49,10 +49,9 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
-import history
-import db
-import outlook_com
-from rsvp.export import legacy_excel
+from rsvp.adapters import outlook_com
+from rsvp.export import history, legacy_excel
+from rsvp.storage import db
 from rsvp.ports import OutlookPort
 from rsvp.services.invite import InviteRequest, send_invite
 

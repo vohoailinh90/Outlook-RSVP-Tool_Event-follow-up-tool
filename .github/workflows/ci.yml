@@ -42,6 +42,9 @@ jobs:
         # Vietnamese. Caught verify_golden_baseline.py after it broke this job.
         run: python scripts/check_windows_encoding.py
 
+      - name: The root holds only what a user runs
+        run: python scripts/layout_check.py
+
       - name: Every global name resolves
         # Catches a name dropped from a re-export shim during the staged
         # extraction. No test constructs RSVPApp, so the suite cannot see it.

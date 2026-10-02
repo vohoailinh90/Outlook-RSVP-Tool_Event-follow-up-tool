@@ -119,6 +119,12 @@ screenshots inside `RSVP_tool.pdf` that no text scan could see. Both are untrack
 
 ## Structure
 
+The root holds only what a user runs: `rsvp_app.py`, README, the requirements files and
+`how_to_vote.png`. Every module lives in `rsvp/` (storage in `rsvp/storage/`, the Outlook
+COM adapter in `rsvp/adapters/`, Excel in `rsvp/export/`), tests in `tests/`, guards in
+`scripts/`. `python scripts/layout_check.py` is the verdict and CI runs it; when a change
+adds a Python file, test or module, use `.claude/skills/repo-layout/SKILL.md`.
+
 `docs/agentic/ARCHITECTURE.md` holds the target layering and the staged plan to get there.
 The short version: `rsvp_app.py` is 5,779 lines, of which 766 are already free of Tkinter,
 and those come out first. Read that document before proposing a structural change.

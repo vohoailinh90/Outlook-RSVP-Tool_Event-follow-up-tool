@@ -20,7 +20,7 @@ rsvp_data.db
 *.xlsm
 *.xls
 
-# Local user overrides written by history.py
+# Local user overrides written by rsvp/export/history.py
 fixed_wording_overrides.json
 prompt_overrides.json
 
