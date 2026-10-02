@@ -29,13 +29,12 @@ All data lives in a **single SQLite file**: `rsvp_data.db` (auto-created next to
 on first run). Excel is now only used for **manual export/import** when you need to
 share a report — it's no longer where "live" data is stored, unlike the older version.
 
-**3 files that must sit in the same folder:**
+**What must sit together in one folder:**
 
 | File | Role |
 |---|---|
-| `rsvp_app.py` | Main UI (7 tabs) + all logic |
-| `db.py` | SQLite storage layer (`rsvp_data.db`) — replaces the old `history.py`/Excel |
-| `outlook_com.py` | Sending/reading emails, Calendar Invites via Outlook COM |
+| `rsvp_app.py` | Main UI (7 tabs) — the file you run |
+| `rsvp/` | The app's package: `storage/db.py` (SQLite, `rsvp_data.db`), `adapters/outlook_com.py` (Outlook COM: emails, Calendar Invites), `export/` (Excel), `domain/`, `i18n/`, `ports/`, `services/` |
 
 **Other supporting files:**
 
@@ -144,7 +143,7 @@ illustrates the 3 steps.
 ## 7. Current limitations
 
 - Only reads email from the **Inbox** — if you have a rule that auto-moves email to
-  another folder, you'll need to update the folder lookup in `outlook_com.py`
+  another folder, you'll need to update the folder lookup in `rsvp/adapters/outlook_com.py`
 - Can't distinguish between two people sharing the same email address
 - The old "Actual cost tracking" feature (formerly in Tab 4) has been fully replaced by
   the more detailed Tab 5 (Attendance & Payment) — the old DB columns are kept as-is

@@ -47,7 +47,7 @@ def _signatures(path: Path, cls: str | None) -> dict[str, str]:
 class TestSignaturesAgree:
     def test_port_matches_outlook_com(self):
         port = _signatures(ROOT / "rsvp" / "ports" / "outlook.py", "OutlookPort")
-        real = _signatures(ROOT / "outlook_com.py", None)
+        real = _signatures(ROOT / "rsvp" / "adapters" / "outlook_com.py", None)
         assert port == real
 
     def test_fake_matches_port(self):

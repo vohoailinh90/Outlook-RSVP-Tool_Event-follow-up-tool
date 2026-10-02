@@ -13,7 +13,7 @@ present, so for anyone already using the database it does nothing.
 import os
 from datetime import datetime
 
-from db import (  # the storage layer this writes into
+from rsvp.storage.db import (  # the storage layer this writes into
     DB_FILE_DEFAULT,
     EVENT_COLUMNS,
     get_connection,

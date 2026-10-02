@@ -95,7 +95,7 @@ class TestLayeringGuard:
         assert run_guard("check_layering.py", sandbox).returncode == 0
 
     def test_fails_on_module_level_heavy_import(self, sandbox):
-        db = sandbox / "db.py"
+        db = sandbox / "rsvp" / "storage" / "db.py"
         db.write_text("import tkinter\n" + db.read_text(encoding="utf-8"), encoding="utf-8")
         assert run_guard("check_layering.py", sandbox).returncode == 1, (
             "GUARD IS BLIND: the storage layer imported tkinter at module level."
@@ -103,7 +103,7 @@ class TestLayeringGuard:
 
     def test_fails_on_undeclared_lazy_heavy_import(self, sandbox):
         """The laundering path: deferring an import must not evade the guard."""
-        db = sandbox / "db.py"
+        db = sandbox / "rsvp" / "storage" / "db.py"
         text = db.read_text(encoding="utf-8")
         mutated = text.replace(
             "def load_history(path=DB_FILE_DEFAULT):",
@@ -144,6 +144,22 @@ class TestLayeringGuard:
         ("import importlib\n",
          "importlib.import_module(name='outlook_com').send_reminder_email("),
         ("import sys\n", "sys.modules['outlook_com'].send_reminder_email("),
+        # The adapter moved into rsvp/adapters/: every route to it there.
+        ("from rsvp.adapters import outlook_com as oc\n",
+         "oc.send_reminder_email("),
+        ("from rsvp.adapters.outlook_com import send_reminder_email\n",
+         "send_reminder_email("),
+        ("import rsvp.adapters.outlook_com\n",
+         "rsvp.adapters.outlook_com.send_reminder_email("),
+        ("from rsvp import adapters\n",
+         "adapters.outlook_com.send_reminder_email("),
+        ("import rsvp.adapters as ad\n", "ad.outlook_com.send_reminder_email("),
+        ("", "__import__('rsvp.adapters.outlook_com').send_reminder_email("),
+        ("import importlib\n",
+         "importlib.import_module('rsvp.adapters.outlook_com')"
+         ".send_reminder_email("),
+        ("import sys\n",
+         "sys.modules['rsvp.adapters.outlook_com'].send_reminder_email("),
     ])
     def test_fails_when_the_app_aliases_outlook_com(self, sandbox, prefix, call):
         """Codex review of PR #1: an aliased or from-import reached the
@@ -158,6 +174,25 @@ class TestLayeringGuard:
         assert result.returncode == 1, (
             f"GUARD IS BLIND: {prefix.strip() or call!r} bypassed the seam.")
         assert "bypassing the OutlookPort" in result.stderr
+
+    @pytest.mark.parametrize("line", [
+        "from rsvp.adapters import outlook_com\n",
+        "from ..adapters import outlook_com\n",
+        "from .. import adapters\n",
+        "from rsvp import adapters\n",
+        "import rsvp.adapters.outlook_com\n",
+    ])
+    def test_fails_when_a_service_imports_the_adapter(self, sandbox, line):
+        """The adapter now sits inside the rsvp package, so a layer above the
+        seam can reach it by an absolute or a relative import; both must
+        fail, or the port is optional."""
+        target = sandbox / "rsvp" / "services" / "invite.py"
+        target.write_text(line + target.read_text(encoding="utf-8"),
+                          encoding="utf-8")
+        result = run_guard("check_layering.py", sandbox)
+        assert result.returncode == 1, (
+            f"GUARD IS BLIND: {line.strip()!r} in rsvp/services/ passed.")
+        assert "outlook_com" in result.stderr
 
     @pytest.mark.parametrize("wiring", [
         "outlook if False else outlook_com",
@@ -848,7 +883,7 @@ class TestGuardsResistEvasion:
         )
 
     def test_layering_catches_a_dynamic_import(self, sandbox):
-        db = sandbox / "db.py"
+        db = sandbox / "rsvp" / "storage" / "db.py"
         text = db.read_text(encoding="utf-8")
         mutated = text.replace(
             "def load_history(path=DB_FILE_DEFAULT):",
@@ -944,7 +979,7 @@ class TestNameResolutionGuard:
         module globals, so `import win32com.client` inside
         scan_voting_responses() hid its loss from _outlook_app() - which then
         raises NameError on every Outlook path."""
-        target = sandbox / "outlook_com.py"
+        target = sandbox / "rsvp" / "adapters" / "outlook_com.py"
         text = target.read_text(encoding="utf-8")
         mutated = text.replace(
             "def _outlook_app():\n    import win32com.client\n",
