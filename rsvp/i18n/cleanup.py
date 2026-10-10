@@ -384,7 +384,11 @@ def _priced(text):
     pairs = Counter()
 
     def take(sign, digits, unit):
-        whole, fraction = (re.fullmatch(r"([1-9]\d{0,2}(?:\.\d{3})+)(?:,(\d+))?", digits)
+        # As rsvp.domain.money reads it: beside an explicit USD or US$ the dot
+        # is a decimal point ("12.500 USD" is 12.5), elsewhere it groups.
+        usd_decimal = unit.lower() in ("usd", "us$") and re.fullmatch(r"\d+\.\d{3}", digits)
+        whole, fraction = (usd_decimal and re.fullmatch(r"(\d+)\.(\d+)", digits)
+                           or re.fullmatch(r"([1-9]\d{0,2}(?:\.\d{3})+)(?:,(\d+))?", digits)
                            or re.fullmatch(r"(\d+(?:,\d{3})*)(?:[.,](\d+))?", digits)).groups()
         whole = str(int(re.sub("[.,]", "", whole)))
         amount = (sign or "") + (whole if fraction is None else f"{whole}.{fraction}")

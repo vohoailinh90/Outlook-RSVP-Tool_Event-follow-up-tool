@@ -362,6 +362,13 @@ def test_an_amount_in_another_currency_is_reported(copied, translated, extras):
     ("Phí 12.500.000đ", "Fee 12,500,000 VND", []),
     ("Phí 1.000,50 €", "Fee 1,000.50 EUR", []),
     ("Phí 300.000đ", "Fee 30,000 VND", ["300000"]),
+    # Found by Codex review: beside an explicit USD or US$ the dot is a
+    # decimal point, as rsvp.domain.money reads it, so 12.5 dollars must not
+    # become 12,500.
+    ("Budget 12.500 USD", "Budget 12500 USD", ["12.500 USD"]),
+    ("Budget US$3.500", "予算 3,500ドル", ["3.500 USD"]),
+    ("Budget 12.500 USD", "予算 12.500 USD", []),
+    ("Budget $3.000", "予算 3,000ドル", []),
 ])
 def test_an_amount_that_loses_its_currency_is_reported(copied, translated, gaps):
     assert translation_gaps(copied, translated) == gaps
