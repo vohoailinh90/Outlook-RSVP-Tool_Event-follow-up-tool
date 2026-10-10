@@ -2481,6 +2481,18 @@ class RSVPApp(tk.Tk):
                 + dedupe_note)
             return
 
+        if not source_note and (ja_note or en_note):
+            added = (ja_note or en_note)
+            added = added if len(added) <= 200 else added[:200].rstrip() + " …"
+            if not messagebox.askyesno(
+                    "Note added by Copilot",
+                    "Your note was empty, but Copilot's answer has a note:\n\n"
+                    f"{added}\n\n"
+                    "Saving puts it into the email. Save it anyway? (No keeps the email without "
+                    "a note: write (none) under [JA NOTE] and [EN NOTE] in the box, then Save.)"
+                    + dedupe_note):
+                return
+
         if copied["saved"]:
             # Saving again (after 'Clean up spacing', say): the boxes hold the
             # last save, so only edits made to it since are at stake.

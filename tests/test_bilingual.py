@@ -648,6 +648,19 @@ def test_a_date_added_to_one_half_and_lost_from_the_other_translation_is_asked_a
     assert "English details: 12, 25, 2026" in asked[0][1] and "Japanese details" not in asked[0][1]
 
 
+def test_a_note_copilot_added_to_an_empty_one_is_asked_about(app, monolith, monkeypatch):
+    """Found by Codex review: a note invented for an empty one was saved and
+    sent without a word."""
+    _compose(app, note="")
+    asked = []
+    monkeypatch.setattr(monolith.messagebox, "askyesno",
+                        lambda title, message=None, **_: asked.append(title) or False)
+    _paste_and_save(app, _answer(app, "皆様のご参加をお待ちしております。", "We look forward to seeing you.")[0])
+    assert asked == ["Note added by Copilot"]
+    assert app.full_translations["bilingual"] == ""
+    assert _box(app.txt_editable_preview) == ""
+
+
 def test_an_answer_that_loses_a_date_is_asked_about(app, monolith, monkeypatch):
     _compose(app)
     ja_fixed, en_fixed = split_bilingual(_box(app.txt_fixed_preview))
