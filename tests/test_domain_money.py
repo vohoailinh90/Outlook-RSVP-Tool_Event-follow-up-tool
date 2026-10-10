@@ -462,3 +462,12 @@ def test_a_balance_with_unmatched_parentheses_is_unreadable(text):
                                          ("-500", -500.0), ("500", 500.0)])
 def test_a_balance_with_matched_parentheses_or_a_minus_reads(text, value):
     assert money.parse_signed_amount(text) == value
+
+
+def test_a_typed_minus_on_the_gift_price_is_kept():
+    """Codex review of PR #12: "-500" was read as a 500 expense. Money back
+    keeps its sign, as in the paid boxes."""
+    fig = money.gift_figures(1000.0, "-500", False)
+    assert (fig["gift_cost"], fig["gift_remaining"]) == (-500.0, 1500.0)
+    figures = money.payment_rounds([], "Round 1", "", [])
+    assert money.history_figures(figures, 1000.0, "-500")["TotalExpense"] == "-500"

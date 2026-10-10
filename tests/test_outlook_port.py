@@ -156,3 +156,65 @@ def test_the_vote_illustration_resolves_to_a_real_file():
     app_root = eval(compile(ast.Expression(expr), str(adapter), "eval"),
                     {"os": os, "__file__": str(adapter)})
     assert os.path.isfile(os.path.join(app_root, "how_to_vote.png"))
+
+
+# ── Distribution-list expansion, driven with stand-in AddressEntry objects ──
+# The adapter imports pywin32 at module level, so this runs where the app
+# runs (the Windows CI) and skips elsewhere. Nothing here touches Outlook:
+# the entries below only answer the properties the expansion reads.
+
+class _Members:
+    def __init__(self, items):
+        self._items, self.Count = items, len(items)
+
+    def Item(self, i):
+        return self._items[i - 1]
+
+
+class _Entry:
+    """A person (an SMTP address) or a personal contact group (members)."""
+
+    def __init__(self, name, *, smtp="", members=None, entry_id=""):
+        self.Name, self.Address, self.ID = name, smtp, entry_id
+        is_group = members is not None
+        self.DisplayType = 5 if is_group else 0              # olPrivateDistList
+        self.AddressEntryUserType = 11 if is_group else 0    # olOutlookDistributionList...
+        self.Members = _Members(members) if is_group else None
+
+    def GetExchangeDistributionList(self):
+        return None
+
+    def GetExchangeUser(self):
+        return None
+
+
+class _Namespace:
+    def GetAddressEntryFromID(self, entry_id):
+        raise LookupError("not in this address book")
+
+    def CreateRecipient(self, key):
+        raise LookupError("not in this address book")
+
+
+def test_two_groups_with_the_same_name_are_both_expanded():
+    """Codex review of PR #12: two personal groups without an SMTP address
+    but with the same display name shared one "already expanded" key, so
+    the second group's people were dropped without being reported."""
+    outlook_com = pytest.importorskip("rsvp.adapters.outlook_com")
+    team = _Entry("Team", members=[
+        _Entry("Friends", entry_id="ID-1", members=[_Entry("Person A", smtp="a@example.com")]),
+        _Entry("Friends", entry_id="ID-2", members=[_Entry("Person B", smtp="b@example.com")]),
+    ], entry_id="ID-0")
+    failed, diag = [], []
+    people = outlook_com._expand_dl_addr_entry(_Namespace(), team, set(), set(), 10, failed, diag)
+    assert sorted(email for _name, email in people) == ["a@example.com", "b@example.com"]
+    assert failed == []
+
+
+def test_a_group_inside_itself_is_expanded_once():
+    """The key still stops a loop: a group listed inside itself."""
+    outlook_com = pytest.importorskip("rsvp.adapters.outlook_com")
+    loop = _Entry("Loop", entry_id="ID-L", members=[_Entry("Person A", smtp="a@example.com")])
+    loop.Members = _Members([_Entry("Person A", smtp="a@example.com"), loop])
+    people = outlook_com._expand_dl_addr_entry(_Namespace(), loop, set(), set(), 10, [], [])
+    assert people == [("Person A", "a@example.com")]

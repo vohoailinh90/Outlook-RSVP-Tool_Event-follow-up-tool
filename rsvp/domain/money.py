@@ -404,8 +404,9 @@ def round_totals(figures):
 
 def gift_figures(gift_collected, gift_price_text, linked, event_totals=(0.0, 0.0, 0.0)):
     """The gift's own money, and - when its report is linked with the event -
-    the event's totals added on. event_totals: round_totals() of the event."""
-    cost = parse_amount_from_text(gift_price_text)
+    the event's totals added on. event_totals: round_totals() of the event.
+    A typed minus is kept ("-500" is money back), as for the paid boxes."""
+    cost = parse_typed_amount(gift_price_text)
     gift_remaining = gift_collected - cost
     ev_collected, ev_paid, ev_remaining = event_totals if linked else (0.0, 0.0, 0.0)
     return {
@@ -428,7 +429,7 @@ def history_figures(figures, gift_collected, gift_price_text):
     main = figures[0]
     collected, paid, _ = round_totals(figures)
     income = collected + gift_collected
-    expense = paid + parse_amount_from_text(gift_price_text)
+    expense = paid + parse_typed_amount(gift_price_text)
     return {
         "ActualAttendees": str(main.attendees),
         "CostPerPerson": format_amount(main.collected / main.attendees if main.attendees else 0.0),

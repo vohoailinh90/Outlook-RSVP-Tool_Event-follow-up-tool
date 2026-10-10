@@ -1044,7 +1044,11 @@ def _expand_dl_addr_entry(ns, addr_entry, seen_people, seen_groups, depth,
         return []
 
     full = _reresolve_addr_entry(ns, addr_entry)
-    group_key = (_ae_smtp(full) or _safe(full, "Name", "") or "").lower()
+    # A key unique to the group before its display name: two personal groups
+    # without an SMTP address can share a name, and keying on it skipped the
+    # second one's members without a word.
+    group_key = (_ae_smtp(full) or _safe(full, "Address", "") or _safe(full, "ID", "")
+                 or _safe(full, "Name", "") or "").lower()
     if group_key and group_key in seen_groups:
         return []  # đã xử lý group này rồi
     if group_key:
