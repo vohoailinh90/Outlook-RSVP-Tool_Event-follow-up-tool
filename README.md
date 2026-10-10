@@ -121,7 +121,8 @@ Renaming an Event ID moves the whole event (recipients, votes, attendance, gift 
 
 ### Loading a past event
 **⬅ Load setup from selected event** (Tab 1) replaces everything the app holds for the
-current event with what is saved for the selected one — nothing carries over. To use an
+current event with what is saved for the selected one — nothing carries over. It asks first
+when that would discard Copilot translations or email text you edited by hand. To use an
 event as a template, load it and change the Event ID: the recipient list follows the new ID,
 while votes, attendance, gift ticks and Amount paid stay with the original event.
 

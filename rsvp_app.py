@@ -397,6 +397,9 @@ class RSVPApp(tk.Tk):
         # để tránh 2 loại nội dung email hoàn toàn khác nhau ghi đè lẫn nhau
         # khi chỉ đổi qua lại Send mode trên CÙNG 1 ngôn ngữ.
         self.gift_full_translations = {"en": "", "ja": "", "vi": "", "bilingual": ""}
+        # The text each draft generator last put in its box, so a box that
+        # differs from it holds hand edits (see _hand_edited_drafts).
+        self._generated_drafts = {}
         self.fixed_overrides = settings.load_fixed_overrides()  # user-customized default FIXED wording, persisted to disk
         self.prompt_overrides = settings.load_prompt_overrides()  # user-customized Copilot prompt templates, persisted to disk
 
@@ -1006,7 +1009,7 @@ class RSVPApp(tk.Tk):
         """What would be lost by replacing the current event in memory — work
         that exists in no database table, or in one the past-event list can
         never reach again."""
-        lost = []
+        lost = self._hand_edited_drafts()
         if any(t.strip() for t in self.full_translations.values()) or \
                 any(t.strip() for t in self.gift_full_translations.values()):
             lost.append("the Copilot translations saved on Tab 3")
@@ -1017,6 +1020,33 @@ class RSVPApp(tk.Tk):
             lost.append(f"the Tab 2 recipient list of '{event_id}', which is not saved in History "
                         f"(save it on Tab 1 to keep it reachable)")
         return lost
+
+    def _hand_edited_drafts(self):
+        """The email texts edited by hand: each box that is not empty and no
+        longer holds what the app last generated for it. Loading another
+        event clears or rebuilds every one of them."""
+        def edited(box, generated):
+            text = box.get("1.0", "end").strip()
+            return bool(text) and text != (generated or "").strip()
+
+        found = []
+        generated = getattr(self, "_compose_generated", None)
+        if generated is not None and self._compose_box_texts() != generated:
+            found.append("your edits to the email on Compose & send")
+        for label, box, text in (
+                ("the reminder email on Collect responses", self.txt_reminder_body,
+                 self._generated_drafts.get("reminder")),
+                ("the calendar invite text on Attendance & payment", self.txt_appt_body,
+                 self.var_appt_body_default),
+                ("the thank-you email on Attendance & payment", self.txt_thankyou_body,
+                 self.var_thankyou_body_default),
+                ("the gift reminder email on Gift contribution", self.txt_gift_reminder_body,
+                 self._generated_drafts.get("gift_reminder")),
+                ("the contribution report email on Gift contribution", self.txt_gift_report_body,
+                 self._generated_drafts.get("gift_report"))):
+            if edited(box, text):
+                found.append(f"your edits to {label}")
+        return found
 
     def _event_in_history(self, event_id):
         try:
@@ -2751,6 +2781,7 @@ class RSVPApp(tk.Tk):
         lang_code = LANG_LABEL_TO_CODE.get(lang_label, "en")
 
         draft = build_reminder_body(lang_code, event_name, event_date, location, deadline, budget)
+        self._generated_drafts["reminder"] = draft
         self.txt_reminder_body.delete("1.0", "end")
         self.txt_reminder_body.insert("1.0", draft)
 
@@ -2991,6 +3022,7 @@ class RSVPApp(tk.Tk):
 
         draft = build_gift_reminder_body(lang_code, guest_of_honor, start_time, event_date,
                                           location, organizer, deadline, gift_budget)
+        self._generated_drafts["gift_reminder"] = draft
         self.txt_gift_reminder_body.delete("1.0", "end")
         self.txt_gift_reminder_body.insert("1.0", draft)
 
@@ -3134,6 +3166,7 @@ class RSVPApp(tk.Tk):
         lang_label = self.combo_gift_report_lang.get() or LANG_LABELS["en"]
         lang_code = LANG_LABEL_TO_CODE.get(lang_label, "en")
         draft = build_gift_report_body(lang_code, *self._gift_report_body_args())
+        self._generated_drafts["gift_report"] = draft
         self.txt_gift_report_body.delete("1.0", "end")
         self.txt_gift_report_body.insert("1.0", draft)
 

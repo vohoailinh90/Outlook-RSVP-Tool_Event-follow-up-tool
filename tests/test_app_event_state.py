@@ -209,6 +209,48 @@ def test_loading_an_event_carries_nothing_over_and_keeps_amount_paid(app):
     assert db.load_gift_roster("EV1", app.db_path)["alice@example.com"]["amount"] == 1000.0
 
 
+def test_loading_an_event_does_not_ask_about_drafts_the_app_generated(app):
+    _start_event(app)
+    for tab in (app.tab_compose, app.tab_collect, app.tab_calendar, app.tab_gift):
+        _select(app, tab)
+    db.save_event_record({"EventID": "EV2", "EventName": "Other"}, app.db_path)
+    app.dialogs.clear()
+
+    _load(app, "EV2")
+
+    assert app.var_event_id.get() == "EV2"
+    assert not [d for d in app.dialogs if d[0] == "askyesno"]
+
+
+@pytest.mark.parametrize("box, tab", [
+    ("txt_editable_preview", "tab_compose"),
+    ("txt_fixed_preview", "tab_compose"),
+    ("txt_reminder_body", "tab_collect"),
+    ("txt_appt_body", "tab_calendar"),
+    ("txt_thankyou_body", "tab_calendar"),
+    ("txt_gift_reminder_body", "tab_gift"),
+    ("txt_gift_report_body", "tab_gift"),
+])
+def test_loading_an_event_asks_before_discarding_a_hand_edited_draft(app, monolith, monkeypatch,
+                                                                     box, tab):
+    """Codex review of PR #11: loading another event clears or rebuilds every
+    email draft, and a hand-edited one went without the question asked for
+    translations. Answering No must keep the event and the edit."""
+    _start_event(app)
+    db.save_event_record({"EventID": "EV2", "EventName": "Other"}, app.db_path)
+    _select(app, getattr(app, tab))
+    getattr(app, box).insert("end", "\nSee you at the usual place.")
+    asked = []
+    monkeypatch.setattr(monolith.messagebox, "askyesno",
+                        lambda title, message=None, **_: asked.append(message) or False)
+
+    _load(app, "EV2")
+
+    assert asked and "your edits to" in asked[0]
+    assert app.var_event_id.get() == "EV1"
+    assert "See you at the usual place." in getattr(app, box).get("1.0", "end")
+
+
 def test_a_new_event_id_on_tab1_does_not_inherit_attendance_or_gift_ticks(app):
     _start_event(app)
     _select(app, app.tab_calendar)
