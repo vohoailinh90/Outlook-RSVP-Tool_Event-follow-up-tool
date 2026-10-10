@@ -165,8 +165,12 @@ def test_angle_brackets_that_belong_to_the_text_are_kept():
     ("「Yes」を押す", "Yesを押してください", []),
     ("Ｙｅｓ 予算３，０００", "Yes budget 3000", []),        # full-width source
     ("", "anything 5", []),
-    ("18:00 start", "18時開始", []),                         # minutes :00 dropped
-    ("10:30 start", "10時開始", ["30"]),
+    ("18:00 start", "18時開始", []),                         # times compared as times
+    ("10:30 start", "10時半開始", []),
+    ("10:30 start", "10時30分開始", []),
+    ("10:30 start", "10時開始", ["10:30"]),
+    # Found by Codex review: a changed on-the-hour time went unnoticed.
+    ("18:00 start", "18:30 start", ["18:00"]),
     # Found by Codex review: zero was left out everywhere, so a lost budget
     # of 0 went unnoticed.
     ("Budget: 0 JPY", "予算: なし", ["0"]),
@@ -463,7 +467,40 @@ def test_an_edited_translation_after_event_setup_changed_is_asked_about(app, mon
     monkeypatch.setattr(monolith.messagebox, "askyesno",
                         lambda title, message=None, **_: asked.append(title) or False)
     assert _send(app) == []
-    assert asked == ["Translation may be out of date"]
+    assert asked == ["Boxes may be out of date"]
+
+
+def test_a_copy_of_boxes_left_behind_by_event_setup_is_asked_about(app, monolith, monkeypatch):
+    """Found by Codex review: copying hand-edited boxes that still held the
+    old details stamped them with the new Event setup, so Save and Send
+    took them as current."""
+    _compose(app)
+    reply, ja, en = _answer(app)
+    _paste_and_save(app, reply)
+    _set_box(app.txt_fixed_preview, join_bilingual(ja + "\n追記", en))   # hand edit: kept
+    app.var_location.set("Hall B")
+    app._refresh_compose_preview_unless_edited()
+    asked = []
+    monkeypatch.setattr(monolith.messagebox, "askyesno",
+                        lambda title, message=None, **_: asked.append(title) or False)
+    copies_before = app._bilingual_copied
+    app._copy_email_for_translation()
+    assert asked == ["Boxes may be out of date"]
+    assert app._bilingual_copied is copies_before          # nothing copied
+
+
+def test_edited_untranslated_boxes_left_behind_by_event_setup_are_asked_about(app, monolith,
+                                                                             monkeypatch):
+    _compose(app, note="")
+    _set_box(app.txt_editable_preview, "Ghi chú mới")      # hand edit: kept
+    app.var_location.set("Hall B")
+    app._refresh_compose_preview_unless_edited()
+    assert "Hall B" not in _box(app.txt_fixed_preview)
+    asked = []
+    monkeypatch.setattr(monolith.messagebox, "askyesno",
+                        lambda title, message=None, **_: asked.append(title) or False)
+    assert _send(app) == []
+    assert asked == ["Boxes may be out of date"]
 
 
 def test_an_answer_to_a_copy_made_before_event_setup_changed_is_refused(app):

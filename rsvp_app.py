@@ -2054,6 +2054,9 @@ class RSVPApp(tk.Tk):
         self.txt_fixed_preview.insert("1.0", fixed)
         self.txt_editable_preview.delete("1.0", "end")
         self.txt_editable_preview.insert("1.0", note)
+        # The Event setup the boxes now show. Boxes edited by hand are not
+        # rebuilt when the tab opens, so this can fall behind Event setup.
+        self._bilingual_boxes_basis = self._bilingual_basis()
         self._refresh_translation_status()
 
     def _mode_key(self):
@@ -2068,6 +2071,20 @@ class RSVPApp(tk.Tk):
 
     def _bilingual_translation_is_stale(self):
         return self._bilingual_basis_saved.get(self._mode_key()) != self._bilingual_basis()
+
+    def _bilingual_boxes_are_stale(self):
+        """True when Event setup changed since the boxes were last filled, and
+        they kept their hand edits, and with them, possibly, the old details."""
+        return getattr(self, "_bilingual_boxes_basis", None) != self._bilingual_basis()
+
+    def _confirm_stale_boxes(self, action):
+        return messagebox.askyesno(
+            "Boxes may be out of date",
+            "Event setup changed after the note box and the fixed part box were filled, and they "
+            "were edited by hand, so they were not rebuilt: they may still carry the old date, "
+            "place or amount.\n\n"
+            "Click '🔄 Refresh preview from Tab 1 / Tab 2' to rebuild them (your edits in them are "
+            f"lost), or check both boxes yourself. {action} anyway?")
 
     def _sync_translate_controls(self):
         """Bilingual has one target - Japanese and English from your note, in
@@ -2290,6 +2307,11 @@ class RSVPApp(tk.Tk):
                 "The fixed part is empty. Click '🔄 Refresh preview from Tab 1 / Tab 2' to "
                 "rebuild it, then copy again.")
             return
+        if self._bilingual_boxes_are_stale() and not self._confirm_stale_boxes("Copy"):
+            return
+        # Copied as current: either the boxes match Event setup, or the user
+        # checked them against it just now.
+        self._bilingual_boxes_basis = self._bilingual_basis()
         self._bilingual_copied = {"mode": self._mode_key(), "note": note, "details": details,
                                   "basis": self._bilingual_basis(), "saved": False}
         self.clipboard_clear()
@@ -2583,13 +2605,7 @@ class RSVPApp(tk.Tk):
                 "Fill it in, or click '🔄 Refresh preview from Tab 1 / Tab 2' to rebuild the "
                 "fixed part.")
             return False
-        if self._active_full_translations().get("bilingual", "").strip() and \
-                self._bilingual_translation_is_stale() and not messagebox.askyesno(
-                    "Translation may be out of date",
-                    "Event setup changed after the Japanese and English translation was saved, "
-                    "and the boxes were edited by hand, so they were not rebuilt: the email may "
-                    "still carry the old date, place or amount.\n\n"
-                    "Check both boxes. Send anyway?"):
+        if self._bilingual_boxes_are_stale() and not self._confirm_stale_boxes("Send"):
             return False
         note = self.txt_editable_preview.get("1.0", "end").strip()
         ja_note, en_note = split_bilingual(note)

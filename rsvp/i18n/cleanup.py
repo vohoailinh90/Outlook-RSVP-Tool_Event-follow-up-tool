@@ -242,17 +242,27 @@ def parse_bilingual_reply(text):
 # number keep theirs, while the hyphens of "2026-12-20" or "10-12" are not
 # signs.
 _NUMBER = re.compile(r"((?<![\w+-])[+-])?(\d+(?:,\d{3})*)")
-_ON_THE_HOUR = re.compile(r"(?<!\d)(\d{1,2}):00(?!\d)")
+# Times are compared as times, so "18:00" matches "18時" or "18時00分" and
+# "10:30" matches "10時半", while "18:00" turned into "18:30" is caught.
+_CLOCK_TIME = re.compile(r"(?<!\d)(\d{1,2}):(\d{2})(?!\d)")
+_JA_TIME = re.compile(r"(?<!\d)(\d{1,2})時(?:(\d{1,2})分|(半))?")
 _BUTTONS = ("Yes", "No", "Maybe")
 
 
 def _numbers(text):
-    """How often each number occurs, with its sign. The ':00' of a time on
-    the hour is not counted - "18:00" becomes "18時" in a good Japanese
-    translation - but every other zero is, a budget of 0 included."""
+    """How often each number occurs, with its sign, and each time of day as
+    "H:MM". Every zero counts, a budget of 0 included."""
     text = unicodedata.normalize("NFKC", text).replace("\u2212", "-")   # − MINUS SIGN
-    text = _ON_THE_HOUR.sub(r"\1", text)
-    return Counter(f"{sign}{int(digits.replace(',', ''))}" for sign, digits in _NUMBER.findall(text))
+    times = Counter()
+
+    def take(hours, minutes):
+        times[f"{int(hours)}:{int(minutes):02d}"] += 1
+        return " "
+    text = _CLOCK_TIME.sub(lambda m: take(m[1], m[2]), text)
+    text = _JA_TIME.sub(lambda m: take(m[1], 30 if m[3] else (m[2] or 0)), text)
+    numbers = Counter(f"{sign}{int(digits.replace(',', ''))}"
+                      for sign, digits in _NUMBER.findall(text))
+    return numbers + times
 
 
 def _button_names(text):
@@ -280,6 +290,8 @@ def translation_gaps(source, translated, template=None, other=None):
         added_here = expected - _numbers(template) if template is not None else Counter()
         expected = expected + (added_there - added_here)
     missing = expected - _numbers(translated)
-    gaps = [n if k == 1 else f"{n} (×{k})"
-            for n, k in sorted(missing.items(), key=lambda item: (int(item[0]), item[0]))]
+    def order(item):
+        n = item[0]
+        return (0, int(n), n) if ":" not in n else (1, 0, n)
+    gaps = [n if k == 1 else f"{n} (×{k})" for n, k in sorted(missing.items(), key=order)]
     return gaps + [b for b in _button_names(source) if b not in _button_names(translated)]
