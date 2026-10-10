@@ -126,20 +126,23 @@ def cleanup_pasted_translation(text):
     return text.strip()
 
 
-# Copilot's answer to DEFAULT_PROMPT_BILINGUAL: the note in Japanese after a
-# [JA] marker, in English after an [EN] marker. The '#', bold, 【】 and colon
+# Copilot's answer to DEFAULT_PROMPT_BILINGUAL: the note and the event
+# details, each in Japanese and in English, under the markers [JA NOTE],
+# [JA DETAILS], [EN NOTE] and [EN DETAILS]. The '#', bold, 【】 and colon
 # Copilot sometimes puts around a marker belong to it. Markers are looked for
-# at the start of a line first, so a note that mentions "[English]" mid-line
-# is not cut there; only if that finds no complete answer are they looked for
+# at the start of a line first, so text that mentions "[EN NOTE]" mid-line is
+# not cut there; only if that finds no complete answer are they looked for
 # anywhere, since the copy quirk above can glue them to the words around them.
 _MARKER = (r"(?:[#>]+[ \t]*)?(?:\*\*|__)?[\[【]\s*"
            r"(?:(?P<ja>JA|JP|JAPANESE|日本語)|(?P<en>EN|ENGLISH|英語))"
+           r"[ \t_\-]*(?:(?P<note>NOTE)|(?P<details>DETAILS?))"
            r"\s*[\]】](?:\*\*|__)?[ \t]*[:：]?")
 _LINE_START_MARKER = re.compile(r"^[ \t]*" + _MARKER, re.IGNORECASE | re.MULTILINE)
 _ANYWHERE_MARKER = re.compile(_MARKER, re.IGNORECASE)
 # Divider lines and code fences Copilot draws around a part.
 _EDGE = r"(?:[―—–\-=_─━]{3,}|`{3}\w*)"
 _EDGE_LINES = re.compile(r"\A(?:" + _EDGE + r"\s*)+|(?:\s*" + _EDGE + r")+\Z")
+_NO_NOTE = re.compile(r"\(?\s*(?:none|なし)\s*\)?", re.IGNORECASE)
 
 
 def _reply_parts(text, marker_pattern):
@@ -148,20 +151,29 @@ def _reply_parts(text, marker_pattern):
     for i, marker in enumerate(markers):
         end = markers[i + 1].start() if i + 1 < len(markers) else len(text)
         part = _EDGE_LINES.sub("", text[marker.end():end].strip()).strip()
-        if part:
-            found["ja" if marker.group("ja") else "en"] = part
-    if "ja" not in found or "en" not in found:
+        if part.startswith("<") and part.endswith(">"):
+            part = part[1:-1].strip()   # the prompt's <...> placeholder brackets, kept
+        is_note = bool(marker.group("note"))
+        if is_note and _NO_NOTE.fullmatch(part):
+            part = ""
+        key = ("ja" if marker.group("ja") else "en", "note" if is_note else "details")
+        if part or is_note:
+            found[key] = part
+    if not found.get(("ja", "details")) or not found.get(("en", "details")):
         return None
-    return found["ja"], found["en"]
+    return (found.get(("ja", "note"), ""), found[("ja", "details")],
+            found.get(("en", "note"), ""), found[("en", "details")])
 
 
 def parse_bilingual_reply(text):
-    """(japanese, english) from Copilot's answer to DEFAULT_PROMPT_BILINGUAL,
-    or None unless both a [JA] and an [EN] part with text in it are found.
-    Anything before the first marker ("Here is the translation:") is dropped,
-    and so are divider lines and code fences around a part. A marker found
-    twice keeps its later part, as dedupe_pasted_translation() keeps the later
-    copy. Text Copilot adds after the last part stays in it: the app shows the
-    result for checking before anything is sent."""
+    """(ja_note, ja_details, en_note, en_details) from Copilot's answer to
+    DEFAULT_PROMPT_BILINGUAL, or None unless both a Japanese and an English
+    details part with text in them are found. A missing note part, or one
+    that says "(none)", is "". Anything before the first marker ("Here is the
+    translation:") is dropped, and so are divider lines, code fences and the
+    prompt's <...> brackets around a part. A marker found twice keeps its
+    later part, as dedupe_pasted_translation() keeps the later copy. Text
+    Copilot adds after the last part stays in it: the app shows the result
+    for checking before anything is sent."""
     text = text or ""
     return _reply_parts(text, _LINE_START_MARKER) or _reply_parts(text, _ANYWHERE_MARKER)
