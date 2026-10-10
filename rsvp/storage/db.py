@@ -55,6 +55,19 @@ EVENT_COLUMNS = [
     # trong bảng Attendance). "Remaining amount" = TotalCollectedAmount -
     # AmountPaid, tự tính ở UI, KHÔNG lưu riêng (tính lại mỗi lần cần).
     "AmountPaid",
+    # The columns below were added by the separately developed copy of this
+    # app (the "Event-Invitation" lineage) whose database the user runs. The
+    # names are kept exactly, so either app can open either database.
+    # Round1Label: the name given to the first payment round on Tab 5 (empty
+    # = "Round 1"); further rounds live in attendance_rounds.
+    "Round1Label",
+    # The gift actually bought (Tab 6): name, order link, price as typed
+    # ("3,570 JPY"), and whether its report adds Tab 5's totals ("Yes"/"No").
+    "GiftItemName", "GiftItemLink", "GiftItemPrice", "GiftLinkEvent",
+    # Department fund left after this event: the running total of Balance in
+    # RowOrder. The app computes it when it reads History (see
+    # rsvp.domain.money.running_fund); a stored value is only a copy.
+    "DeptFundRemaining",
 ]
 
 _SCHEMA = """
@@ -69,6 +82,10 @@ CREATE TABLE IF NOT EXISTS events (
     EventMode TEXT, Organizer TEXT, GuestOfHonor TEXT, GiftBudget TEXT, GiftDeadline TEXT,
     StartTime TEXT, EndTime TEXT,
     AmountPaid TEXT,
+    Round1Label TEXT,
+    GiftItemName TEXT, GiftItemLink TEXT, GiftItemPrice TEXT,
+    GiftLinkEvent TEXT,
+    DeptFundRemaining TEXT,
     LastScanTime TEXT,
     RowOrder INTEGER
 );
@@ -80,6 +97,9 @@ CREATE TABLE IF NOT EXISTS gift_contributions (
     EventID TEXT NOT NULL, Email TEXT NOT NULL, Name TEXT,
     Checked INTEGER DEFAULT 0, Amount REAL DEFAULT 0,
     SendEmail INTEGER DEFAULT 0,
+    -- 1 when the amount was typed by hand on Tab 6: ticking "Contributed"
+    -- again must not replace it with the expected gift budget.
+    ManualAmount INTEGER DEFAULT 0,
     PRIMARY KEY (EventID, Email)
 );
 CREATE TABLE IF NOT EXISTS attendance (
@@ -87,12 +107,49 @@ CREATE TABLE IF NOT EXISTS attendance (
     ActualAttend TEXT, Free INTEGER DEFAULT 0, Amount REAL DEFAULT 0,
     PRIMARY KEY (EventID, Email)
 );
+-- Payment rounds after the first (round 1 is attendance.Amount and
+-- events.AmountPaid). RoundKey is "round_N"; N is never reused within an
+-- event (see next_round_index).
+CREATE TABLE IF NOT EXISTS attendance_rounds (
+    EventID TEXT NOT NULL, RoundKey TEXT NOT NULL, RoundLabel TEXT,
+    AmountPaid TEXT, SortOrder INTEGER DEFAULT 0,
+    PRIMARY KEY (EventID, RoundKey)
+);
+-- Per person and round: the amount and whether they came ("Yes"/"No").
+CREATE TABLE IF NOT EXISTS attendance_extra_amounts (
+    EventID TEXT NOT NULL, Email TEXT NOT NULL, RoundKey TEXT NOT NULL,
+    Amount REAL DEFAULT 0, Attend TEXT,
+    PRIMARY KEY (EventID, Email, RoundKey)
+);
+-- Preferences that belong to the database rather than to an event, e.g.
+-- the column order of Tab 7 ("history_column_order").
+CREATE TABLE IF NOT EXISTS app_settings (
+    Key TEXT PRIMARY KEY, Value TEXT
+);
 CREATE TABLE IF NOT EXISTS responses (
     EventID TEXT NOT NULL, Email TEXT NOT NULL, Name TEXT, Vote TEXT, ReceivedAt TEXT,
     Manual INTEGER DEFAULT 0,
     PRIMARY KEY (EventID, Email)
 );
 """
+
+
+# Columns added after a table was first created: a database written by an
+# older version gets them on open. Adding a column never changes or drops
+# data, so a database stays readable by the version that wrote it.
+_ADDED_COLUMNS = (
+    ("events", "AmountPaid TEXT"),
+    ("events", "Round1Label TEXT"),
+    ("events", "GiftItemName TEXT"),
+    ("events", "GiftItemLink TEXT"),
+    ("events", "GiftItemPrice TEXT"),
+    ("events", "GiftLinkEvent TEXT"),
+    ("events", "DeptFundRemaining TEXT"),
+    ("responses", "Manual INTEGER DEFAULT 0"),
+    ("gift_contributions", "SendEmail INTEGER DEFAULT 0"),
+    ("gift_contributions", "ManualAmount INTEGER DEFAULT 0"),
+    ("attendance_extra_amounts", "Attend TEXT"),
+)
 
 
 def get_connection(path=DB_FILE_DEFAULT):
@@ -109,21 +166,12 @@ def get_connection(path=DB_FILE_DEFAULT):
     # KHÔNG tự thêm cột mới. Cần ALTER TABLE riêng, best-effort: nếu cột đã
     # có sẵn (DB mới tạo từ _SCHEMA ở trên đã có rồi) thì sqlite3 báo lỗi
     # "duplicate column name" — bỏ qua lỗi đó là an toàn.
-    try:
-        conn.execute("ALTER TABLE events ADD COLUMN AmountPaid TEXT")
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass  # cột đã tồn tại — không cần làm gì thêm
-    try:
-        conn.execute("ALTER TABLE responses ADD COLUMN Manual INTEGER DEFAULT 0")
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass  # cột đã tồn tại — không cần làm gì thêm
-    try:
-        conn.execute("ALTER TABLE gift_contributions ADD COLUMN SendEmail INTEGER DEFAULT 0")
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass  # cột đã tồn tại — không cần làm gì thêm
+    for table, column in _ADDED_COLUMNS:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # cột đã tồn tại — không cần làm gì thêm
     return conn
 
 
@@ -209,7 +257,8 @@ def load_history(path=DB_FILE_DEFAULT):
 
 
 # Every table keyed by EventID besides events itself.
-_PER_EVENT_TABLES = ("recipients", "gift_contributions", "attendance", "responses")
+_PER_EVENT_TABLES = ("recipients", "gift_contributions", "attendance", "responses",
+                     "attendance_rounds", "attendance_extra_amounts")
 
 
 def rename_event(old_id, new_id, path=DB_FILE_DEFAULT):
@@ -257,6 +306,32 @@ def get_last_scan_time(event_id, path=DB_FILE_DEFAULT):
         return datetime.strptime(row["LastScanTime"], "%Y-%m-%d %H:%M")
     except Exception:
         return None
+
+
+def get_setting(key, default=None, path=DB_FILE_DEFAULT):
+    """A preference saved in the database (app_settings), or `default`. A
+    preference that cannot be read never stops the app from opening."""
+    try:
+        conn = get_connection(path)
+    except Exception:
+        return default
+    try:
+        row = conn.execute("SELECT Value FROM app_settings WHERE Key = ?", (key,)).fetchone()
+    except Exception:
+        return default
+    finally:
+        conn.close()
+    return row["Value"] if row and row["Value"] is not None else default
+
+
+def set_setting(key, value, path=DB_FILE_DEFAULT):
+    conn = get_connection(path)
+    try:
+        conn.execute("INSERT OR REPLACE INTO app_settings (Key, Value) VALUES (?, ?)",
+                     (key, "" if value is None else str(value)))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -310,10 +385,11 @@ def save_gift_roster(event_id, roster: dict, path=DB_FILE_DEFAULT):
     try:
         conn.execute("DELETE FROM gift_contributions WHERE EventID = ?", (event_id,))
         conn.executemany(
-            "INSERT OR REPLACE INTO gift_contributions (EventID, Email, Name, Checked, Amount, SendEmail) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO gift_contributions "
+            "(EventID, Email, Name, Checked, Amount, SendEmail, ManualAmount) VALUES (?, ?, ?, ?, ?, ?, ?)",
             [(event_id, email, info.get("name", email), 1 if info.get("checked") else 0,
-              info.get("amount", 0.0), 1 if info.get("send_email") else 0) for email, info in roster.items()],
+              info.get("amount", 0.0), 1 if info.get("send_email") else 0,
+              1 if info.get("manual_amount") else 0) for email, info in roster.items()],
         )
         conn.commit()
     finally:
@@ -324,7 +400,7 @@ def load_gift_roster(event_id, path=DB_FILE_DEFAULT):
     conn = get_connection(path)
     try:
         rows = conn.execute(
-            "SELECT Email, Name, Checked, Amount, SendEmail FROM gift_contributions "
+            "SELECT Email, Name, Checked, Amount, SendEmail, ManualAmount FROM gift_contributions "
             "WHERE EventID = ? ORDER BY rowid ASC", (event_id,)
         ).fetchall()
     finally:
@@ -333,6 +409,7 @@ def load_gift_roster(event_id, path=DB_FILE_DEFAULT):
         row["Email"]: {
             "name": row["Name"], "checked": bool(row["Checked"]), "amount": row["Amount"] or 0.0,
             "send_email": bool(row["SendEmail"]),
+            "manual_amount": bool(row["ManualAmount"]),
         }
         for row in rows
     }
@@ -342,39 +419,130 @@ def load_gift_roster(event_id, path=DB_FILE_DEFAULT):
 # ATTENDANCE & PAYMENT (thay Attendance_Payment_{EventID}.xlsx, sheet 1)
 # ══════════════════════════════════════════════════════════════════════════
 
-def save_attendance_roster(event_id, roster: dict, path=DB_FILE_DEFAULT):
-    """roster: dict[email -> {"name","vote","actual_attend","free","amount"}]"""
+def save_attendance(event_id, roster, rounds=None, path=DB_FILE_DEFAULT):
+    """Saves an event's Attendance & Payment table in ONE transaction.
+
+    roster: dict[email -> {"name", "vote", "actual_attend", "free", "amount",
+        "extra_amounts": {round_key: amount}, "extra_attends": {round_key:
+        "Yes"/"No"}}] - the whole table, round 1 and every further round.
+        None leaves the people untouched (only `rounds` is written).
+    rounds: list of {"key", "label", "amount_paid"} for the rounds after the
+        first, in display order. None leaves the saved rounds as they are.
+
+    Per-round values are written only for rounds that exist after this call,
+    so removing a round from `rounds` (and its keys from the roster) deletes
+    its amounts in the same commit, and values left behind by an earlier
+    failed delete are dropped rather than revived by a later round."""
     conn = get_connection(path)
     try:
-        conn.execute("DELETE FROM attendance WHERE EventID = ?", (event_id,))
-        conn.executemany(
-            "INSERT OR REPLACE INTO attendance "
-            "(EventID, Email, Name, Vote, ActualAttend, Free, Amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [(event_id, email, info.get("name", email), info.get("vote", ""),
-              info.get("actual_attend", ""), 1 if info.get("free") else 0,
-              info.get("amount", 0.0)) for email, info in roster.items()],
-        )
+        if rounds is not None:
+            conn.execute("DELETE FROM attendance_rounds WHERE EventID = ?", (event_id,))
+            conn.executemany(
+                "INSERT INTO attendance_rounds (EventID, RoundKey, RoundLabel, AmountPaid, SortOrder) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [(event_id, r["key"], r.get("label") or r["key"], r.get("amount_paid") or "0", i)
+                 for i, r in enumerate(rounds)])
+        if roster is not None:
+            keys = {row["RoundKey"] for row in conn.execute(
+                "SELECT RoundKey FROM attendance_rounds WHERE EventID = ?", (event_id,))}
+            conn.execute("DELETE FROM attendance WHERE EventID = ?", (event_id,))
+            conn.execute("DELETE FROM attendance_extra_amounts WHERE EventID = ?", (event_id,))
+            conn.executemany(
+                "INSERT OR REPLACE INTO attendance "
+                "(EventID, Email, Name, Vote, ActualAttend, Free, Amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [(event_id, email, info.get("name", email), info.get("vote", ""),
+                  info.get("actual_attend", ""), 1 if info.get("free") else 0,
+                  info.get("amount", 0.0)) for email, info in roster.items()])
+            extra = []
+            for email, info in roster.items():
+                amounts = info.get("extra_amounts") or {}
+                attends = info.get("extra_attends") or {}
+                # A person can be marked as attending a round before an
+                # amount is typed, or the other way round: keep both.
+                for key in (set(amounts) | set(attends)) & keys:
+                    extra.append((event_id, email, key, amounts.get(key) or 0.0, attends.get(key, "")))
+            conn.executemany(
+                "INSERT INTO attendance_extra_amounts (EventID, Email, RoundKey, Amount, Attend) "
+                "VALUES (?, ?, ?, ?, ?)", extra)
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
 
+def save_attendance_roster(event_id, roster: dict, path=DB_FILE_DEFAULT):
+    """The people of the Attendance & Payment table, with their per-round
+    values; the rounds themselves are left as saved. See save_attendance."""
+    save_attendance(event_id, roster, None, path)
+
+
 def load_attendance_roster(event_id, path=DB_FILE_DEFAULT):
+    """dict[email -> {..., "extra_amounts", "extra_attends"}] - per-round
+    values only for rounds that still exist (see save_attendance)."""
     conn = get_connection(path)
     try:
         rows = conn.execute(
             "SELECT Email, Name, Vote, ActualAttend, Free, Amount FROM attendance "
             "WHERE EventID = ? ORDER BY rowid ASC", (event_id,)
         ).fetchall()
+        extra = conn.execute(
+            "SELECT x.Email, x.RoundKey, x.Amount, x.Attend FROM attendance_extra_amounts x "
+            "JOIN attendance_rounds r ON r.EventID = x.EventID AND r.RoundKey = x.RoundKey "
+            "WHERE x.EventID = ?", (event_id,)
+        ).fetchall()
     finally:
         conn.close()
-    return {
+    roster = {
         row["Email"]: {
             "name": row["Name"], "vote": row["Vote"], "actual_attend": row["ActualAttend"],
             "free": bool(row["Free"]), "amount": row["Amount"] or 0.0,
+            "extra_amounts": {}, "extra_attends": {},
         }
         for row in rows
     }
+    for row in extra:
+        info = roster.get(row["Email"])
+        if info is not None:
+            info["extra_amounts"][row["RoundKey"]] = row["Amount"] or 0.0
+            info["extra_attends"][row["RoundKey"]] = row["Attend"] or ""
+    return roster
+
+
+def load_attendance_rounds(event_id, path=DB_FILE_DEFAULT):
+    """The rounds after the first, in display order:
+    list[{"key", "label", "amount_paid"}]."""
+    conn = get_connection(path)
+    try:
+        rows = conn.execute(
+            "SELECT RoundKey, RoundLabel, AmountPaid FROM attendance_rounds "
+            "WHERE EventID = ? ORDER BY SortOrder ASC", (event_id,)
+        ).fetchall()
+    finally:
+        conn.close()
+    return [{"key": row["RoundKey"], "label": row["RoundLabel"] or row["RoundKey"],
+             "amount_paid": row["AmountPaid"] or "0"} for row in rows]
+
+
+def next_round_index(event_id, path=DB_FILE_DEFAULT):
+    """The N for the next "round_N" key of event_id: one more than any N seen
+    in either round table, so a removed round's key is never handed out
+    again - its leftover amounts, if any survived, can never reappear."""
+    conn = get_connection(path)
+    try:
+        keys = [row[0] for row in conn.execute(
+            "SELECT RoundKey FROM attendance_rounds WHERE EventID = ? "
+            "UNION SELECT RoundKey FROM attendance_extra_amounts WHERE EventID = ?",
+            (event_id, event_id))]
+    finally:
+        conn.close()
+    highest = 1
+    for key in keys:
+        head, _, number = (key or "").partition("_")
+        if head == "round" and number.isdigit():
+            highest = max(highest, int(number))
+    return highest + 1
 
 
 # ══════════════════════════════════════════════════════════════════════════

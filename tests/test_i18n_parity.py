@@ -20,9 +20,10 @@ from pathlib import Path
 
 import pytest
 
-from tests.i18n_snapshot import build_snapshot
+from tests.i18n_snapshot import build_merge_snapshot, build_snapshot, is_retired
 
 GOLDEN = Path(__file__).parent / "golden" / "i18n_snapshot.json"
+MERGE_GOLDEN = Path(__file__).parent / "golden" / "i18n_merge_snapshot.json"
 
 
 @pytest.fixture(scope="module")
@@ -57,7 +58,9 @@ def test_every_builder_output_matches_the_snapshot(golden):
         f"deliberately if the new coverage is intended."
     )
 
-    changed = [k for k in golden if current[k] != golden[k]]
+    # The builders replaced after phase 1 (tests/i18n_snapshot.py says which
+    # and why) are checked by the two tests after this one instead.
+    changed = [k for k in golden if not is_retired(k) and current[k] != golden[k]]
     if changed:
         first = changed[0]
         raise AssertionError(
@@ -69,6 +72,68 @@ def test_every_builder_output_matches_the_snapshot(golden):
             f"deliberately. If it is not, the refactor changed a message that "
             f"real recipients receive."
         )
+
+
+def test_every_retired_entry_really_changed(golden):
+    """The retired list may only excuse builders that did change. A builder
+    listed there while still producing its phase-1 output would be exempt
+    from the comparison above for no reason - and free to regress."""
+    current = build_snapshot()
+    retired = [k for k in golden if is_retired(k)]
+    assert retired, "nothing is retired - then the exemption should go too"
+    stale = [k for k in retired if current[k] == golden[k]]
+    assert not stale, f"listed as replaced but unchanged: {stale[:3]}"
+
+
+@pytest.fixture(scope="module")
+def merge_golden() -> dict:
+    data = json.loads(MERGE_GOLDEN.read_text(encoding="utf-8"))
+    assert "_provenance" in data, "the merge pin lost the record of where it came from"
+    data.pop("_provenance")
+    return data
+
+
+def _merge_differences(pinned, current):
+    if set(pinned) != set(current):
+        return sorted(set(pinned) ^ set(current))
+    return [k for k in pinned if pinned[k] != current[k]]
+
+
+def test_the_replaced_builders_match_their_pin(merge_golden):
+    assert len(merge_golden) > 40
+    assert not [k for k, v in merge_golden.items() if v.startswith("!!")]
+    current = build_merge_snapshot()
+    differences = _merge_differences(merge_golden, current)
+    assert not differences, (
+        f"{len(differences)} pinned thank-you / gift-report output(s) changed, first: "
+        f"{differences[0]}\n  expected: {merge_golden.get(differences[0], '')[:300]}\n"
+        f"  actual:   {current.get(differences[0], '')[:300]}\n"
+        "Regenerate deliberately (python -m tests.regen_i18n_merge_golden) only if "
+        "the change is meant.")
+
+
+@pytest.mark.parametrize("name, old, new", [
+    ("build_thankyou_body", "Thanks again", "Thanks"),
+    ("build_gift_report_body", "3,570", "3570"),
+    ("text_body_to_html", "<a href=", "<a target=_blank href="),
+    ("text_body_to_html", "&amp;", "&"),
+])
+def test_the_pin_notices_a_changed_builder(merge_golden, monkeypatch, name, old, new):
+    """The pin must not be blind: change one detail of one builder's output
+    and require the comparison above to report it."""
+    import rsvp.i18n as i18n
+    original = getattr(i18n, name)
+    outputs = []
+
+    def changed(*a, **kw):
+        out = original(*a, **kw)
+        outputs.append(out)
+        return out.replace(old, new)
+
+    monkeypatch.setattr(i18n, name, changed)
+    differences = _merge_differences(merge_golden, build_merge_snapshot())
+    assert any(old in out for out in outputs), f"{old!r} never rendered: the change tested nothing"
+    assert differences and all(k.startswith(f"{name}_") for k in differences)
 
 
 FORBIDDEN = ("tkinter", "tkcalendar", "pythoncom", "win32com", "openpyxl")

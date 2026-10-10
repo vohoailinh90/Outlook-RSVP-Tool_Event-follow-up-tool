@@ -8,6 +8,7 @@ reported as money left over.
 """
 from __future__ import annotations
 
+from rsvp.domain import payment_rounds
 from rsvp.export import reports
 
 
@@ -29,21 +30,40 @@ ATTENDANCE = {
 }
 
 
+def _figures(roster, paid, rounds=(), label="Round 1"):
+    return payment_rounds(roster.values(), label, paid, list(rounds))
+
+
 class TestAttendanceWorkbook:
     def test_an_overpaid_event_keeps_its_negative_remaining(self):
-        wb = reports.attendance_workbook(ATTENDANCE, amount_paid=5000.0)
-        assert _summary(wb, "Total collected amount:")[6] == 3000.0
-        assert _summary(wb, "Amount paid:")[6] == 5000.0
-        assert _summary(wb, "Remaining amount:")[6] == -2000.0
+        wb = reports.attendance_workbook(ATTENDANCE, _figures(ATTENDANCE, "5000"))
+        assert _summary(wb, "Round 1 — Collect amount:")[6] == 3000.0
+        assert _summary(wb, "Round 1 — Amount paid:")[6] == 5000.0
+        assert _summary(wb, "Round 1 — Remaining amount:")[6] == -2000.0
+        assert _summary(wb, "Total remaining amount (all rounds):")[6] == -2000.0
 
     def test_totals(self):
-        wb = reports.attendance_workbook(ATTENDANCE, amount_paid=1000.0)
+        wb = reports.attendance_workbook(ATTENDANCE, _figures(ATTENDANCE, "1000"))
         assert _summary(wb, "Total actual attend:")[4] == 2
-        assert _summary(wb, "Remaining amount:")[6] == 2000.0
+        assert _summary(wb, "Round 1 — Remaining amount:")[6] == 2000.0
         header, *people = _rows(wb)[:4]
-        assert header == ("No.", "Name", "Email", "Vote", "Actual Attend", "Free", "Amount")
+        assert header == ("No.", "Name", "Email", "Vote", "Round 1 Attend", "Free", "Round 1")
         assert people[2][5] == "Yes"          # Carol is Free
         assert people[1][6] is None           # a zero amount is left blank
+
+    def test_every_round_has_its_columns_and_its_breakdown(self):
+        roster = {email: dict(info) for email, info in ATTENDANCE.items()}
+        roster["alice@example.com"].update(extra_attends={"round_2": "Yes"},
+                                           extra_amounts={"round_2": 2000.0})
+        rounds = [{"key": "round_2", "label": "Karaoke", "amount_paid": "2,500"}]
+        wb = reports.attendance_workbook(roster, _figures(roster, "1000", rounds, "Dinner"))
+        header, alice = _rows(wb)[:2]
+        assert header[4:] == ("Dinner Attend", "Free", "Dinner", "Karaoke Attend", "Karaoke")
+        assert alice[7:] == ("Yes", 2000.0)
+        assert _summary(wb, "Karaoke — Attendees:")[4] == 1
+        assert _summary(wb, "Karaoke — Remaining amount:")[6] == -500.0
+        assert _summary(wb, "Total collected amount (all rounds):")[6] == 5000.0
+        assert _summary(wb, "Total remaining amount (all rounds):")[6] == 1500.0
 
 
 GIFT = {

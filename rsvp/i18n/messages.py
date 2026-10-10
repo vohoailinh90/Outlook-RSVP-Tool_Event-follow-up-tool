@@ -6,9 +6,19 @@ scripts/check_i18n_matrix.py exists to catch that.
 
 Moved verbatim out of rsvp_app.py (lines 274-895) by the phase 1 extraction in
 docs/agentic/ARCHITECTURE.md. The code is unchanged; only its location is.
+
+Exception: build_thankyou_body and build_gift_report_body (and their label
+tables) were later replaced by the versions in the separately developed copy
+of this app that the user runs - a table of payment rounds, and the gift
+item with Event + Gift totals. tests/test_i18n_parity.py lists them as the
+only builders allowed to differ from the phase-1 golden file, and
+tests/golden/i18n_merge_snapshot.json pins their new output.
 """
 
+from rsvp.domain.money import parse_signed_amount
+
 from .langs import BILINGUAL_SEPARATOR, GREETING, NOT_TRANSLATED_FLAG
+from .tables import _build_aligned_table, _build_rounds_table
 
 def build_greeting(lang_code):
     if lang_code == "bilingual":
@@ -315,46 +325,67 @@ def build_thankyou_subject(lang_code, event_id, event_name):
 
 
 THANKYOU_LABELS = {
-    "en": {"attend": "👥 Total attendees", "collected": "💰 Total collected",
-           "paid": "💸 Amount paid", "remaining": "📊 Remaining amount"},
-    "ja": {"attend": "👥 参加人数", "collected": "💰 集金総額",
-           "paid": "💸 支払済み金額", "remaining": "📊 残金"},
-    "vi": {"attend": "👥 Tổng số người tham gia", "collected": "💰 Tổng tiền thu",
-           "paid": "💸 Số tiền đã trả", "remaining": "📊 Số tiền còn lại"},
+    "en": {"attend": "👥 Total attendees",
+           "col_round": "", "col_attend": "👥 Attendees", "col_collected": "💰 Collected",
+           "col_paid": "💸 Paid", "col_remaining": "📊 Remaining",
+           "grand_collected": "💰 Total collected (all rounds)",
+           "grand_paid": "💸 Total paid (all rounds)",
+           "grand_remaining": "📊 Total remaining (all rounds)"},
+    "ja": {"attend": "👥 参加人数",
+           "col_round": "", "col_attend": "👥 参加人数", "col_collected": "💰 集金額",
+           "col_paid": "💸 支払済み", "col_remaining": "📊 残金",
+           "grand_collected": "💰 総集金額（全回合計）",
+           "grand_paid": "💸 総支払額（全回合計）",
+           "grand_remaining": "📊 総残金（全回合計）"},
+    "vi": {"attend": "👥 Tổng số người tham gia",
+           "col_round": "", "col_attend": "👥 Số người dự", "col_collected": "💰 Đã thu",
+           "col_paid": "💸 Đã trả", "col_remaining": "📊 Còn lại",
+           "grand_collected": "💰 Tổng tiền thu (tất cả các lần)",
+           "grand_paid": "💸 Tổng tiền đã trả (tất cả các lần)",
+           "grand_remaining": "📊 Tổng tiền còn lại (tất cả các lần)"},
 }
 
 
 def build_thankyou_body(lang_code, event_name="", event_date="", location="",
-                         total_attend="0", total_collected="0", amount_paid="0",
-                         remaining_amount="0"):
+                         total_attend="0", rounds_info=None,
+                         grand_collected="0", grand_paid="0", grand_remaining="0"):
     """Nội dung mặc định của email cảm ơn sau sự kiện (Tab 5 'Attendance &
-    Payment', tính năng mới) — lời cảm ơn mọi người đã tham gia (nội dung
-    sự kiện lấy từ Tab 1, giống build_calendar_body()), kèm theo tổng quan
-    số liệu Attendance & Payment (Tab 5): tổng số người tham gia thực tế,
-    tổng tiền đã thu, số tiền đã trả, và số tiền còn lại — 4 tham số cuối
-    LUÔN được tính lại từ dữ liệu MỚI NHẤT ngay trước khi gửi (xem
-    _send_thank_you_email()), không phải giá trị lúc soạn mail, giống cách
-    _compose_full_body() luôn build lại fixed_text từ Tab 1 thay vì tin vào
-    nội dung đang hiển thị. Hỗ trợ 4 lựa chọn ngôn ngữ giống các tab khác."""
+    Payment') — lời cảm ơn mọi người đã tham gia (nội dung sự kiện lấy từ
+    Tab 1, giống build_calendar_body()), kèm BẢNG tổng kết số liệu
+    Attendance & Payment: mỗi đợt thu tiền 1 dòng (số người dự / đã thu /
+    đã trả / còn lại — rounds_info là list các tuple (label, attendees,
+    collected, paid, remaining), đợt 1 "Amount" luôn là phần tử đầu, xem
+    _thankyou_body_args()), rồi 3 dòng tổng của TOÀN BỘ các đợt cộng lại.
+    Mọi số liệu LUÔN được tính lại từ dữ liệu MỚI NHẤT ngay trước khi gửi
+    (xem _send_thank_you_email()), và có thể cập nhật lại bất cứ lúc nào
+    bằng nút "🔄 Update from table" (xem _apply_thankyou_body_lang()) —
+    không phải giá trị đông cứng lúc soạn mail. Hỗ trợ 4 lựa chọn ngôn ngữ
+    giống các tab khác."""
+    if rounds_info is None:
+        rounds_info = []
     if lang_code == "bilingual":
         ja_full = build_thankyou_body(
             "ja", event_name, event_date, location,
-            total_attend, total_collected, amount_paid, remaining_amount)
+            total_attend, rounds_info, grand_collected, grand_paid, grand_remaining)
         en_full = build_thankyou_body(
             "en", event_name, event_date, location,
-            total_attend, total_collected, amount_paid, remaining_amount)
+            total_attend, rounds_info, grand_collected, grand_paid, grand_remaining)
         return "[English below]\n\n" + ja_full + BILINGUAL_SEPARATOR + en_full
 
     L = THANKYOU_LABELS.get(lang_code, THANKYOU_LABELS["en"])
+    table = _build_rounds_table(L, rounds_info)
+    totals = (
+        f"{L['grand_collected']}: {grand_collected}\n"
+        f"{L['grand_paid']}: {grand_paid}\n"
+        f"{L['grand_remaining']}: {grand_remaining}"
+    )
 
     if lang_code == "ja":
         return (
             f"{event_name}にご参加いただき、誠にありがとうございました！\n"
             "おかげさまで無事に終えることができました。\n\n"
-            f"{L['attend']}: {total_attend}\n"
-            f"{L['collected']}: {total_collected}\n"
-            f"{L['paid']}: {amount_paid}\n"
-            f"{L['remaining']}: {remaining_amount}\n\n"
+            f"{table}\n\n"
+            f"{totals}\n\n"
             "参加費用の詳細は添付の集金リストをご確認ください。\n"
             "改めて、ご参加ありがとうございました。"
         )
@@ -363,10 +394,8 @@ def build_thankyou_body(lang_code, event_name="", event_date="", location="",
         return (
             f"Cảm ơn bạn đã tham gia sự kiện {event_name}!\n"
             "Sự kiện đã diễn ra thành công tốt đẹp.\n\n"
-            f"{L['attend']}: {total_attend}\n"
-            f"{L['collected']}: {total_collected}\n"
-            f"{L['paid']}: {amount_paid}\n"
-            f"{L['remaining']}: {remaining_amount}\n\n"
+            f"{table}\n\n"
+            f"{totals}\n\n"
             "Vui lòng xem file Excel đính kèm để biết chi tiết về người tham gia và chi phí.\n"
             "Một lần nữa xin cảm ơn mọi người đã tham gia!"
         )
@@ -375,10 +404,8 @@ def build_thankyou_body(lang_code, event_name="", event_date="", location="",
     return (
         f"Thank you for attending {event_name}!\n"
         "The event went smoothly thanks to everyone's participation.\n\n"
-        f"{L['attend']}: {total_attend}\n"
-        f"{L['collected']}: {total_collected}\n"
-        f"{L['paid']}: {amount_paid}\n"
-        f"{L['remaining']}: {remaining_amount}\n\n"
+        f"{table}\n\n"
+        f"{totals}\n\n"
         "Please see the attached spreadsheet for full attendee and cost details.\n"
         "Thanks again for being there!"
     )
@@ -570,60 +597,157 @@ def build_gift_report_subject(lang_code, event_id, guest_of_honor):
 
 
 GIFT_REPORT_LABELS = {
-    "en": {"count": "👥 Total contributors", "total": "💰 Total collected"},
-    "ja": {"count": "👥 寄付者数", "total": "💰 集金総額"},
-    "vi": {"count": "👥 Tổng số người đóng góp", "total": "💰 Tổng tiền thu được"},
+    "en": {"count": "👥 Total contributors", "total": "💰 Total collected",
+           # MỚI — thông tin món quà (Tab 6)
+           "gift_item": "🎁 Gift", "gift_link": "🔗 Order link", "gift_price": "💸 Gift cost",
+           # MỚI — bảng tổng kết Event + Gift (cột đầu để TRỐNG, giống bảng
+           # trong email cảm ơn: tên dòng đã tự nói lên nó là gì)
+           "col_kind": "", "col_collected": "💰 Collected", "col_paid": "💸 Paid",
+           "col_remaining": "📊 Remaining",
+           "row_event": "Party", "row_gift": "Gift",
+           "grand_collected": "💰 Total collected (Event + Gift)",
+           "grand_paid": "💸 Total paid (Event + Gift)",
+           "grand_remaining": "📊 Total remaining (Event + Gift)",
+           "gift_only_remaining": "📊 Gift remaining",
+           # MỚI — 3 câu văn của phần "gộp với sự kiện (Party)". Đặt ở đây
+           # thay vì viết thẳng trong build_gift_report_body() để cả 3 ngôn
+           # ngữ nằm cạnh nhau, sửa 1 chỗ là xong. {amount} được thay bằng
+           # số dư tổng đã format (vd "9,930").
+           "intro_combined": "Together with the party itself, here is the overall summary of "
+                              "money collected, money spent, and what is left over.",
+           "closing_keep": "The remaining {amount} will be kept for now and put towards our "
+                            "next get-together.",
+           "closing_bye": "Looking forward to seeing everyone again next time!"},
+    "ja": {"count": "👥 寄付者数", "total": "💰 集金総額",
+           "gift_item": "🎁 記念品", "gift_link": "🔗 購入リンク", "gift_price": "💸 記念品代",
+           "col_kind": "", "col_collected": "💰 集金額", "col_paid": "💸 支払済み",
+           "col_remaining": "📊 残金",
+           "row_event": "Party", "row_gift": "Gift",
+           "grand_collected": "💰 総集金額（イベント＋記念品）",
+           "grand_paid": "💸 総支払額（イベント＋記念品）",
+           "grand_remaining": "📊 総残金（イベント＋記念品）",
+           "gift_only_remaining": "📊 残金",
+           "intro_combined": "イベント（Party）と合わせて、収支および残金を下記の通りご報告いたします。",
+           "closing_keep": "今回の残金 {amount} 円は一旦保管し、次回の飲み会で活用させていただく予定です。",
+           "closing_bye": "また次回もぜひよろしくお願いいたします。"},
+    "vi": {"count": "👥 Tổng số người đóng góp", "total": "💰 Tổng tiền thu được",
+           "gift_item": "🎁 Món quà", "gift_link": "🔗 Link đặt hàng", "gift_price": "💸 Giá món quà",
+           "col_kind": "", "col_collected": "💰 Đã thu", "col_paid": "💸 Đã chi",
+           "col_remaining": "📊 Còn lại",
+           "row_event": "Sự kiện", "row_gift": "Quà tặng",
+           "grand_collected": "💰 Tổng tiền thu (Sự kiện + Quà)",
+           "grand_paid": "💸 Tổng tiền chi (Sự kiện + Quà)",
+           "grand_remaining": "📊 Tổng tiền còn lại (Sự kiện + Quà)",
+           "gift_only_remaining": "📊 Tiền quà còn lại",
+           "intro_combined": "Cộng chung với phần sự kiện (Party), dưới đây là tổng kết thu — chi — "
+                              "còn lại của cả hai phần.",
+           "closing_keep": "Số tiền còn lại {amount} sẽ được giữ lại và dùng cho buổi họp mặt lần sau.",
+           "closing_bye": "Rất mong được gặp lại mọi người!"},
 }
 
 
 def build_gift_report_body(lang_code, guest_of_honor="", event_name="", contributor_count="0",
-                            total_amount="0"):
-    """Nội dung mặc định của email báo cáo số tiền đã quyên góp (Tab 6) —
-    CHỈ là 1 thông báo TỔNG QUAN (đã thu được bao nhiêu người/bao nhiêu
-    tiền), KHÔNG liệt kê danh sách từng người trong nội dung mail — danh
-    sách chi tiết (No./Name/Email/Amount, chỉ những người ĐÃ đóng góp,
-    đánh số lại từ 1, KHÔNG gồm 2 cột checkbox "Send email"/"Contributed")
-    nằm trong file Excel ĐÍNH KÈM (xem _build_gift_report_workbook()) —
-    người nhận mở file đính kèm để xem chi tiết. contributor_count/
-    total_amount LUÔN được tính lại từ dữ liệu MỚI NHẤT ngay trước khi gửi
-    (xem _send_gift_report_email()). Hỗ trợ 4 lựa chọn ngôn ngữ giống các
-    tab khác."""
+                            total_amount="0", gift_name="", gift_link="", gift_price="",
+                            summary_rows=None, grand_collected="0", grand_paid="0",
+                            grand_remaining="0", link_event=False, gift_remaining="0"):
+    """Nội dung mặc định của email báo cáo quyên góp (Tab 6).
+
+    CẤU TRÚC (đã dựng lại theo đúng bố cục bạn yêu cầu):
+
+      1. Lời cảm ơn + câu dẫn.
+      2. KHỐI THÔNG TIN QUÀ — gộp CHUNG mọi con số của phần quà lại 1 chỗ,
+         theo đúng thứ tự: tên quà → link đặt hàng → số người đóng góp →
+         tổng thu → giá quà → còn lại. (Trước đây số người/tổng thu nằm
+         TÁCH khỏi khối quà, phải đọc nhảy cóc 2 nơi mới ghép được bức
+         tranh của phần quà.)
+      3. CHỈ KHI tick "🔗 Link with Tab 5" (link_event=True):
+         câu dẫn "cộng chung với phần sự kiện (Party)" → BẢNG so sánh
+         Party/Gift → 3 dòng tổng → câu kết về việc GIỮ LẠI số dư cho lần
+         sau.
+         Không tick thì bỏ hẳn 3 phần này — bảng chỉ có mỗi dòng Gift là
+         thừa, vì mọi số của phần quà đã nằm đủ ở khối (2) rồi.
+      4. Nhắc xem file Excel đính kèm.
+
+    gift_remaining / grand_remaining: chuỗi ĐÃ format sẵn (vd "1,500"),
+        do _gift_report_body_args() dựng từ số đang hiển thị trên UI.
+
+    Câu kết "giữ lại số dư cho lần sau" chỉ xuất hiện khi số dư THỰC SỰ
+    DƯƠNG — nếu đang âm (đã chi nhiều hơn thu) mà vẫn viết "sẽ giữ lại để
+    dùng lần sau" thì vô nghĩa và dễ gây hiểu nhầm là đang còn quỹ."""
+    if summary_rows is None:
+        summary_rows = []
     if lang_code == "bilingual":
-        ja_full = build_gift_report_body("ja", guest_of_honor, event_name, contributor_count, total_amount)
-        en_full = build_gift_report_body("en", guest_of_honor, event_name, contributor_count, total_amount)
+        ja_full = build_gift_report_body(
+            "ja", guest_of_honor, event_name, contributor_count, total_amount,
+            gift_name, gift_link, gift_price, summary_rows,
+            grand_collected, grand_paid, grand_remaining, link_event, gift_remaining)
+        en_full = build_gift_report_body(
+            "en", guest_of_honor, event_name, contributor_count, total_amount,
+            gift_name, gift_link, gift_price, summary_rows,
+            grand_collected, grand_paid, grand_remaining, link_event, gift_remaining)
         return "[English below]\n\n" + ja_full + BILINGUAL_SEPARATOR + en_full
 
     L = GIFT_REPORT_LABELS.get(lang_code, GIFT_REPORT_LABELS["en"])
 
+    # ── (2) Khối thông tin quà — bỏ qua dòng nào còn trống ──
+    gift_lines = []
+    if (gift_name or "").strip():
+        gift_lines.append(f"{L['gift_item']}: {gift_name.strip()}")
+    if (gift_link or "").strip():
+        gift_lines.append(f"{L['gift_link']}: {gift_link.strip()}")
+    gift_lines.append(f"{L['count']}: {contributor_count}")
+    gift_lines.append(f"{L['total']}: {total_amount}")
+    if (gift_price or "").strip():
+        gift_lines.append(f"{L['gift_price']}: {gift_price.strip()}")
+    gift_lines.append(f"{L['gift_only_remaining']}: {gift_remaining}")
+    gift_block = "\n".join(gift_lines) + "\n\n"
+
+    # ── (3) Phần gộp với sự kiện — chỉ khi đang liên kết Tab 5 ──
+    combined_block = ""
+    closing_block = ""
+    if link_event and summary_rows:
+        headers = [L["col_kind"], L["col_collected"], L["col_paid"], L["col_remaining"]]
+        table = _build_aligned_table(headers, summary_rows)
+        combined_block = (
+            L["intro_combined"] + "\n\n"
+            + table + "\n\n"
+            + f"{L['grand_collected']}: {grand_collected}\n"
+            + f"{L['grand_paid']}: {grand_paid}\n"
+            + f"{L['grand_remaining']}: {grand_remaining}\n\n"
+        )
+        # Số dư dương -> câu "giữ lại dùng cho lần sau". Âm hoặc bằng 0 ->
+        # câu kết trung tính, không hứa hẹn khoản quỹ không tồn tại.
+        if (parse_signed_amount(grand_remaining) or 0.0) > 0:
+            closing_block = L["closing_keep"].format(amount=grand_remaining) + "\n" + L["closing_bye"]
+        else:
+            closing_block = L["closing_bye"]
+
     if lang_code == "ja":
-        return (
+        head = (
             f"{guest_of_honor}さんへの記念品にご協力いただき、誠にありがとうございました！\n"
             "現在までの集金状況を下記の通りご報告いたします。\n\n"
-            f"{L['count']}: {contributor_count}\n"
-            f"{L['total']}: {total_amount}\n\n"
-            "詳細（お一人おひとりの内訳）は、添付の集金リストをご確認ください。\n\n"
-            "改めまして、ご協力いただき誠にありがとうございました。"
         )
-
-    if lang_code == "vi":
-        return (
+        tail = "詳細（お一人おひとりの内訳）は、添付の集金リストをご確認ください。\n\n"
+        if not closing_block:
+            closing_block = "改めまして、ご協力いただき誠にありがとうございました。"
+    elif lang_code == "vi":
+        head = (
             f"Cảm ơn mọi người đã đóng góp quà tặng cho {guest_of_honor}!\n"
             "Đây là báo cáo tình hình quyên góp tính đến thời điểm hiện tại.\n\n"
-            f"{L['count']}: {contributor_count}\n"
-            f"{L['total']}: {total_amount}\n\n"
-            "Vui lòng xem file đính kèm để biết chi tiết đóng góp của từng người.\n\n"
-            "Xin chân thành cảm ơn sự đóng góp của mọi người!"
         )
+        tail = "Vui lòng xem file đính kèm để biết chi tiết đóng góp của từng người.\n\n"
+        if not closing_block:
+            closing_block = "Xin chân thành cảm ơn sự đóng góp của mọi người!"
+    else:  # default / "en"
+        head = (
+            f"Thank you for contributing to the farewell gift for {guest_of_honor}!\n"
+            "Here is the contribution report so far.\n\n"
+        )
+        tail = "Please see the attached spreadsheet for the per-person breakdown.\n\n"
+        if not closing_block:
+            closing_block = "Thank you again for your generosity!"
 
-    # default / "en"
-    return (
-        f"Thank you for contributing to the farewell gift for {guest_of_honor}!\n"
-        "Here is the contribution report so far.\n\n"
-        f"{L['count']}: {contributor_count}\n"
-        f"{L['total']}: {total_amount}\n\n"
-        "Please see the attached spreadsheet for the per-person breakdown.\n\n"
-        "Thank you again for your generosity!"
-    )
+    return head + gift_block + combined_block + tail + closing_block
 
 
 def build_editable_block(lang_code, note, note_is_translated):

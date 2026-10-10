@@ -267,7 +267,193 @@ def sum_contributions(roster) -> float:
     return sum(info.get("amount", 0.0) or 0.0 for info in roster)
 
 
+def contributed_total(roster) -> float:
+    """What the gift collected: the amounts of the people marked as having
+    contributed - the same people the contributor report lists. A file
+    import can leave an amount on someone not marked; it is not counted."""
+    return sum(info.get("amount", 0.0) or 0.0 for info in roster if info.get("checked"))
+
+
 def count_actual_attendees(roster) -> int:
     """How many people are marked as having actually attended."""
     return sum(1 for info in roster
                if (info.get("actual_attend") or "").strip().lower() == "yes")
+
+
+# ── Payment rounds, the gift, and the History figures ─────────────────────
+#
+# Ported from the separately developed copy of this app (the user's live
+# one). That copy computed these figures by reading back the text of on-
+# screen labels; here they are computed once, from the data, and the screen,
+# the emails, the Excel report and History all use the same result.
+
+# The sign is a leading minus, or accounting parentheses that must close:
+# "(500" or "500)" is not a number this app wrote.
+_SIGNED_AMOUNT = re.compile(
+    r"^\s*(?:([-−(])\s*)?(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?\s*(\))?\s*$")
+
+
+def parse_signed_amount(text):
+    """An amount this app wrote ("8,430", "-3,570", "−3,570", "(3,570)"),
+    sign included. None for anything else, so a hand-typed value that is not
+    such a number is reported instead of being read as 0 - or, worse, as a
+    positive number found somewhere in the text. Empty text is 0.0.
+
+    Exactly three digits after a dot ("9.930") is None too: that is how
+    thousands are grouped in Vietnamese and German, and reading it as 9.93
+    would put every running total after it out by about ten thousand."""
+    if text is None or not str(text).strip():
+        return 0.0
+    match = _SIGNED_AMOUNT.match(str(text))
+    if not match or len(match.group(3) or "") == 4:
+        return None
+    if (match.group(1) == "(") != bool(match.group(4)):
+        return None  # "(500" or "500)": a parenthesis without its pair
+    value = float(match.group(2).replace(",", "") + (match.group(3) or ""))
+    return -value if match.group(1) else value
+
+
+_MINUS = ("-", "\u2212")
+
+
+def parse_typed_amount(text):
+    """An amount typed by hand, keeping its minus ("-500" is a refund, not
+    500): parse_amount_from_text finds the number, the sign is read from the
+    text before it - at the very start ("-¥500") or right before the number,
+    after a currency mark ("¥-500", "USD -500")."""
+    value = parse_amount_from_text(text)
+    t = str(text or "")
+    first = _ANY_NUMBER.search(t)
+    head = t[:first.start()] if first else t
+    negative = head.strip().startswith(_MINUS) or head.rstrip().endswith(_MINUS)
+    return -value if value and negative else value
+
+
+# One number written the ways _to_float() reads: plain, comma- or
+# dot-grouped thousands with an optional decimal part, or one decimal mark.
+_WELL_FORMED_NUMBER = re.compile(
+    r"\d+|\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d{1,3}(?:\.\d{3})+(?:,\d+)?|\d+[.,]\d+")
+
+
+def unclear_typed_amount(text):
+    """True when a hand-typed amount would not be read as what it shows: no
+    number at all ("abc" is read as 0), more than one ("1 000" is read as 1,
+    "500 + 300" as 500), or one with separators that make no number
+    ("1.2.3", "1,2,3" are read as 0). A currency mark or word around one
+    number is fine ("¥1,500", "1.500.000 VND")."""
+    t = str(text or "").strip()
+    if not t:
+        return False
+    numbers = _ANY_NUMBER.findall(t)
+    return len(numbers) != 1 or not _WELL_FORMED_NUMBER.fullmatch(numbers[0])
+
+
+def amount_for(attending, free, budget):
+    """What someone owes for one round: nothing when exempt (Free applies to
+    every round), the expected budget when they came, nothing otherwise."""
+    if free or not attending:
+        return 0.0
+    return budget
+
+
+def is_yes(value):
+    return (value or "").strip().lower() == "yes"
+
+
+class RoundFigures:
+    """One payment round: who came, what was collected, what was paid."""
+
+    __slots__ = ("key", "label", "attendees", "collected", "paid")
+
+    def __init__(self, key, label, attendees, collected, paid):
+        self.key, self.label = key, label
+        self.attendees, self.collected, self.paid = attendees, collected, paid
+
+    @property
+    def remaining(self):
+        return self.collected - self.paid
+
+    def __repr__(self):
+        return (f"RoundFigures({self.key!r}, {self.label!r}, {self.attendees}, "
+                f"{self.collected}, {self.paid})")
+
+
+def payment_rounds(roster, round1_label, round1_paid, rounds):
+    """Figures for every round of an Attendance & Payment table.
+
+    roster: the per-person dicts (actual_attend, amount, extra_attends,
+        extra_amounts). round1_paid / each round's "amount_paid": the text
+        typed in its "paid" box. rounds: the rounds after the first, as
+        stored ({"key", "label", "amount_paid"}). Round 1 comes first, key
+        None."""
+    people = list(roster)
+    figures = [RoundFigures(
+        None, round1_label,
+        sum(1 for info in people if is_yes(info.get("actual_attend"))),
+        sum(info.get("amount", 0.0) or 0.0 for info in people),
+        parse_typed_amount(round1_paid))]
+    for r in rounds:
+        key = r["key"]
+        figures.append(RoundFigures(
+            key, r.get("label") or key,
+            sum(1 for info in people if is_yes((info.get("extra_attends") or {}).get(key))),
+            sum((info.get("extra_amounts") or {}).get(key, 0.0) or 0.0 for info in people),
+            parse_typed_amount(r.get("amount_paid"))))
+    return figures
+
+
+def round_totals(figures):
+    """(collected, paid, remaining) over every round."""
+    collected = sum(f.collected for f in figures)
+    paid = sum(f.paid for f in figures)
+    return collected, paid, collected - paid
+
+
+def gift_figures(gift_collected, gift_price_text, linked, event_totals=(0.0, 0.0, 0.0)):
+    """The gift's own money, and - when its report is linked with the event -
+    the event's totals added on. event_totals: round_totals() of the event.
+    A typed minus is kept ("-500" is money back), as for the paid boxes."""
+    cost = parse_typed_amount(gift_price_text)
+    gift_remaining = gift_collected - cost
+    ev_collected, ev_paid, ev_remaining = event_totals if linked else (0.0, 0.0, 0.0)
+    return {
+        "gift_collected": gift_collected, "gift_cost": cost, "gift_remaining": gift_remaining,
+        "linked": bool(linked),
+        "event_collected": ev_collected, "event_paid": ev_paid, "event_remaining": ev_remaining,
+        "grand_collected": gift_collected + ev_collected,
+        "grand_paid": cost + ev_paid,
+        "grand_remaining": gift_remaining + ev_remaining,
+    }
+
+
+def history_figures(figures, gift_collected, gift_price_text):
+    """The money columns of an event's History row.
+
+    ActualAttendees and CostPerPerson describe the main event (round 1)
+    only - the headcount used to split costs. Income, Expense and Balance
+    cover the whole series: every round, plus the gift whether or not its
+    report is linked with the event (History is the ledger of everything)."""
+    main = figures[0]
+    collected, paid, _ = round_totals(figures)
+    income = collected + gift_collected
+    expense = paid + parse_typed_amount(gift_price_text)
+    return {
+        "ActualAttendees": str(main.attendees),
+        "CostPerPerson": format_amount(main.collected / main.attendees if main.attendees else 0.0),
+        "TotalIncome": format_amount(income),
+        "TotalExpense": format_amount(expense),
+        "Balance": format_amount(income - expense),
+    }
+
+
+def running_fund(balances):
+    """Department fund left after each event: the running total of Balance,
+    in History order. An event whose Balance is not a number this app wrote
+    makes every later total unknown (None) - a guessed figure would carry the
+    error into every row after it."""
+    out, total = [], 0.0
+    for text in balances:
+        value = parse_signed_amount(text) if total is not None else None
+        total = None if value is None else total + value
+        out.append(total)
+    return out

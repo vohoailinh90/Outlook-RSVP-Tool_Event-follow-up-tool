@@ -10,6 +10,8 @@ class FakeOutlook:
     def __init__(self, fail: Exception | None = None):
         self.calls: list[tuple[str, dict]] = []
         self.fail = fail
+        # Groups a test wants expanded: {address: (members, failed, diag)}.
+        self.groups: dict = {}
 
     def _record(self, name: str, **kwargs):
         self.calls.append((name, kwargs))
@@ -60,20 +62,28 @@ class FakeOutlook:
         return object(), False
 
     def send_gift_report_email(self, recipients, subject, body,
-                               excel_path=None, auto_send=False):
+                               excel_path=None, auto_send=False,
+                               html_body=None):
         self._record("send_gift_report_email", recipients=recipients,
                      subject=subject, body=body, excel_path=excel_path,
-                     auto_send=auto_send)
+                     auto_send=auto_send, html_body=html_body)
         return object(), False
 
     def send_thankyou_email(self, recipients, subject, body, excel_path=None,
-                            event_name=None, auto_send=False):
+                            event_name=None, auto_send=False,
+                            html_body=None):
         self._record("send_thankyou_email", recipients=recipients,
                      subject=subject, body=body, excel_path=excel_path,
-                     event_name=event_name, auto_send=auto_send)
+                     event_name=event_name, auto_send=auto_send,
+                     html_body=html_body)
         return object(), False
 
-    def expand_group_members(self, email_or_name, max_depth=6):
+    def expand_group_members(self, email_or_name, max_depth=10):
         self._record("expand_group_members", email_or_name=email_or_name,
                      max_depth=max_depth)
         return None
+
+    def expand_group_members_detailed(self, email_or_name, max_depth=10):
+        self._record("expand_group_members_detailed",
+                     email_or_name=email_or_name, max_depth=max_depth)
+        return self.groups.get(email_or_name, (None, [], []))

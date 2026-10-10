@@ -723,7 +723,8 @@ def send_gift_reminder_email(pending, subject, body, auto_send=False, attach_eve
         pythoncom.CoUninitialize()
 
 
-def send_gift_report_email(recipients, subject, body, excel_path=None, auto_send=False):
+def send_gift_report_email(recipients, subject, body, excel_path=None, auto_send=False,
+                            html_body=None):
     """MỚI: gửi email BÁO CÁO số tiền đã quyên góp được (Tab 6 'Gift
     Contribution') tới những người được TICK CHỌN ở cột "Send email" —
     KHÔNG có Voting Buttons và KHÔNG đính ảnh hướng dẫn vote (thuần là 1
@@ -746,7 +747,16 @@ def send_gift_report_email(recipients, subject, body, excel_path=None, auto_send
         mail = outlook.CreateItem(0)  # 0 = olMailItem
         mail.To = ";".join(e for _, e in recipients if e)
         mail.Subject = subject
-        mail.Body = body
+        # MỚI: nếu caller đã dựng sẵn bản HTML (rsvp_app.text_body_to_html()
+        # chuyển bảng tổng kết Event + Gift thành <table> HTML thật) thì gán
+        # vào HTMLBody — Outlook dùng font tỉ lệ nên bảng canh bằng khoảng
+        # trắng trong .Body KHÔNG BAO GIỜ thẳng hàng ở máy người nhận. Không
+        # có html_body thì giữ nguyên hành vi cũ (.Body text thuần), nên các
+        # caller cũ không bị ảnh hưởng.
+        if html_body:
+            mail.HTMLBody = html_body
+        else:
+            mail.Body = body
 
         attached = False
         if excel_path and os.path.exists(excel_path):
@@ -808,7 +818,8 @@ def _find_calendar_invite_appointment(ns, event_name):
     return candidates[0]
 
 
-def send_thankyou_email(recipients, subject, body, excel_path=None, event_name=None, auto_send=False):
+def send_thankyou_email(recipients, subject, body, excel_path=None, event_name=None,
+                        auto_send=False, html_body=None):
     """MỚI: gửi email CẢM ƠN sau sự kiện (Tab 5 'Attendance & Payment')
     tới những người "Actual Attend" = Yes. KHÔNG có Voting Buttons và
     KHÔNG đính ảnh hướng dẫn vote (giống send_gift_reminder_email — thuần
@@ -835,7 +846,17 @@ def send_thankyou_email(recipients, subject, body, excel_path=None, event_name=N
         mail = outlook.CreateItem(0)  # 0 = olMailItem
         mail.To = ";".join(e for _, e in recipients if e)
         mail.Subject = subject
-        mail.Body = body
+        # MỚI: nếu có `html_body` thì gửi dạng HTML — cần thiết để BẢNG tổng
+        # kết các đợt thu tiền hiển thị đúng. Bảng canh cột bằng khoảng
+        # trắng trong `body` chỉ thẳng hàng khi người NHẬN đọc bằng font
+        # monospace, mà Outlook mặc định dùng font tỉ lệ (Calibri...) nên
+        # nhìn lệch hết cột. Gán HTMLBody để Outlook dựng <table> thật (xem
+        # rsvp_app.text_body_to_html()). `body` text vẫn được truyền vào và
+        # dùng làm fallback khi không dựng được HTML.
+        if html_body:
+            mail.HTMLBody = html_body
+        else:
+            mail.Body = body
 
         if excel_path and os.path.exists(excel_path):
             try:
@@ -862,58 +883,255 @@ def send_thankyou_email(recipients, subject, body, excel_path=None, event_name=N
         pythoncom.CoUninitialize()
 
 
-def _expand_dl_addr_entry(addr_entry, seen_keys, depth):
-    """addr_entry: 1 AddressEntry COM object ĐÃ BIẾT CHẮC là 1 Exchange
-    Distribution List (group email). Trả về list[(name, smtp_email)] của
-    TẤT CẢ thành viên THẬT (không phải group) — đệ quy fan-out qua mọi
-    sub-group lồng bên trong, loại trùng theo email (seen_keys dùng chung
-    xuyên suốt đệ quy để 1 người nằm ở nhiều sub-group không bị lặp)."""
-    if depth <= 0:
-        return []
+# ══════════════════════════════════════════════════════════════════════
+# EXPAND GROUP EMAIL (Exchange Distribution List) — fan-out đệ quy
+# ══════════════════════════════════════════════════════════════════════
+# Hằng số COM của Outlook (không import từ đâu được, phải khai báo tay).
+# OlDisplayType:
+OL_DISPLAY_DIST_LIST = 1          # group trong GAL
+OL_DISPLAY_PRIVATE_DIST_LIST = 5  # group tự tạo trong Contacts cá nhân
+# OlAddressEntryUserType:
+OL_EXCHANGE_DL_ENTRY = 1          # olExchangeDistributionListAddressEntry
+OL_OUTLOOK_DL_ENTRY = 11          # olOutlookDistributionListAddressEntry
+
+
+def _safe(obj, attr, default=None):
+    """getattr() an toàn cho COM object — nhiều thuộc tính của AddressEntry
+    ném exception thay vì trả None khi không áp dụng được cho loại entry đó."""
+    try:
+        value = getattr(obj, attr)
+        return default if value is None else value
+    except Exception:
+        return default
+
+
+def _ae_smtp(addr_entry):
+    """Địa chỉ SMTP thật của 1 AddressEntry.
+
+    ⚠️ THỨ TỰ RẤT QUAN TRỌNG: phải thử GetExchangeDistributionList() TRƯỚC
+    GetExchangeUser(). Lý do: khi gọi GetExchangeUser() trên 1 AddressEntry
+    vốn là GROUP, Exchange KHÔNG trả None mà trả về ExchangeUser của NGƯỜI
+    QUẢN LÝ (manager/owner) group đó. Bản trước thử GetExchangeUser() trước
+    nên mỗi sub-group bị quy thành đúng 1 con người — chính là hiện tượng
+    "group 18 người chỉ ra 3 dòng, toàn là leader của từng nhóm"."""
+    if _ae_is_group(addr_entry):
+        try:
+            dl = addr_entry.GetExchangeDistributionList()
+            if dl is not None:
+                smtp = _safe(dl, "PrimarySmtpAddress")
+                if smtp and "@" in smtp:
+                    return smtp.lower()
+        except Exception:
+            pass
+    else:
+        try:
+            user = addr_entry.GetExchangeUser()
+            if user is not None:
+                smtp = _safe(user, "PrimarySmtpAddress")
+                if smtp and "@" in smtp:
+                    return smtp.lower()
+        except Exception:
+            pass
+    # PR_SMTP_ADDRESS qua PropertyAccessor — đường cuối cùng, dùng được cho
+    # cả contact ngoài Exchange lẫn entry mà 2 cách trên đều bó tay.
+    try:
+        pa = addr_entry.PropertyAccessor
+        smtp = pa.GetProperty("http://schemas.microsoft.com/mapi/proptag/0x39FE001E")
+        if smtp and "@" in smtp:
+            return smtp.lower()
+    except Exception:
+        pass
+    addr = _safe(addr_entry, "Address", "")
+    return addr.lower() if addr and "@" in addr else None
+
+
+def _ae_is_group(addr_entry):
+    """Có phải group (distribution list) không — kiểm tra ĐA TIÊU CHÍ.
+
+    LỖI CŨ: code trước chỉ dựa vào GetExchangeDistributionList() != None.
+    Nhưng các AddressEntry lấy ra từ GetExchangeDistributionListMembers()
+    là "stub" chưa resolve đầy đủ — với sub-group lồng bên trong, hàm đó
+    thường trả None, nên sub-group bị tưởng nhầm là 1 CON NGƯỜI và không
+    được fan-out tiếp. Đó chính là lý do 1 group 18 người chỉ ra 3 dòng.
+    DisplayType/AddressEntryUserType thì luôn có sẵn ngay trên stub, nên
+    nhận diện được sub-group trước khi re-resolve."""
+    if _safe(addr_entry, "DisplayType") in (OL_DISPLAY_DIST_LIST, OL_DISPLAY_PRIVATE_DIST_LIST):
+        return True
+    if _safe(addr_entry, "AddressEntryUserType") in (OL_EXCHANGE_DL_ENTRY, OL_OUTLOOK_DL_ENTRY):
+        return True
+    try:
+        if addr_entry.GetExchangeDistributionList() is not None:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _reresolve_addr_entry(ns, addr_entry):
+    """Lấy lại AddressEntry ĐẦY ĐỦ từ GAL cho 1 entry stub.
+
+    Cần thiết vì entry lấy từ GetExchangeDistributionListMembers() chỉ là
+    bản rút gọn: DisplayType/AddressEntryUserType có thể báo SAI (group bị
+    báo là user), và gọi GetExchangeDistributionListMembers() trên nó
+    thường trả None hoặc THIẾU thành viên.
+
+    Thứ tự khoá tra cứu, từ đáng tin nhất xuống:
+      1. EntryID + Namespace.GetAddressEntryFromID() — định danh tuyệt đối.
+      2. `Address` = legacyExchangeDN (/o=.../cn=...) — định danh duy nhất
+         trong tổ chức Exchange.
+      3. `Name` — đường cuối, có thể nhập nhằng nếu trùng tên.
+    KHÔNG dùng SMTP làm khoá: với entry group, SMTP đọc ra có thể là địa
+    chỉ của người quản lý group chứ không phải của chính group."""
+    entry_id = _safe(addr_entry, "ID")
+    if entry_id:
+        try:
+            full = ns.GetAddressEntryFromID(entry_id)
+            if full is not None:
+                return full
+        except Exception:
+            pass
+    for key in (_safe(addr_entry, "Address"), _safe(addr_entry, "Name")):
+        if not key:
+            continue
+        try:
+            recip = ns.CreateRecipient(key)
+            recip.Resolve()
+            if recip.Resolved and recip.AddressEntry is not None:
+                return recip.AddressEntry
+        except Exception:
+            continue
+    return addr_entry
+
+
+def _dl_member_entries(addr_entry):
+    """Danh sách AddressEntry thành viên của 1 group. Trả None nếu KHÔNG
+    liệt kê được (khác hẳn với trả [] = group rỗng thật) để caller còn báo
+    cho user biết group nào chưa expand được, thay vì âm thầm bỏ sót.
+
+    Thử 2 đường: GetExchangeDistributionListMembers() cho group Exchange,
+    rồi .Members cho group cá nhân trong Contacts."""
     try:
         dl = addr_entry.GetExchangeDistributionList()
-        if dl is None:
-            return []
-        member_entries = dl.GetExchangeDistributionListMembers()
-        count = member_entries.Count
+        if dl is not None:
+            members = dl.GetExchangeDistributionListMembers()
+            if members is not None:
+                return [members.Item(i) for i in range(1, members.Count + 1)]
     except Exception:
+        pass
+    try:
+        members = addr_entry.Members
+        if members is not None:
+            return [members.Item(i) for i in range(1, members.Count + 1)]
+    except Exception:
+        pass
+    return None
+
+
+def _expand_dl_addr_entry(ns, addr_entry, seen_people, seen_groups, depth,
+                           failed_groups, diag):
+    """Fan-out đệ quy 1 group thành list[(name, smtp)] người THẬT.
+
+    seen_people : chống trùng người (1 người ở nhiều sub-group).
+    seen_groups : chống lặp vô hạn khi group A chứa B mà B lại chứa A.
+    failed_groups: tên các group KHÔNG liệt kê được thành viên — trả ngược
+                   lên để báo cho user, vì im lặng bỏ sót là nguy hiểm
+                   nhất (user tưởng đã mời đủ người).
+    diag        : list các dòng chẩn đoán "group X: N direct members
+                  (G groups, P people)" — hiện trong hộp thoại kết quả để
+                  đối chiếu nhanh với những gì Outlook hiển thị."""
+    if depth <= 0:
+        failed_groups.append(f"{_safe(addr_entry, 'Name', '?')} (nested too deep)")
+        return []
+
+    full = _reresolve_addr_entry(ns, addr_entry)
+    # A key unique to the group before its display name: two personal groups
+    # without an SMTP address can share a name, and keying on it skipped the
+    # second one's members without a word.
+    group_key = (_ae_smtp(full) or _safe(full, "Address", "") or _safe(full, "ID", "")
+                 or _safe(full, "Name", "") or "").lower()
+    if group_key and group_key in seen_groups:
+        return []  # đã xử lý group này rồi
+    if group_key:
+        seen_groups.add(group_key)
+
+    member_entries = _dl_member_entries(full)
+    if member_entries is None:
+        failed_groups.append(_safe(full, "Name", "?"))
         return []
 
     result = []
-    for i in range(1, count + 1):
-        try:
-            m = member_entries.Item(i)
-        except Exception:
+    n_groups = n_people = 0
+    for m in member_entries:
+        if m is None:
             continue
-        sub_dl = None
+        # QUAN TRỌNG: re-resolve TỪNG member TRƯỚC khi phân loại. Bản trước
+        # kiểm tra _ae_is_group() ngay trên stub, mà stub hay báo sai
+        # DisplayType (group hiện thành olUser) -> sub-group bị coi là
+        # người, rồi GetExchangeUser() trên nó lại trả về NGƯỜI QUẢN LÝ
+        # group. Kết quả: mỗi sub-group biến thành đúng 1 leader, đúng lỗi
+        # "18 người ra 3 dòng".
+        m_full = _reresolve_addr_entry(ns, m)
+        if _ae_is_group(m_full):
+            n_groups += 1
+            result.extend(_expand_dl_addr_entry(
+                ns, m_full, seen_people, seen_groups, depth - 1, failed_groups, diag))
+            continue
+        n_people += 1
+        smtp = _ae_smtp(m_full)
+        if not smtp or "@" not in smtp:
+            # Someone the address book gives no email address for: left out
+            # silently, the caller would save the group as these members
+            # and lose them for good. Reported, so the group's row is kept.
+            failed_groups.append(
+                f"{_safe(full, 'Name', '?')}: {_safe(m_full, 'Name', '?')} (no email address)")
+            continue
+        if smtp in seen_people:
+            continue
+        seen_people.add(smtp)
+        name = None
         try:
-            sub_dl = m.GetExchangeDistributionList()
+            user = m_full.GetExchangeUser()
+            name = _safe(user, "Name") if user is not None else None
         except Exception:
             pass
-        if sub_dl is not None:
-            # Thành viên này bản thân là 1 sub-group lồng bên trong -> đệ quy
-            # fan-out tiếp, KHÔNG thêm chính cái sub-group vào kết quả.
-            result.extend(_expand_dl_addr_entry(m, seen_keys, depth - 1))
-            continue
-        try:
-            exch_user = m.GetExchangeUser()
-            smtp = exch_user.PrimarySmtpAddress.lower() if exch_user else None
-            name = (exch_user.Name if exch_user else None) or m.Name
-        except Exception:
-            smtp, name = None, getattr(m, "Name", None)
-        if not smtp or "@" not in smtp or smtp in seen_keys:
-            continue
-        seen_keys.add(smtp)
-        result.append((name or smtp, smtp))
+        result.append((name or _safe(m_full, "Name") or smtp, smtp))
+
+    diag.append(f"{_safe(full, 'Name', '?')}: {len(member_entries)} direct "
+                f"({n_groups} sub-groups, {n_people} people)")
     return result
 
 
-def expand_group_members(email_or_name, max_depth=6):
+def expand_group_members_detailed(email_or_name, max_depth=10):
+    """Như expand_group_members() nhưng trả về (members, failed_groups,
+    diag) để caller báo cho user biết group con nào KHÔNG liệt kê được
+    thành viên (thường do Cached Exchange Mode / Offline Address Book chưa
+    tải đủ dữ liệu group), kèm dòng chẩn đoán cấu trúc từng group.
+    members = None nghĩa là đây không phải group."""
+    pythoncom.CoInitialize()
+    try:
+        outlook = _outlook_app()
+        ns = outlook.GetNamespace("MAPI")
+        recip = ns.CreateRecipient(email_or_name)
+        recip.Resolve()
+        if not recip.Resolved:
+            return None, [], []
+        addr_entry = recip.AddressEntry
+        if addr_entry is None or not _ae_is_group(addr_entry):
+            return None, [], []  # không phải group -> caller giữ nguyên dòng gốc
+        failed, diag = [], []
+        members = _expand_dl_addr_entry(
+            ns, addr_entry, set(), set(), max_depth, failed, diag)
+        return members, failed, diag
+    finally:
+        pythoncom.CoUninitialize()
+
+
+def expand_group_members(email_or_name, max_depth=10):
     """
-    Nếu `email_or_name` là 1 Exchange Distribution List (group email trong sổ
-    địa chỉ công ty — GAL) — có thể chứa sub-group lồng bên trong — trả về
-    list[(name, smtp_email)] của TẤT CẢ thành viên THẬT, đã fan-out đệ quy
-    qua mọi sub-group, loại trùng theo email.
+    Nếu `email_or_name` là 1 Distribution List (group email trong sổ địa chỉ
+    công ty — GAL, hoặc group cá nhân trong Contacts) — có thể chứa sub-group
+    lồng nhiều tầng — trả về list[(name, smtp_email)] của TẤT CẢ thành viên
+    THẬT, đã fan-out đệ quy qua mọi sub-group, loại trùng theo email.
 
     Trả về None nếu `email_or_name` KHÔNG PHẢI group (là 1 người dùng bình
     thường, hoặc không resolve được qua Outlook) — caller nên giữ nguyên
@@ -922,32 +1140,10 @@ def expand_group_members(email_or_name, max_depth=6):
     sách, không bị xoá).
 
     ⚠️ YÊU CẦU: tài khoản Outlook đang dùng phải nằm trên Exchange/Microsoft
-    365 và group đó có trong GAL của tổ chức. Với mailing-list/group ngoài
-    Exchange (Google Group, group tự tạo trong Contacts cá nhân...), Outlook
-    KHÔNG có cách nào liệt kê thành viên qua COM — hàm sẽ trả về None, và
-    dòng group email đó vẫn được giữ nguyên như 1 người nhận bình thường
-    (tool không biết đó là group nên không thể tách số người chưa trả lời
-    chính xác cho trường hợp này).
+    365 và group đó có trong GAL của tổ chức. Với mailing-list ngoài Exchange
+    (Google Group...), Outlook KHÔNG có cách nào liệt kê thành viên qua COM
+    — hàm trả về None và dòng group email đó vẫn được giữ nguyên như 1 người
+    nhận bình thường.
     """
-    pythoncom.CoInitialize()
-    try:
-        outlook = _outlook_app()
-        ns = outlook.GetNamespace("MAPI")
-        recip = ns.CreateRecipient(email_or_name)
-        recip.Resolve()
-        if not recip.Resolved:
-            return None
-        addr_entry = recip.AddressEntry
-        if addr_entry is None:
-            return None
-        try:
-            dl = addr_entry.GetExchangeDistributionList()
-        except Exception:
-            dl = None
-        if dl is None:
-            return None  # không phải group -> caller tự giữ nguyên dòng gốc
-
-        seen = set()
-        return _expand_dl_addr_entry(addr_entry, seen, max_depth)
-    finally:
-        pythoncom.CoUninitialize()
+    members, _failed, _diag = expand_group_members_detailed(email_or_name, max_depth)
+    return members

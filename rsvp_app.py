@@ -37,7 +37,9 @@ import threading
 from datetime import datetime, timedelta
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+import webbrowser
+from tkinter import ttk, filedialog, messagebox, simpledialog
+from tkinter import font as tkfont
 
 try:
     from tkcalendar import DateEntry
@@ -79,13 +81,13 @@ PAGES = [
      "Every saved event. Double-click a cell to edit it, then save."),
 ]
 
-# Tab 7 (Event History): (column, header, width), in db.EVENT_COLUMNS order.
-# Not shown, because nothing writes them any more: the cost columns of the
-# removed "Actual cost tracking" (ActualAttendees, CostPerPerson,
-# TotalIncome, TotalExpense, Balance), ReminderSent (only ever set for a
-# scheduled-reminder script that does not exist) and ReportFile (only set by
-# a report export that had no button). Their stored values are kept, and
-# "Export to Excel" still writes them. AmountPaid is edited on Tab 5.
+# Tab 7 (Event History): (column, header, width) - the default column order;
+# the user can drag headings to reorder them (saved in the database, see
+# _load_history_column_order()). Same columns and headers as the other
+# lineage of this app. Not shown: ReminderSent (only ever set for a
+# scheduled-reminder script that does not exist here), ReportFile (only set
+# by a report export that had no button) and AmountPaid (edited on Tab 5).
+# Their stored values are kept, and "Export to Excel" still writes them.
 HISTORY_TABLE_COLUMNS = [
     ("EventID", "Event ID", 110), ("EventName", "Event Name", 170),
     ("EventDate", "Date", 96), ("Deadline", "Deadline", 96),
@@ -93,14 +95,38 @@ HISTORY_TABLE_COLUMNS = [
     ("EmailLanguage", "Language", 140), ("OrganizerNote", "Organizer Note", 220),
     ("RecipientFile", "Recipient File", 220), ("SentDate", "Sent Date", 120),
     ("UpdateInviteDate", "Update Invite Date", 130),
-    ("TotalInvited", "Invited", 65), ("Yes", "Yes", 45), ("No", "No", 45),
-    ("Maybe", "Maybe", 55), ("NoResponse", "No Resp.", 70),
+    ("TotalInvited", "Invited", 65), ("Yes", "Yes", 45),
+    ("ActualAttendees", "Actual Att. (main)", 120),
+    ("No", "No", 45), ("Maybe", "Maybe", 55), ("NoResponse", "No Resp.", 70),
     ("CalendarSent", "Calendar Invite", 140),
     ("LastReminderSentDate", "Last Reminder Sent", 140),
     ("EventMode", "Event Mode", 90), ("Organizer", "Organizer", 140),
     ("GuestOfHonor", "Guest of Honor", 140), ("GiftBudget", "Gift Budget", 100),
     ("GiftDeadline", "Gift Deadline", 90), ("StartTime", "Start", 65), ("EndTime", "End", 65),
+    ("GiftItemName", "Gift Item", 140), ("GiftItemLink", "Gift Order Link", 180),
+    ("GiftItemPrice", "Gift Price", 90),
+    # The money columns, all on the right so they read together.
+    ("CostPerPerson", "Cost/Person", 90), ("TotalIncome", "Income (all)", 100),
+    ("TotalExpense", "Expense (all)", 100), ("Balance", "Balance", 90),
+    ("DeptFundRemaining", "Dept. Fund Left", 110),
 ]
+HISTORY_TABLE_KEYS = tuple(c for c, _h, _w in HISTORY_TABLE_COLUMNS)
+HISTORY_TABLE_HEADERS = dict((c, h) for c, h, _w in HISTORY_TABLE_COLUMNS)
+# Written by the app, never typed on Tab 7: the money columns follow Tab 5
+# and Tab 6 (_sync_event_money()), Dept. Fund Left is a running total of
+# Balance, and the gift item is edited on Tab 6. A Tab 7 edit would be
+# overwritten by the next change there, or overwrite it.
+HISTORY_READ_ONLY = frozenset({
+    "ActualAttendees", "CostPerPerson", "TotalIncome", "TotalExpense", "Balance",
+    "DeptFundRemaining", "GiftItemName", "GiftItemLink", "GiftItemPrice",
+})
+HISTORY_COLUMN_ORDER_KEY = "history_column_order"  # app_settings key, shared with the other lineage
+HISTORY_SEARCH_ANY = "(Any field)"
+
+# The first payment round's name on Tab 5 when the user has not named it.
+ROUND1_DEFAULT_LABEL = "Round 1"
+TRUTHY = ("yes", "true", "1", "✅", "x")
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # Language, message and paste-cleanup helpers
@@ -121,12 +147,22 @@ HISTORY_TABLE_COLUMNS = [
 # what makes it testable anywhere.
 # ══════════════════════════════════════════════════════════════════════════
 from rsvp.domain import (  # noqa: F401
+    amount_for,
+    contributed_total,
     count_actual_attendees,
+    gift_figures,
+    history_figures,
+    is_yes,
     merge_expanded_roster,
     format_amount,
     parse_amount_from_text,
+    parse_typed_amount,
+    payment_rounds,
     remaining_amount,
+    round_totals,
+    running_fund,
     sum_contributions,
+    unclear_typed_amount,
 )
 from rsvp.i18n import (  # noqa: F401
     BILINGUAL_SEPARATOR,
@@ -163,6 +199,7 @@ from rsvp.i18n import (  # noqa: F401
     cleanup_pasted_translation,
     dedupe_pasted_translation,
     detect_possible_duplicate_paste,
+    text_body_to_html,
 )
 
 
@@ -381,6 +418,27 @@ class RSVPApp(tk.Tk):
         self._amount_paid_event = None
         self._amount_paid_quiet = False
         self._amount_paid_save_failed = False
+        # Tab 5's payment rounds after the first, the first round's name and
+        # the next "round_N": owned by _attendance_event together with the
+        # table, and loaded or cleared only with it (_adopt_attendance_owner()).
+        self._extra_rounds = []
+        self._round1_label = ""
+        self._next_round_index = 2
+        self._round_vars = {}
+        # Tab 6's gift item belongs to _gift_event; setting it from the
+        # database must not save it straight back.
+        self._gift_item_quiet = False
+        # The event whose gift item is on screen: None until it was read, so
+        # blank boxes shown after a failed read are never saved over it.
+        self._gift_item_event = None
+        # History's money columns follow every saved change on Tab 5 / Tab 6
+        # (_sync_event_money()); muted while an event is loaded or cleared.
+        self._suspend_money_sync = False
+        # Saves that failed and were reported once already, by what they save.
+        self._save_failures_reported = set()
+        # While a paste is applied, cells it could not take are collected
+        # here and reported once, not as one dialog per cell.
+        self._paste_refusals = None
         self._yes_emails = []
         self._group_expansion_cache = {}
         # MỚI: đổi kiến trúc lưu trữ — history_path giờ trỏ tới 1 file SQLite
@@ -615,21 +673,33 @@ class RSVPApp(tk.Tk):
         region = tree.identify("region", event.x, event.y)
         if region != "cell":
             return
-        col = tree.identify_column(event.x)  # e.g. '#1', '#2', ...
         row_id = tree.identify_row(event.y)
-        if not row_id or not col:
+        col_name = self._tree_column_name_at(tree, tree.identify_column(event.x))
+        if not row_id or col_name is None:
             return
-        columns = tree["columns"]
-        try:
-            col_index = int(col.replace("#", "")) - 1
-        except ValueError:
-            return
-        if col_index < 0 or col_index >= len(columns):
-            return
-        col_name = columns[col_index]
         if editable_cols is not None and col_name not in editable_cols:
             return
         self._begin_cell_edit(tree, row_id, col_name, on_commit)
+
+    @staticmethod
+    def _tree_display_columns(tree):
+        """The columns as shown, left to right - which differs from
+        tree["columns"] once the user has dragged headings around."""
+        shown = tree["displaycolumns"]
+        if not shown or shown in ("#all", ("#all",)) or tuple(shown) == ("#all",):
+            return tuple(tree["columns"])
+        return tuple(shown)
+
+    @classmethod
+    def _tree_column_name_at(cls, tree, column_ref):
+        """The column name behind identify_column()'s "#N" (N counts the
+        columns as shown), or None."""
+        try:
+            index = int(str(column_ref).replace("#", "")) - 1
+        except ValueError:
+            return None
+        shown = cls._tree_display_columns(tree)
+        return shown[index] if 0 <= index < len(shown) else None
 
     def _enable_treeview_copy_paste(self, tree, on_commit=None, editable_cols=None):
         """Adds Ctrl+C / Ctrl+V clipboard support to a Treeview:
@@ -650,10 +720,11 @@ class RSVPApp(tk.Tk):
           otherwise the Treeview cell is just updated directly."""
         def copy_selection(event=None):
             rows = tree.selection() or tree.get_children()
+            shown = self._tree_display_columns(tree)  # as the user sees them
             lines = []
             for row_id in rows:
-                values = tree.item(row_id, "values")
-                lines.append("\t".join("" if v is None else str(v) for v in values))
+                cells = [tree.set(row_id, c) for c in shown]
+                lines.append("\t".join("" if v is None else str(v) for v in cells))
             tree.clipboard_clear()
             tree.clipboard_append("\n".join(lines))
             return "break"
@@ -669,24 +740,35 @@ class RSVPApp(tk.Tk):
             selected = tree.selection()
             start_row = selected[0] if selected else all_rows[0]
             start_index = all_rows.index(start_row) if start_row in all_rows else 0
-            columns = tree["columns"]
+            columns = self._tree_display_columns(tree)
             pasted_lines = [ln for ln in text.replace("\r\n", "\n").replace("\r", "\n").split("\n") if ln != ""]
-            for offset, line in enumerate(pasted_lines):
-                target_index = start_index + offset
-                if target_index >= len(all_rows):
-                    break  # only fills existing rows, never creates new ones
-                row_id = all_rows[target_index]
-                cells = line.split("\t") if "\t" in line else line.split(",")
-                for col_index, new_value in enumerate(cells):
-                    if col_index >= len(columns):
-                        break
-                    col_name = columns[col_index]
-                    if editable_cols is not None and col_name not in editable_cols:
-                        continue
-                    if on_commit is not None:
-                        on_commit(row_id, col_name, new_value.strip())
-                    else:
-                        tree.set(row_id, col_name, new_value.strip())
+            self._paste_refusals = []
+            try:
+                for offset, line in enumerate(pasted_lines):
+                    target_index = start_index + offset
+                    if target_index >= len(all_rows):
+                        break  # only fills existing rows, never creates new ones
+                    row_id = all_rows[target_index]
+                    cells = line.split("\t") if "\t" in line else line.split(",")
+                    for col_index, new_value in enumerate(cells):
+                        if col_index >= len(columns):
+                            break
+                        col_name = columns[col_index]
+                        if editable_cols is not None and col_name not in editable_cols:
+                            continue
+                        if on_commit is not None:
+                            on_commit(row_id, col_name, new_value.strip())
+                        else:
+                            tree.set(row_id, col_name, new_value.strip())
+            finally:
+                # Back to one dialog per refused cell for typed edits, even
+                # if a commit above raised.
+                refused, self._paste_refusals = self._paste_refusals, None
+            if refused:
+                messagebox.showwarning(
+                    "Some cells not changed",
+                    f"{len(refused)} pasted value(s) are not amounts someone paid and were left as they "
+                    f"were: {', '.join(refused[:5])}{' ...' if len(refused) > 5 else ''}")
             return "break"
 
         tree.bind("<Control-c>", copy_selection)
@@ -791,6 +873,24 @@ class RSVPApp(tk.Tk):
                       "Brings back its details, recipients, votes, attendance and gift list. "
                       "Outlook is not scanned.")
         reload.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        # Search: pick a History field (or any) and type words; the list below
+        # keeps only the events containing all of them.
+        self.var_history_search_field = tk.StringVar(value=HISTORY_SEARCH_ANY)
+        self.var_history_search = tk.StringVar()
+        search = ttk.Frame(reload.body, style="Card.TFrame")
+        search.pack(fill="x", pady=(0, 6))
+        self.combo_history_search_field = ttk.Combobox(
+            search, width=16, state="readonly", textvariable=self.var_history_search_field,
+            values=[HISTORY_SEARCH_ANY] + [h for _c, h, _w in HISTORY_TABLE_COLUMNS])
+        self.combo_history_search_field.pack(side="left")
+        entry_search = ttk.Entry(search, textvariable=self.var_history_search)
+        entry_search.pack(side="left", fill="x", expand=True, padx=(6, 0))
+        ttk.Button(search, text="Clear", style="Small.TButton",
+                   command=self._clear_history_search).pack(side="left", padx=(6, 0))
+        self.var_history_search.trace_add("write", lambda *a: self._apply_history_search())
+        self.combo_history_search_field.bind("<<ComboboxSelected>>", lambda e: self._apply_history_search())
+        self.lbl_history_search_result = ttk.Label(reload.body, text="", style="Hint.TLabel")
+        self.lbl_history_search_result.pack(anchor="w", pady=(0, 6))
         # postcommand re-reads the database each time the list opens, so an
         # event saved from any tab shows up without a manual refresh.
         self.combo_load_history = ttk.Combobox(reload.body, state="readonly",
@@ -836,11 +936,34 @@ class RSVPApp(tk.Tk):
             record["RecipientFile"] = self.recipient_file.get()
         if self._last_scanned_event_id == event_id and self._vote_counts:
             record.update(self._vote_counts_record())
+        # What belongs on the History row but could not be saved while there
+        # was none (Amount paid, the first round's name, the gift item):
+        # written now, from the pages that hold this event.
+        if self._amount_paid_event == event_id:
+            record["AmountPaid"] = self.var_amount_paid.get()
+        if self._attendance_event == event_id and self._round1_label:
+            record["Round1Label"] = self._round1_label
+        if self._gift_item_event == event_id:
+            record.update(self._gift_item_fields())
+        was_tracked = self._was_money_tracked(event_id)
+        if "AmountPaid" in record and not was_tracked:
+            # A payout typed before the event had a History row (or changed
+            # since) reaches History only now: it is money worked on here, as
+            # when it is typed (_on_amount_paid_changed()). The page's 0 over
+            # nothing saved is not a payout.
+            try:
+                stored = (self._history_record(event_id) or {}).get("AmountPaid")
+                was_tracked = parse_typed_amount(record["AmountPaid"]) != parse_typed_amount(stored)
+            except Exception:
+                pass
         try:
             db.save_event_record(record, self.history_path.get())
         except Exception as e:
             messagebox.showerror("Error", f"Couldn't save the event:\n{e}")
             return None
+        self._save_failures_reported = {k for k in self._save_failures_reported if not k.startswith("fields:")}
+        self._amount_paid_save_failed = False
+        self._sync_event_money(event_id, was_tracked=was_tracked)
         self._refresh_history_tree()
         self._refresh_history_combo()
         return event_id
@@ -917,11 +1040,9 @@ class RSVPApp(tk.Tk):
         # Tab 5 — the two bodies are regenerated from Tab 1 when the tab opens
         self._yes_emails = []
         self.list_yes.delete(0, "end")
-        self._attendance_event = None
-        self._attendance_roster = {}
-        self._render_attendance_tree()
         self._amount_paid_event = None
         self._set_amount_paid_quietly("0")
+        self._adopt_attendance_owner(None)  # the table, its rounds, the first round's name
         self.combo_calendar_lang.current(0)
         self.var_appt_body_default = ""
         self.txt_appt_body.delete("1.0", "end")
@@ -932,6 +1053,7 @@ class RSVPApp(tk.Tk):
         # Tab 6
         self._gift_event = None
         self._gift_roster = {}
+        self._adopt_gift_item(None)
         self.var_gift_search.set("")
         self.tree_gift.delete(*self.tree_gift.get_children())
         self._update_gift_contributed_count()
@@ -983,27 +1105,71 @@ class RSVPApp(tk.Tk):
         )
 
     def _refresh_history_combo_values(self):
-        """Re-reads the past-event list from the database, keeping the
-        current selection. Runs every time the dropdown opens."""
+        """Re-reads the past-event list from the database and filters it by
+        the search box, keeping the current selection. Runs every time the
+        dropdown opens."""
         try:
-            records = db.load_history(self.history_path.get())
+            self._history_all = db.load_history(self.history_path.get())
         except Exception:
-            records = []
-        selected = self.combo_load_history.get()
-        self._history_records = records
-        labels = [f'{r["EventID"]} — {r["EventName"]}' for r in records]
-        self.combo_load_history["values"] = labels
-        if selected in labels:
-            self.combo_load_history.current(labels.index(selected))
-        else:
-            self.combo_load_history.set("")
-        return labels
+            self._history_all = []
+        return self._apply_history_search(keep_selection=True)
 
     def _refresh_history_combo(self):
         """Like _refresh_history_combo_values(), then selects the newest event."""
         labels = self._refresh_history_combo_values()
-        if labels:
+        if labels and not self.var_history_search.get().strip():
             self.combo_load_history.current(len(labels) - 1)
+
+    def _clear_history_search(self):
+        self.var_history_search_field.set(HISTORY_SEARCH_ANY)
+        self.var_history_search.set("")
+
+    def _apply_history_search(self, keep_selection=False):
+        """Fills the past-event list with the events matching the search:
+        case-insensitive, every typed word must appear (in any order), in the
+        chosen field or in any field. self._history_records is the list AS
+        SHOWN, so the selected index always maps to the event the user sees.
+        Returns the labels."""
+        records = getattr(self, "_history_all", [])
+        words = self.var_history_search.get().lower().split()
+        field_label = self.var_history_search_field.get()
+        key = next((c for c, h, _w in HISTORY_TABLE_COLUMNS if h == field_label), None)
+        matched = []
+        for rec in records:
+            if key:
+                haystack = str(rec.get(key) or "").lower()
+            else:
+                haystack = " ".join(str(rec.get(c) or "") for c in HISTORY_TABLE_KEYS).lower()
+            if all(w in haystack for w in words):
+                matched.append(rec)
+        selected = self.combo_load_history.get()
+        self._history_records = matched
+        labels = []
+        for rec in matched:
+            label = f'{rec["EventID"]} — {rec["EventName"]}'
+            # Searching one field: show its value, so it is clear why a row matched.
+            if words and key and key not in ("EventID", "EventName"):
+                value = str(rec.get(key) or "").strip().replace("\n", " ")
+                if value:
+                    label += f"   [{field_label}: {value[:40]}{'…' if len(value) > 40 else ''}]"
+            labels.append(label)
+        self.combo_load_history["values"] = labels
+        if keep_selection and selected in labels:
+            self.combo_load_history.current(labels.index(selected))
+        elif words and labels:
+            self.combo_load_history.current(0)
+        elif not keep_selection and labels:
+            self.combo_load_history.current(len(labels) - 1)
+        else:
+            self.combo_load_history.set("")
+        if words:
+            where = "any field" if key is None else field_label
+            self.lbl_history_search_result.configure(
+                text=(f"{len(matched)} of {len(records)} event(s) match in {where}." if matched
+                      else f"No event matches in {where}."))
+        else:
+            self.lbl_history_search_result.configure(text=f"{len(records)} saved event(s).")
+        return labels
 
     def _unsaved_work_if_switching(self):
         """What would be lost by replacing the current event in memory — work
@@ -1055,6 +1221,15 @@ class RSVPApp(tk.Tk):
             return False
 
     def _load_from_history(self):
+        # History's money columns are recalculated only after a save; nothing
+        # here saves, but a half-loaded event must never be synced either.
+        self._suspend_money_sync = True
+        try:
+            self._load_from_history_now()
+        finally:
+            self._suspend_money_sync = False
+
+    def _load_from_history_now(self):
         idx = self.combo_load_history.current()
         if idx < 0 or idx >= len(self._history_records):
             messagebox.showinfo("Nothing selected", "Please select a past event from the list first.")
@@ -1380,15 +1555,31 @@ class RSVPApp(tk.Tk):
             new_list = []
             seen_emails = set()
             groups_expanded = []
+            failed_groups = []
+            groups_kept = []
+            groups_partial = []
+            diag_lines = []
             errors = []
             for name, email in original:
                 try:
-                    members = self.outlook.expand_group_members(email)
+                    members, failed, diag = self.outlook.expand_group_members_detailed(email)
                 except Exception as e:
-                    members = None
+                    members, failed, diag = None, [], []
                     errors.append(f"{email}: {e}")
-                if members is None:
+                failed_groups.extend(failed)
+                diag_lines.extend(diag)
+                if not members or failed:
+                    # Not a group - or one that listed nobody (no member with
+                    # an email address), or only part of its people (a
+                    # sub-group Outlook could not list): keep the row. Saving
+                    # the part would lose the rest for good - the group's
+                    # address, the only way back to them, would be gone; and
+                    # keeping both would invite those listed twice.
                     # Không phải group (hoặc không resolve được) -> giữ nguyên dòng gốc
+                    if members is not None and not failed:
+                        groups_kept.append(name or email)
+                    elif members is not None:
+                        groups_partial.append(name or email)
                     key = email.lower()
                     if key not in seen_emails:
                         seen_emails.add(key)
@@ -1414,6 +1605,26 @@ class RSVPApp(tk.Tk):
                     lines.append("\nNo group email detected in the list — everyone was already an "
                                   "individual address (or Outlook couldn't resolve them as a group; "
                                   "see notes below if that's unexpected).")
+                if diag_lines:
+                    lines.append("\nStructure detected:")
+                    lines.extend(f"  • {d}" for d in dict.fromkeys(diag_lines))
+                if groups_kept:
+                    lines.append("\nThese groups listed nobody with an email address, so each was "
+                                  "kept as one row:")
+                    lines.extend(f"  • {g}" for g in groups_kept)
+                if groups_partial:
+                    lines.append("\n⚠️ Not every member of these groups could be listed, so each "
+                                  "was kept as one row, not expanded:")
+                    lines.extend(f"  • {g}" for g in groups_partial)
+                if failed_groups:
+                    lines.append("\n⚠️ These (sub-)groups were found but their members could NOT "
+                                  "be listed:")
+                    lines.extend(f"  • {g}" for g in dict.fromkeys(failed_groups))
+                    lines.append(
+                        "\nThis usually means Outlook is in Cached Exchange Mode and the Offline "
+                        "Address Book doesn't have that group's membership yet. Try: Send/Receive "
+                        "→ Send/Receive Groups → Download Address Book, then run Expand again. "
+                        "Otherwise, add those members by hand.")
                 if errors:
                     lines.append("\n⚠️ Some rows could not be checked (Outlook/COM error):")
                     lines.extend(f"  • {e}" for e in errors)
@@ -2501,11 +2712,28 @@ class RSVPApp(tk.Tk):
         # The merge and de-duplication rules live in rsvp/domain/roster.py,
         # which is testable without Outlook. Expansion itself needs the
         # address book, so it is passed in rather than imported there.
-        return merge_expanded_roster(
-            self.recipients if recipients is None else recipients,
-            self.outlook.expand_group_members,
-            cache=self._group_expansion_cache,
-        )
+        # A group that listed nobody stays one row to chase - tracking nobody
+        # for it would hide that its people never answered. One missing a
+        # sub-group gives the people it could list AND keeps its own row for
+        # the rest. Neither result is cached: the next scan asks again
+        # (Outlook's offline address book may have been downloaded meanwhile).
+        recipients = self.recipients if recipients is None else recipients
+        names = {(email or "").lower(): name for name, email in recipients}
+        ask_again = set()
+
+        def expand(email):
+            key = (email or "").lower()
+            members, failed, _diag = self.outlook.expand_group_members_detailed(email)
+            if members is not None and (failed or not members):
+                ask_again.add(key)
+            if members and failed:
+                return list(members) + [(names.get(key) or email, email)]
+            return members or None
+
+        roster = merge_expanded_roster(recipients, expand, cache=self._group_expansion_cache)
+        for key in ask_again:
+            self._group_expansion_cache.pop(key, None)
+        return roster
 
     def _refresh_response_tree(self, skipped=0, roster=None):
         roster = roster if roster is not None else self.recipients
@@ -2931,8 +3159,64 @@ class RSVPApp(tk.Tk):
         self.tree_gift.bind("<Double-1>", self._on_gift_tree_double_click)
         WrapLabel(tracking.body, style="Hint.TLabel",
                   text="Ticking Contributed fills Amount from the expected gift budget; double-click an "
-                       "Amount to type what that person actually gave. Click a column header to tick or "
-                       "untick everyone shown.").pack(fill="x", pady=(8, 0))
+                       "Amount to type what that person actually gave - a typed amount (shown in blue) is "
+                       "kept when Contributed is ticked again. Click a column header to tick or untick "
+                       "everyone shown.").pack(fill="x", pady=(8, 0))
+        self.tree_gift.tag_configure("manual_amt", foreground=COLORS["info"])
+
+        # ── the gift actually bought, and where the money stands. Saved with
+        # the event as you type (GiftItem* columns of its History row). ──
+        item = Card(f, "Gift item & money",
+                    "What was bought, and what is left. Optionally adds the party's money from "
+                    "Attendance & payment for one Event + Gift summary - the same figures go into the "
+                    "contribution report.")
+        item.pack(**gap)
+        self.var_gift_item_name = tk.StringVar(value="")
+        self.var_gift_item_link = tk.StringVar(value="")
+        self.var_gift_item_price = tk.StringVar(value="")
+        fields = ttk.Frame(item.body, style="Card.TFrame")
+        fields.pack(fill="x")
+        fields.columnconfigure((0, 1), weight=1, uniform="gift")
+        field(fields, 0, 0, "Gift name", lambda p: ttk.Entry(p, textvariable=self.var_gift_item_name))
+        field(fields, 0, 1, "Gift price",
+                           lambda p: ttk.Entry(p, textvariable=self.var_gift_item_price, width=16),
+                           hint='e.g. "3,570 JPY" - only the number is used.')
+        link_row = ttk.Frame(fields, style="Card.TFrame")
+        link_row.grid(row=2, column=0, columnspan=2, sticky="we", pady=(4, 0))
+        ttk.Label(link_row, text="Order link (URL)", style="Field.TLabel").pack(anchor="w", pady=(0, 4))
+        link_entry_row = ttk.Frame(link_row, style="Card.TFrame")
+        link_entry_row.pack(fill="x")
+        ttk.Entry(link_entry_row, textvariable=self.var_gift_item_link).pack(side="left", fill="x", expand=True)
+        ttk.Button(link_entry_row, text="🌐 Open link", command=self._open_gift_item_link)\
+            .pack(side="left", padx=(8, 0))
+        for var in (self.var_gift_item_name, self.var_gift_item_link, self.var_gift_item_price):
+            var.trace_add("write", lambda *a: self._on_gift_item_changed())
+        self._gift_fields_frame = fields
+        self.lbl_gift_price_warning = WrapLabel(item.body, style="Danger.TLabel", text="")
+
+        self.var_gift_cost_display = tk.StringVar(value="0")
+        self.var_gift_remaining = tk.StringVar(value="0")
+        kpi_row(item.body, [
+            ("Collected (gift)", self.var_gift_total_amount, {}),
+            ("Gift cost", self.var_gift_cost_display, {}),
+            ("Gift remaining", self.var_gift_remaining, {}),
+        ]).pack(fill="x", pady=(16, 0))
+
+        self.var_gift_link_event = tk.BooleanVar(value=False)
+        ttk.Checkbutton(item.body, text="🔗 Add the party's money from Attendance & payment "
+                                        "(Event + Gift totals)",
+                        variable=self.var_gift_link_event,
+                        command=self._on_gift_link_event_toggled).pack(anchor="w", pady=(14, 4))
+        self.lbl_gift_event_figures = WrapLabel(item.body, style="Hint.TLabel", text="")
+        self.lbl_gift_event_figures.pack(fill="x")
+        self.var_gift_grand_collected = tk.StringVar(value="0")
+        self.var_gift_grand_paid = tk.StringVar(value="0")
+        self.var_gift_grand_remaining = tk.StringVar(value="0")
+        kpi_row(item.body, [
+            ("Total collected", self.var_gift_grand_collected, {}),
+            ("Total paid / spent", self.var_gift_grand_paid, {}),
+            ("Total remaining", self.var_gift_grand_remaining, {}),
+        ]).pack(fill="x", pady=(10, 0))
 
         # ── reminder to people who haven't contributed — always opens Outlook
         # for review (mail.Display()); there is no auto-send here. ──
@@ -2967,8 +3251,9 @@ class RSVPApp(tk.Tk):
         # summary in the body, the list of contributors attached as Excel
         # (see reports.gift_report_workbook()/build_gift_report_body()). ──
         report = Card(f, "Contribution report",
-                      "To everyone ticked in Send email: a short summary (how many contributed, the total), "
-                      "with the list of contributors attached as an Excel file. Opens in Outlook first.")
+                      "To everyone ticked in Send email: the gift, how many contributed and the money "
+                      "(with the party's when linked above), and the list of contributors attached as an "
+                      "Excel file. Opens in Outlook first.")
         report.pack(fill="x")
         rbtn = ttk.Frame(report.body)
         rbtn.pack(fill="x", pady=(0, 10))
@@ -3124,6 +3409,9 @@ class RSVPApp(tk.Tk):
                 "name": row["name"] or existing.get("name", row["email"]),
                 "checked": row["checked"],
                 "amount": row["amount"],
+                # What the file says someone gave: ticking Contributed later
+                # must not replace it with the expected budget.
+                "manual_amount": row["amount"] > 0,
                 # "send_email" không có trong file Excel (chỉ là lựa chọn
                 # riêng của app, xem cột "Send email") — GIỮ NGUYÊN giá trị
                 # đã có (nếu người này đã từng được tick chọn nhận báo cáo
@@ -3141,20 +3429,171 @@ class RSVPApp(tk.Tk):
             f"Total in list now: {len(self._gift_roster)} people."
         )
 
+    # ── Tab 6: the gift item and the money ──
+
+    def _adopt_gift_item(self, event_id):
+        """Shows event_id's saved gift item (or none), without saving it back.
+        When it cannot be read, the boxes are shown empty and belong to no
+        event, so typing in them saves nothing over the stored item."""
+        if not hasattr(self, "var_gift_item_name"):
+            return
+        rec = {}
+        if event_id:
+            try:
+                rec = self._history_record(event_id) or {}
+            except Exception as exc:
+                messagebox.showerror(
+                    "Gift item not loaded",
+                    f"Couldn't read the gift item of '{event_id}':\n\n{exc}\n\n"
+                    "It is shown empty and will not be saved until it can be read.")
+                rec, event_id = {}, None
+        self._gift_item_event = event_id or None
+        self._gift_item_quiet = True
+        try:
+            self.var_gift_item_name.set(rec.get("GiftItemName") or "")
+            self.var_gift_item_link.set(rec.get("GiftItemLink") or "")
+            self.var_gift_item_price.set(rec.get("GiftItemPrice") or "")
+            self.var_gift_link_event.set((rec.get("GiftLinkEvent") or "").strip().lower() == "yes")
+        finally:
+            self._gift_item_quiet = False
+        self._update_gift_summary()
+
+    def _gift_item_fields(self):
+        return {"GiftItemName": self.var_gift_item_name.get(),
+                "GiftItemLink": self.var_gift_item_link.get(),
+                "GiftItemPrice": self.var_gift_item_price.get(),
+                "GiftLinkEvent": "Yes" if self.var_gift_link_event.get() else "No"}
+
+    def _on_gift_item_changed(self):
+        """Typing in the gift item: figures follow, and it is saved to the
+        event the gift list belongs to (UPDATE only - see Tab 1's save)."""
+        if self._gift_item_quiet:
+            return
+        self._update_gift_summary()
+        event_id = self._gift_item_event
+        if not event_id:
+            return
+        was_tracked = self._was_money_tracked(event_id)
+        if self._save_event_fields(event_id, self._gift_item_fields(), "The gift item"):
+            self._sync_event_money(event_id, was_tracked=was_tracked)
+
+    def _on_gift_link_event_toggled(self):
+        self._on_gift_item_changed()
+
+    def _open_gift_item_link(self):
+        """Opens the order link in the browser - http(s) only, so text pasted
+        into the box by mistake cannot open a file or run anything."""
+        url = (self.var_gift_item_link.get() or "").strip()
+        if not url:
+            messagebox.showinfo("No link", "Type the order link (URL) in the box first.")
+            return
+        if not re.match(r"^https?://", url, re.I):
+            messagebox.showwarning("Not a web link",
+                                   f"Only http:// or https:// links can be opened.\n\nCurrent value: {url}")
+            return
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            messagebox.showerror("Error", f"Couldn't open the link:\n{e}")
+
+    def _event_figures_for(self, event_id):
+        """Every round's figures of event_id: from the screen when Tab 5 holds
+        that event, else from the database (which may raise)."""
+        if event_id and event_id == self._attendance_event == self._amount_paid_event:
+            return self._attendance_figures()
+        if not event_id:
+            return payment_rounds([], ROUND1_DEFAULT_LABEL, "", [])
+        path = self.history_path.get()
+        rec = self._history_record(event_id) or {}
+        return payment_rounds(db.load_attendance_roster(event_id, path).values(),
+                              rec.get("Round1Label") or ROUND1_DEFAULT_LABEL, rec.get("AmountPaid"),
+                              db.load_attendance_rounds(event_id, path))
+
+    def _gift_money(self):
+        """The gift's money, plus - when linked - the party's, for the event
+        the gift list belongs to. One source for the screen and the report.
+        "unreadable" holds the error when the party's figures could not be
+        read: zeros in their place would report the party as costing nothing."""
+        linked = bool(self.var_gift_link_event.get())
+        event_totals, unreadable = (0.0, 0.0, 0.0), None
+        if linked:
+            try:
+                event_totals = round_totals(self._event_figures_for(self._gift_event))
+            except Exception as exc:
+                unreadable = exc
+        fig = gift_figures(contributed_total(self._gift_roster.values()),
+                           self.var_gift_item_price.get(), linked, event_totals)
+        fig["unreadable"] = unreadable
+        return fig
+
+    @staticmethod
+    def _gift_amount_text(fig, key):
+        """An amount for the screen or the report; "?" for one that includes
+        the party's figures when those could not be read."""
+        if fig["unreadable"] is not None and (key.startswith("event_") or key.startswith("grand_")):
+            return "?"
+        return format_amount(fig[key])
+
+    def _update_gift_summary(self):
+        if not hasattr(self, "var_gift_grand_remaining"):
+            return  # Tab 6 is still being built
+        fig = self._gift_money()
+        price = self.var_gift_item_price.get()
+        self._show_typed_amount_warning(
+            self.lbl_gift_price_warning,
+            [f"Gift price: “{price}” is read as {format_amount(fig['gift_cost'])}"]
+            if unclear_typed_amount(price) else [], self._gift_fields_frame)
+        self.var_gift_cost_display.set(format_amount(fig["gift_cost"]))
+        self.var_gift_remaining.set(format_amount(fig["gift_remaining"]))
+        self.var_gift_grand_collected.set(self._gift_amount_text(fig, "grand_collected"))
+        self.var_gift_grand_paid.set(self._gift_amount_text(fig, "grand_paid"))
+        self.var_gift_grand_remaining.set(self._gift_amount_text(fig, "grand_remaining"))
+        if fig["unreadable"] is not None:
+            text = (f"⚠ Attendance & payment of {self._gift_event} could not be read "
+                    f"({fig['unreadable']}) - the totals below are unknown. Untick this, or try again.")
+        elif fig["linked"]:
+            text = (f"From Attendance & payment - collected {format_amount(fig['event_collected'])}, "
+                    f"paid out {format_amount(fig['event_paid'])}, remaining {format_amount(fig['event_remaining'])}.")
+        else:
+            text = "Not linked - the totals below cover the gift only."
+        self.lbl_gift_event_figures.configure(text=text)
+        # The report quotes these figures: rebuild it unless edited by hand.
+        current = self.txt_gift_report_body.get("1.0", "end").strip() if hasattr(
+            self, "txt_gift_report_body") else None
+        if current is not None and current == (self._generated_drafts.get("gift_report") or "").strip() \
+                and current:
+            self._generate_gift_report_draft()
+
     def _gift_report_body_args(self):
-        """Lấy đúng (guest_of_honor, event_name, contributor_count,
-        total_amount) hiện tại từ Tab 1 + bảng Gift Contribution (Tab 6) —
-        dùng để build nội dung email báo cáo mặc định
-        (build_gift_report_body()) — nội dung chỉ là 1 THÔNG BÁO TỔNG QUAN,
-        danh sách chi tiết nằm trong file Excel đính kèm (xem
-        reports.gift_report_workbook())."""
-        contributor_count = sum(
-            1 for info in getattr(self, "_gift_roster", {}).values() if info.get("checked"))
+        """Everything build_gift_report_body() quotes: the gift, how many
+        contributed, the gift's money and - when linked - a Party / Gift table
+        with the Event + Gift totals."""
+        contributor_count = sum(1 for info in self._gift_roster.values() if info.get("checked"))
+        fig = self._gift_money()
+        lang_label = self.combo_gift_report_lang.get() or LANG_LABELS["en"]
+        lang_code = LANG_LABEL_TO_CODE.get(lang_label, "en")
+        L = GIFT_REPORT_LABELS.get("en" if lang_code == "bilingual" else lang_code, GIFT_REPORT_LABELS["en"])
+        rows = []
+        if fig["linked"]:
+            rows.append((L["row_event"], self._gift_amount_text(fig, "event_collected"),
+                         self._gift_amount_text(fig, "event_paid"),
+                         self._gift_amount_text(fig, "event_remaining")))
+        rows.append((L["row_gift"], format_amount(fig["gift_collected"]),
+                     format_amount(fig["gift_cost"]), format_amount(fig["gift_remaining"])))
         return (
             self.var_guest_of_honor.get(),
             self.var_event_name.get(),
             str(contributor_count),
-            getattr(self, "var_gift_total_amount", tk.StringVar(value="0")).get(),
+            self.var_gift_total_amount.get(),
+            self.var_gift_item_name.get(),
+            self.var_gift_item_link.get(),
+            format_amount(fig["gift_cost"]) if self.var_gift_item_price.get().strip() else "",
+            rows,
+            self._gift_amount_text(fig, "grand_collected"),
+            self._gift_amount_text(fig, "grand_paid"),
+            self._gift_amount_text(fig, "grand_remaining"),
+            fig["linked"],
+            format_amount(fig["gift_remaining"]),
         )
 
     def _generate_gift_report_draft(self):
@@ -3195,7 +3634,22 @@ class RSVPApp(tk.Tk):
             )
             return
 
+        unreadable = self._gift_money()["unreadable"]
+        if unreadable is not None:
+            messagebox.showwarning(
+                "Party figures unknown",
+                f"Attendance & payment of {self._gift_event} could not be read, so the report's "
+                f"Event + Gift totals would be wrong:\n\n{unreadable}\n\n"
+                "Untick \"Add the party's money from Attendance & payment\" to report the gift "
+                "alone, or try again.")
+            return
+
         body = self.txt_gift_report_body.get("1.0", "end").strip()
+        # Generated text is rebuilt from the current figures first; text
+        # edited by hand is sent as it is.
+        if not body or body == (self._generated_drafts.get("gift_report") or "").strip():
+            self._generate_gift_report_draft()
+            body = self.txt_gift_report_body.get("1.0", "end").strip()
         if not body:
             messagebox.showwarning(
                 "Empty content",
@@ -3222,11 +3676,13 @@ class RSVPApp(tk.Tk):
             return
 
         recipient_count = len(recipients)
+        # HTML, so the Party / Gift table lines up and the order link opens.
+        html_body = text_body_to_html(body)
 
         def worker():
             try:
                 mail, attached = self.outlook.send_gift_report_email(
-                    recipients, subject, body, excel_path=excel_path)
+                    recipients, subject, body, excel_path=excel_path, html_body=html_body)
                 attach_note = ("\n\n📎 Attached the contribution report." if attached else
                                 "\n\n⚠️ Couldn't attach the contribution report file — the email was "
                                 "still created without it.")
@@ -3254,11 +3710,13 @@ class RSVPApp(tk.Tk):
            the checked state (and amount) from last time, even after
            closing/reopening the app."""
         event_id = self.var_event_id.get().strip()
-        if self._gift_event != event_id:
+        if self._gift_event != (event_id or None):
             # The roster in memory belongs to another event: start from what
-            # is saved for this one, never from the other event's ticks.
-            self._gift_roster = {}  # email -> {"name":..., "checked": bool, "amount": float, "send_email": bool}
+            # is saved for this one, never from the other event's ticks - or
+            # its gift item.
+            self._gift_roster = {}  # email -> {"name", "checked", "amount", "send_email", "manual_amount"}
             self._gift_event = event_id or None
+            self._adopt_gift_item(self._gift_event)
 
         # Step 1: read the saved state from the database as a fallback —
         # ONLY used for people not already in self._gift_roster.
@@ -3271,16 +3729,11 @@ class RSVPApp(tk.Tk):
 
         new_roster = {}
         for name, email in self.recipients:
-            if email in self._gift_roster:
-                checked = self._gift_roster[email]["checked"]
-                amount = self._gift_roster[email].get("amount", 0.0)
-                send_email = self._gift_roster[email].get("send_email", False)
-            else:
-                prev = saved_state.get(email, {})
-                checked = prev.get("checked", False)
-                amount = prev.get("amount", 0.0)
-                send_email = prev.get("send_email", False)
-            new_roster[email] = {"name": name, "checked": checked, "amount": amount, "send_email": send_email}
+            prev = self._gift_roster.get(email) or saved_state.get(email, {})
+            new_roster[email] = {"name": name, "checked": prev.get("checked", False),
+                                 "amount": prev.get("amount", 0.0),
+                                 "send_email": prev.get("send_email", False),
+                                 "manual_amount": prev.get("manual_amount", False)}
         self._gift_roster = new_roster
         self._apply_gift_filter()
 
@@ -3308,6 +3761,7 @@ class RSVPApp(tk.Tk):
             # right person in self._gift_roster directly, without matching
             # displayed Name/Email strings (which could collide).
             self.tree_gift.insert("", "end", iid=email,
+                                   tags=("manual_amt",) if info.get("manual_amount") else (),
                                    values=(send_email_display, check, seq, name, email, amount_display))
         self._update_gift_contributed_count()
         self._update_gift_header_checkmarks()
@@ -3349,10 +3803,14 @@ class RSVPApp(tk.Tk):
             # unchecked, so the total only ever counts people currently marked
             # as having contributed. A different actual amount is typed by
             # double-clicking the Amount cell (_on_gift_tree_double_click()).
+            # A typed amount (_commit_gift_amount_edit()) is never replaced
+            # by the budget; unticking clears it and forgets that it was typed.
             if new_checked:
-                self._gift_roster[email]["amount"] = parse_amount_from_text(self.var_gift_budget.get())
+                if not self._gift_roster[email].get("manual_amount"):
+                    self._gift_roster[email]["amount"] = parse_amount_from_text(self.var_gift_budget.get())
             else:
                 self._gift_roster[email]["amount"] = 0.0
+                self._gift_roster[email]["manual_amount"] = False
         else:
             return  # cột khác (No./Name/Email/Amount) không tick được bằng click
         self._apply_gift_filter()
@@ -3371,17 +3829,38 @@ class RSVPApp(tk.Tk):
             self._begin_cell_edit(self.tree_gift, iid, "amount", self._commit_gift_amount_edit)
 
     def _commit_gift_amount_edit(self, row_id, col_name, new_value):
-        """A typed amount replaces the expected budget for that person. A
-        positive amount also marks them as Contributed, since the totals and
-        the report count only contributors."""
+        """A typed Amount on Tab 6. Empty or 0 resets it (and forgets that it
+        was typed). A positive amount is kept as typed - ticking Contributed
+        again will not replace it with the budget - and marks the person as
+        Contributed, since the total counts every amount. Text that is not
+        one number ("abc", "1 000"), or a negative amount, is refused and the
+        old value kept: reading it as 0 or 1 would silently change what that
+        person gave."""
         info = self._gift_roster.get(row_id)
         if info is None:
             return
-        amount = parse_amount_from_text(new_value)
+        text = (new_value or "").strip()
+        if not text:
+            amount = 0.0
+        elif unclear_typed_amount(text):
+            messagebox.showwarning(
+                "Not a number",
+                f"“{text}” is not one number, so the amount was left unchanged.\n\n"
+                "Type just the figure (e.g. 1000 or 1,000), or clear the cell to reset it to 0.")
+            return
+        elif parse_typed_amount(text) < 0:
+            messagebox.showwarning(
+                "Negative amount", "A contribution amount can't be negative - the amount was left unchanged.")
+            return
+        else:
+            amount = parse_amount_from_text(text)
         info["amount"] = amount
+        info["manual_amount"] = amount > 0
         if amount > 0:
             info["checked"] = True
         self._apply_gift_filter()
+        if self.tree_gift.exists(row_id):
+            self.tree_gift.see(row_id)
         self._save_gift_roster_to_db(silent=True)
 
     def _toggle_all_gift_column(self, col_key):
@@ -3405,10 +3884,18 @@ class RSVPApp(tk.Tk):
             if iid not in self._gift_roster:
                 continue
             if col_key == "check":
+                if bool(self._gift_roster[iid].get("checked")) == new_state:
+                    continue  # already ticked: its amount stays as it is
                 self._gift_roster[iid]["checked"] = new_state
-                self._gift_roster[iid]["amount"] = (
-                    parse_amount_from_text(self.var_gift_budget.get()) if new_state else 0.0
-                )
+                # The same rule as a single tick: one header click must not
+                # wipe out every amount typed by hand.
+                if new_state:
+                    if not self._gift_roster[iid].get("manual_amount"):
+                        self._gift_roster[iid]["amount"] = parse_amount_from_text(
+                            self.var_gift_budget.get())
+                else:
+                    self._gift_roster[iid]["amount"] = 0.0
+                    self._gift_roster[iid]["manual_amount"] = False
             else:
                 self._gift_roster[iid]["send_email"] = new_state
         self._apply_gift_filter()
@@ -3417,7 +3904,7 @@ class RSVPApp(tk.Tk):
     def _update_gift_contributed_count(self):
         total = len(self._gift_roster) if hasattr(self, "_gift_roster") else 0
         contributed = sum(1 for info in self._gift_roster.values() if info["checked"]) if hasattr(self, "_gift_roster") else 0
-        total_amount = sum(info.get("amount", 0.0) for info in self._gift_roster.values()) if hasattr(self, "_gift_roster") else 0.0
+        total_amount = contributed_total(self._gift_roster.values()) if hasattr(self, "_gift_roster") else 0.0
         shown = len(self.tree_gift.get_children())
         if shown != total:
             self.var_gift_contributed_count.set(f"{contributed} / {total}  (showing {shown}/{total} due to search)")
@@ -3427,6 +3914,7 @@ class RSVPApp(tk.Tk):
             self.var_gift_total_amount.set(f"{total_amount:,.0f}")
         self._update_gift_reminder_button_label()
         self._update_gift_report_button_label()
+        self._update_gift_summary()
 
     def _update_gift_report_button_label(self):
         """Cập nhật số người trên nút "📧 Send report to N selected people"
@@ -3447,12 +3935,17 @@ class RSVPApp(tk.Tk):
         event_id = self._gift_event
         if not event_id or not self._gift_roster:
             return
+        was_tracked = self._was_money_tracked(event_id)
         try:
             db.save_gift_roster(event_id, self._gift_roster, self.history_path.get())
-        except Exception:
+        except Exception as exc:
             if not silent:
                 raise
-            pass  # best-effort silent auto-save
+            # Money: a lost save is reported (once per run), not swallowed.
+            self._report_save_failure("gift", "Gift contribution", self._unwritable_reason(exc))
+            return
+        self._save_failures_reported.discard("gift")
+        self._sync_event_money(event_id, was_tracked=was_tracked)
 
     def _load_gift_roster_from_db(self, event_id):
         """Đọc gift roster đã lưu trong database cho event_id, dùng bởi
@@ -3464,6 +3957,7 @@ class RSVPApp(tk.Tk):
             roster = {}
         self._gift_roster = roster
         self._gift_event = event_id
+        self._adopt_gift_item(event_id)
         self._apply_gift_filter()
         return bool(roster)
 
@@ -3553,24 +4047,37 @@ class RSVPApp(tk.Tk):
         ttk.Button(calendar.body, text="📅 Send Calendar Invite to the list above", style="Primary.TButton",
                    command=self._send_calendar).pack(anchor="w", pady=(12, 0))
 
-        # ── after the event: totals, the per-person table, the thank-you ──
-        self.var_total_actual_attend = tk.StringVar(value="0")
-        self.var_total_collected_amount = tk.StringVar(value="0")
-        self.var_remaining_amount = tk.StringVar(value="0")
-        # "Amount paid" — số tiền THỰC TẾ đã trả ra (đặt cọc nhà hàng...), nhập
-        # tay; "Remaining" = Total collected − Amount paid, tự tính. Lưu theo
-        # Event ID (cột AmountPaid), nạp lại khi Load setup.
+        # ── after the event: totals, payment rounds, the per-person table ──
+        # Round 1 is the main event; a follow-up (second venue, another
+        # evening) is another round with its own Attend and amount columns.
+        self.var_total_actual_attend = tk.StringVar(value="0")   # round 1
+        self.var_round1_collected = tk.StringVar(value="0")
+        self.var_remaining_amount = tk.StringVar(value="0")      # round 1
+        # "Amount paid" of round 1 — what was actually paid out (a restaurant
+        # deposit...), typed by hand and saved per event (AmountPaid).
         self.var_amount_paid = tk.StringVar(value="0")
-        totals = kpi_row(f, [
-            ("Attended", self.var_total_actual_attend, {"dot": COLORS["success_fill"]}),
-            ("Collected", self.var_total_collected_amount, {}),
-            ("Amount paid",
-             lambda p: ttk.Entry(p, textvariable=self.var_amount_paid, font=self.fonts.title, width=12),
-             {"footnote": "Paid out so far"}),
-            ("Remaining", self.var_remaining_amount, {"footnote": "Collected − Amount paid"}),
-        ])
-        totals.pack(**gap)
+        self.var_total_collected_amount = tk.StringVar(value="0")  # all rounds
+        self.var_total_paid_amount = tk.StringVar(value="0")
+        self.var_total_remaining_amount = tk.StringVar(value="0")
+        kpi_row(f, [
+            ("Attended", self.var_total_actual_attend,
+             {"dot": COLORS["success_fill"], "footnote": "Main event (round 1)"}),
+            ("Collected", self.var_total_collected_amount, {"footnote": "All rounds"}),
+            ("Paid out", self.var_total_paid_amount, {"footnote": "All rounds"}),
+            ("Remaining", self.var_total_remaining_amount, {"footnote": "Collected − paid out"}),
+        ]).pack(**gap)
         self.var_amount_paid.trace_add("write", lambda *a: self._on_amount_paid_changed())
+
+        rounds = Card(f, "Payment rounds",
+                      "Round 1 is the main event. Add a round for a follow-up — a second venue, another "
+                      "evening — and it gets its own Attend and amount columns in the table below. Type "
+                      "what was actually paid out in each round; Remaining is worked out for you.")
+        rounds.pack(**gap)
+        ttk.Button(rounds.actions, text="➕ Add round", command=self._add_amount_round).pack()
+        self.rounds_container = ttk.Frame(rounds.body, style="Card.TFrame")
+        self.rounds_container.pack(fill="x")
+        # Shown only while a paid box holds text not read as what it shows.
+        self.lbl_rounds_warning = WrapLabel(rounds.body, style="Danger.TLabel", text="")
 
         attendance = Card(f, "Attendance & payment",
                           "Fill in after the event. The list follows the Yes / Maybe votes each time this "
@@ -3581,38 +4088,34 @@ class RSVPApp(tk.Tk):
         ttk.Button(attendance.actions, text="📊 Export to Excel", command=self._export_attendance_to_excel)\
             .pack()
         WrapLabel(attendance.body, style="Hint.TLabel",
-                  text="Double-click Name, Vote or Amount to edit; Actual Attend opens a Yes / No list; click "
-                       "Free to exempt someone. Actual Attend = Yes fills Amount from the expected event "
-                       "budget (0 if Free). Ctrl+C / Ctrl+V copy to and from Excel; Delete clears a row's "
-                       "tracking.").pack(fill="x", pady=(0, 10))
-        attend_cols = ("no", "name", "vote", "actual_attend", "free", "amount")
+                  text="Click an Attend or Free cell to tick it, or its column header to tick everyone. "
+                       "Ticking Attend fills that round's amount from the expected event budget (0 if Free; "
+                       "Free counts for every round), and you can type over it. Double-click Name, Vote or "
+                       "an amount to edit it, or an amount column's header to rename its round. Ctrl+C / "
+                       "Ctrl+V copy to and from Excel; Delete clears a row's tracking.").pack(
+                           fill="x", pady=(0, 10))
+        # Columns: No., Name, Vote, round 1's Attend/Free/amount, then an
+        # Attend + amount pair per further round (see
+        # _rebuild_attendance_tree_columns()).
         attend_container, self.tree_attendance = make_scrollable_treeview(
-            attendance.body, columns=attend_cols, height=12)
-        attend_headers = ["No.", "Name", "Vote", "Actual Attend", "Free", "Amount"]
-        attend_widths = [44, 260, 80, 120, 64, 110]
-        for c, h, w in zip(attend_cols, attend_headers, attend_widths):
-            anchor = "center" if c in ("no", "vote", "actual_attend", "free") else ("e" if c == "amount" else "w")
-            self.tree_attendance.heading(c, text=h, anchor=anchor)
-            self.tree_attendance.column(c, width=w, anchor=anchor, stretch=c == "name")
+            attendance.body, columns=("no", "name", "vote", "actual_attend", "free", "amount"),
+            height=12, horizontal=True)
         attend_container.pack(fill="both", expand=True)
-        # "Actual Attend" opens a readonly Yes/No dropdown; Name/Vote/Amount a
-        # type-in-place Entry; "Free" toggles on single-click (bound
-        # separately so the two bindings don't conflict).
         self.tree_attendance.bind("<Double-1>", self._on_attendance_tree_double_click)
         self.tree_attendance.bind("<Button-1>", self._on_attendance_free_click)
-        self._enable_treeview_copy_paste(
-            self.tree_attendance, on_commit=self._commit_attendance_edit,
-            editable_cols={"name", "vote", "actual_attend", "free", "amount"})
-        # Delete/Backspace clears the row's tracking fields (Actual Attend/
-        # Free/Amount); Name and Vote come from Tab 4 and are left alone.
+        # Delete/Backspace clears the row's tracking fields (Attend, Free and
+        # every amount); Name and Vote come from Tab 4 and are left alone.
         self.tree_attendance.bind("<Delete>", self._on_attendance_delete_key)
         self.tree_attendance.bind("<BackSpace>", self._on_attendance_delete_key)
+        self._rebuild_attendance_tree_columns()
+        self._rebuild_rounds_ui()
 
         # ── Thank You email: to everyone with "Actual Attend" = Yes; refreshes
         # from Tab 1 until hand-edited (see _refresh_thankyou_body_display()). ──
         thankyou = Card(f, "Thank-you email",
-                        "To everyone marked Actual Attend = Yes. Attaches the attendance & payment report, "
-                        "and the Calendar Invite if it can be found in your Calendar.")
+                        "To everyone who attended the main event (round 1). Includes a table of every "
+                        "round's money, and attaches the attendance & payment report and the Calendar "
+                        "Invite if it can be found in your Calendar.")
         thankyou.pack(fill="x")
         thankyou_header = ttk.Frame(thankyou.body)
         thankyou_header.pack(fill="x", pady=(0, 8))
@@ -3624,7 +4127,11 @@ class RSVPApp(tk.Tk):
         self.combo_thankyou_lang.current(0)  # default: English
         self.combo_thankyou_lang.pack(side="left")
         self.combo_thankyou_lang.bind("<<ComboboxSelected>>", lambda e: self._apply_thankyou_body_lang())
-        thankyou_container, self.txt_thankyou_body = make_scrollable_text(thankyou.body, width=40, height=6)
+        # The text is generated when the page opens; after editing the table,
+        # this rebuilds it from the current figures.
+        ttk.Button(thankyou_header, text="🔄 Update from table",
+                   command=self._update_thankyou_body_from_table).pack(side="left", padx=(8, 0))
+        thankyou_container, self.txt_thankyou_body = make_scrollable_text(thankyou.body, width=40, height=10)
         default_thankyou_body = build_thankyou_body("en", *self._thankyou_body_args())
         self.txt_thankyou_body.insert("1.0", default_thankyou_body)
         self.var_thankyou_body_default = default_thankyou_body  # Keep track of default for reset
@@ -3632,184 +4139,334 @@ class RSVPApp(tk.Tk):
         ttk.Button(thankyou.body, text="📧 Send Thank You email to confirmed attendees", style="Primary.TButton",
                    command=self._send_thank_you_email).pack(anchor="w", pady=(12, 0))
 
-    def _refresh_attendance_list(self):
-        """Rebuilds self._attendance_roster (the source of truth for the
-        Attendance & Payment table) from the Yes/Maybe voters scanned on
-        Tab 4 (self.tree_responses) — same population as the Calendar
-        Invite list above. Existing "Actual Attend"/"Free"/"Amount" edits
-        for people already in the roster are KEPT (so re-scanning Tab 4 or
-        switching back to this tab doesn't wipe out attendance already
-        marked); brand-new voters default to Actual Attend = "Yes" (with
-        Amount auto-filled to match), per the requirement that Yes is the
-        default rather than blank.
+    # ── Tab 5: who owns the table ──
 
-        Runs when Tab 5 opens. The table belongs to one event
-        (self._attendance_event): when Tab 1 now shows another, the roster is
-        first replaced by what is saved for that event, so marks never move
-        between events; votes are merged only from a Tab 4 table that was
-        scanned for that same event."""
-        current_id = self.var_event_id.get().strip()
-        if self._attendance_event != current_id:
+    def _history_record(self, event_id):
+        """event_id's History row, or None. Raises when the database cannot
+        be read, so a caller can tell "no row" from "could not look"."""
+        return next((r for r in db.load_history(self.history_path.get())
+                     if r.get("EventID") == event_id), None)
+
+    def _adopt_attendance_owner(self, event_id):
+        """Makes event_id the owner of Tab 5's table and loads everything it
+        has - the people, the payment rounds, the first round's name and the
+        next round key - together, or clears all of them when event_id is
+        empty. The only place the owner changes, so one event's rounds can
+        never stay on screen with another event's table and be saved under
+        it. When the saved table cannot be read, nothing is owned (so nothing
+        is saved over it) and the user is told. Returns True when the event
+        had a table saved."""
+        event_id = event_id or None
+        roster, rounds, label, next_index = {}, [], "", 2
+        if event_id:
+            path = self.history_path.get()
             try:
-                saved = db.load_attendance_roster(current_id, self.history_path.get()) if current_id else {}
-            except Exception:
-                saved = {}
-            self._attendance_roster = saved
-            self._attendance_event = current_id or None
-        if not current_id or current_id != self._last_scanned_event_id:
-            self._render_attendance_tree()
-            return
-        new_roster = {}
-        newly_added = []
-        for iid in self.tree_responses.get_children():
-            _manual, name, email, vote, _received = self.tree_responses.item(iid, "values")
-            if vote not in ("Yes", "Maybe"):
-                continue
-            is_new = email not in self._attendance_roster
-            prev = self._attendance_roster.get(email, {})
-            new_roster[email] = {
-                "name": name,
-                "vote": vote,
-                "actual_attend": prev.get("actual_attend", "Yes"),
-                "free": prev.get("free", False),
-                "amount": prev.get("amount", 0.0),
-            }
-            if is_new:
-                newly_added.append(email)
-        self._attendance_roster = new_roster
-        # Only auto-sync Amount for brand-new people (matching their
-        # default "Yes") — anyone already in the roster keeps whatever
-        # Amount they already had, even if it's 0 by manual choice.
-        for email in newly_added:
-            self._sync_attendance_amount(email)
+                roster = db.load_attendance_roster(event_id, path)
+                rounds = db.load_attendance_rounds(event_id, path)
+                next_index = db.next_round_index(event_id, path)
+                label = (self._history_record(event_id) or {}).get("Round1Label") or ""
+            except Exception as exc:
+                messagebox.showerror(
+                    "Attendance not loaded",
+                    f"Couldn't read the Attendance & Payment table of '{event_id}':\n\n{exc}\n\n"
+                    "It is shown empty and nothing on this page will be saved until it can be read.")
+                event_id, roster, rounds, label, next_index = None, {}, [], "", 2
+        self._attendance_event = event_id
+        self._attendance_roster = roster
+        self._extra_rounds = rounds
+        self._round1_label = label
+        self._next_round_index = next_index
+        self._rebuild_attendance_tree_columns()
+        self._rebuild_rounds_ui()
         self._render_attendance_tree()
+        return bool(roster or rounds)
 
-    def _render_attendance_tree(self):
-        self.tree_attendance.delete(*self.tree_attendance.get_children())
-        for i, (email, info) in enumerate(self._attendance_roster.items(), start=1):
-            amount = info.get("amount", 0.0)
-            amount_display = f"{amount:,.0f}" if amount else ""
-            free_display = "✅" if info.get("free") else "⬜"
-            self.tree_attendance.insert(
-                "", "end", iid=email,
-                values=(i, info["name"], info["vote"], info.get("actual_attend", ""),
-                        free_display, amount_display))
+    def _round1_label_text(self):
+        return (self._round1_label or "").strip() or ROUND1_DEFAULT_LABEL
+
+    def _attendance_figures(self):
+        """Every round's figures for the table on screen, round 1 first."""
+        return payment_rounds(self._attendance_roster.values(), self._round1_label_text(),
+                              self.var_amount_paid.get(), self._extra_rounds)
+
+    # ── Tab 5: the table ──
+
+    def _rebuild_attendance_tree_columns(self):
+        """Sets the table's columns: No., Name, Vote, round 1's Attend / Free /
+        amount, then an Attend + amount pair per further round, headed with
+        the rounds' names. Column widths are fixed, so the horizontal
+        scrollbar appears when the rounds run off screen."""
+        tree = self.tree_attendance
+        r1 = self._round1_label_text()
+        cols = ["no", "name", "vote", "actual_attend", "free", "amount"]
+        heads = ["No.", "Name", "Vote", f"{r1} Attend", "Free", r1]
+        widths = [44, 240, 70, max(130, 8 * len(r1) + 90), 70, max(100, 8 * len(r1) + 30)]
+        for r in self._extra_rounds:
+            cols += [f"attend_{r['key']}", f"extra_{r['key']}"]
+            heads += [f"{r['label']} Attend", r["label"]]
+            widths += [max(130, 8 * len(r["label"]) + 90), max(100, 8 * len(r["label"]) + 30)]
+        tree["columns"] = cols
+        for c, h, w in zip(cols, heads, widths):
+            checkbox = c in ("actual_attend", "free") or c.startswith("attend_")
+            anchor = "e" if (c == "amount" or c.startswith("extra_")) else (
+                "w" if c == "name" else "center")
+            if checkbox:
+                # Click the header to tick or untick every row.
+                tree.heading(c, text=f"⬜ {h}", anchor=anchor,
+                             command=lambda k=c: self._toggle_all_attendance_column(k))
+            else:
+                tree.heading(c, text=h, anchor=anchor, command="")
+            tree.column(c, width=w, minwidth=40, anchor=anchor, stretch=c == "name")
+        extra_cols = {c for c in cols if c.startswith(("attend_", "extra_"))}
+        self._enable_treeview_copy_paste(
+            tree, on_commit=self._commit_attendance_edit,
+            editable_cols={"name", "vote", "actual_attend", "free", "amount"} | extra_cols)
+
+    def _rebuild_rounds_ui(self):
+        """The "Payment rounds" card: one row per round with its attendees,
+        collected, paid (typed) and remaining, and Rename / Remove."""
+        if not hasattr(self, "rounds_container"):
+            return
+        grid = self.rounds_container
+        for child in grid.winfo_children():
+            child.destroy()
+        self._round_vars = {}
+        for i, head in enumerate(("Round", "Attendees", "Collected", "Paid out", "Remaining")):
+            ttk.Label(grid, text=head, style="Field.TLabel").grid(
+                row=0, column=i, sticky="w" if i == 0 else "e", padx=(0 if i == 0 else 16, 0), pady=(0, 6))
+        grid.columnconfigure(0, weight=1)
+
+        def row(r, label, attendees, collected, paid_var, remaining, key, removable):
+            ttk.Label(grid, text=label, style="Strong.TLabel").grid(row=r, column=0, sticky="w", pady=3)
+            ttk.Label(grid, textvariable=attendees).grid(row=r, column=1, sticky="e", padx=(16, 0))
+            ttk.Label(grid, textvariable=collected).grid(row=r, column=2, sticky="e", padx=(16, 0))
+            ttk.Entry(grid, textvariable=paid_var, width=12, justify="right").grid(
+                row=r, column=3, sticky="e", padx=(16, 0))
+            ttk.Label(grid, textvariable=remaining, style="Strong.TLabel").grid(
+                row=r, column=4, sticky="e", padx=(16, 0))
+            buttons = ttk.Frame(grid, style="Card.TFrame")
+            buttons.grid(row=r, column=5, sticky="e", padx=(16, 0))
+            ttk.Button(buttons, text="✎ Rename", style="Small.TButton",
+                       command=lambda k=key: self._rename_round(k)).pack(side="left")
+            if removable:
+                ttk.Button(buttons, text="✖ Remove", style="Small.TButton",
+                           command=lambda k=key: self._remove_amount_round(k)).pack(side="left", padx=(6, 0))
+
+        row(1, self._round1_label_text(), self.var_total_actual_attend, self.var_round1_collected,
+            self.var_amount_paid, self.var_remaining_amount, None, False)
+        for i, r in enumerate(self._extra_rounds, start=2):
+            v = {"attend": tk.StringVar(value="0"), "collected": tk.StringVar(value="0"),
+                 "remaining": tk.StringVar(value="0"),
+                 "paid": tk.StringVar(value=r.get("amount_paid") or "0")}
+            v["paid"].trace_add("write", lambda *a, k=r["key"]: self._on_round_paid_changed(k))
+            self._round_vars[r["key"]] = v
+            row(i, r["label"], v["attend"], v["collected"], v["paid"], v["remaining"], r["key"], True)
         self._update_attendance_totals()
 
+    def _render_attendance_tree(self):
+        tree = self.tree_attendance
+        tree.delete(*tree.get_children())
+        for i, (email, info) in enumerate(self._attendance_roster.items(), start=1):
+            amount = info.get("amount", 0.0)
+            values = [i, info["name"], info["vote"],
+                      "✅" if is_yes(info.get("actual_attend")) else "⬜",
+                      "✅" if info.get("free") else "⬜",
+                      f"{amount:,.0f}" if amount else ""]
+            for r in self._extra_rounds:
+                key = r["key"]
+                values.append("✅" if is_yes((info.get("extra_attends") or {}).get(key)) else "⬜")
+                v = (info.get("extra_amounts") or {}).get(key, 0.0)
+                values.append(f"{v:,.0f}" if v else "")
+            tree.insert("", "end", iid=email, values=values)
+        self._update_attendance_totals()
+        self._update_attendance_header_checkmarks()
+
+    def _update_attendance_header_checkmarks(self):
+        """✅ on a checkbox column's header when every row is ticked."""
+        tree = self.tree_attendance
+        shown = [self._attendance_roster.get(iid, {}) for iid in tree.get_children()]
+
+        def mark(ticked):
+            return "✅" if shown and all(ticked(info) for info in shown) else "⬜"
+
+        tree.heading("actual_attend",
+                     text=f"{mark(lambda i: is_yes(i.get('actual_attend')))} {self._round1_label_text()} Attend")
+        tree.heading("free", text=f"{mark(lambda i: i.get('free'))} Free")
+        for r in self._extra_rounds:
+            key = r["key"]
+            tree.heading(f"attend_{key}", text=(
+                f"{mark(lambda i, k=key: is_yes((i.get('extra_attends') or {}).get(k)))} {r['label']} Attend"))
+
     def _sync_attendance_amount(self, email):
-        """Recomputes one person's Amount from their current Actual
-        Attend / Free state: Free always wins (Amount forced to 0,
-        regardless of attendance); otherwise Amount is auto-pulled from
-        Tab 1's "Expected event budget" if Actual Attend is "Yes", or 0
-        otherwise. Called after editing/pasting/toggling either field —
-        any Amount typed in by hand afterward stays until Actual Attend or
+        """Round 1's amount from Attend / Free: the expected event budget when
+        attending and not Free, else 0. A typed amount stays until Attend or
         Free changes again."""
         info = self._attendance_roster[email]
-        if info.get("free"):
-            info["amount"] = 0.0
-        elif (info.get("actual_attend") or "").strip().lower() == "yes":
-            info["amount"] = parse_amount_from_text(self.var_budget.get())
-        else:
-            info["amount"] = 0.0
+        info["amount"] = amount_for(is_yes(info.get("actual_attend")), info.get("free"),
+                                    parse_amount_from_text(self.var_budget.get()))
+
+    def _sync_round_amount(self, email, round_key):
+        """The same rule for a further round, from that round's Attend."""
+        info = self._attendance_roster[email]
+        attending = is_yes((info.get("extra_attends") or {}).get(round_key))
+        info.setdefault("extra_amounts", {})[round_key] = amount_for(
+            attending, info.get("free"), parse_amount_from_text(self.var_budget.get()))
 
     def _commit_attendance_edit(self, row_id, col_name, new_value):
+        """A typed or pasted value. Attend and Free accept ✅/⬜ (copied from
+        this table) as well as Yes/No/TRUE/1 (from Excel)."""
         email = row_id
         if email not in self._attendance_roster:
             return
         info = self._attendance_roster[email]
         new_value = new_value.strip()
+        truthy = new_value.lower() in TRUTHY
+        # An empty Attend stays empty (not attending is "No", not blank).
+        attend_value = "Yes" if truthy else ("No" if new_value else "")
+        if (col_name == "amount" or col_name.startswith("extra_")) and new_value and (
+                unclear_typed_amount(new_value) or parse_typed_amount(new_value) < 0):
+            # Reading it as 0, a negative as positive or "1 000" as 1 would
+            # silently change what that person paid.
+            if self._paste_refusals is not None:
+                self._paste_refusals.append(new_value)
+                return
+            messagebox.showwarning(
+                "Amount not changed",
+                f"“{new_value}” is not an amount someone paid, so the cell was left unchanged.\n\n"
+                "Type just the figure (e.g. 6000 or 6,000), or clear the cell for 0.")
+            return
         if col_name == "name":
             info["name"] = new_value
         elif col_name == "vote":
             info["vote"] = new_value
+        # Amounts follow Attend and Free only when they change: pasting back
+        # a row whose ticks are as they were keeps its typed amounts.
         elif col_name == "actual_attend":
-            info["actual_attend"] = new_value
-            self._sync_attendance_amount(email)
+            if attend_value != (info.get("actual_attend") or ""):
+                info["actual_attend"] = attend_value
+                self._sync_attendance_amount(email)
         elif col_name == "free":
-            # Reached via paste (Ctrl+V), not the single-click toggle —
-            # accepts a few common truthy spellings so pasting a column
-            # copied from Excel (Yes/TRUE/1/✅) works as expected.
-            info["free"] = new_value.lower() in ("yes", "true", "1", "✅", "x")
-            self._sync_attendance_amount(email)
+            if truthy != bool(info.get("free")):
+                info["free"] = truthy
+                # Free exempts the person from every round.
+                self._sync_attendance_amount(email)
+                for r in self._extra_rounds:
+                    self._sync_round_amount(email, r["key"])
         elif col_name == "amount":
             info["amount"] = parse_amount_from_text(new_value)
+        elif col_name.startswith("attend_"):
+            key = col_name[len("attend_"):]
+            attends = info.setdefault("extra_attends", {})
+            if attend_value != (attends.get(key) or ""):
+                attends[key] = attend_value
+                self._sync_round_amount(email, key)
+        elif col_name.startswith("extra_"):
+            info.setdefault("extra_amounts", {})[col_name[len("extra_"):]] = parse_amount_from_text(new_value)
         self._render_attendance_tree()
-        # MỚI: auto-save ngay xuống Attendance_Payment_{EventID}.xlsx sau
-        # MỌI thay đổi (double-click edit lẫn paste), không cần bấm nút
-        # riêng — best-effort, lỗi (nếu có, vd file đang mở ở chỗ khác) bị
-        # bỏ qua âm thầm để không làm gián đoạn thao tác chỉnh sửa bình
-        # thường (xem docstring _save_attendance_sheet_to_file()).
         self._save_attendance_sheet_to_file(silent=True)
 
     def _on_attendance_tree_double_click(self, event):
-        """Double-click dispatcher for the Attendance & Payment table:
-        "Actual Attend" opens a readonly Yes/No dropdown (see
-        _begin_cell_edit_combobox()); "Name"/"Vote"/"Amount" open a normal
-        type-in-place Entry (see _begin_cell_edit()); "No." and "Free" are
-        not editable via double-click ("Free" toggles on single-click
-        instead — see _on_attendance_free_click())."""
+        """On a cell: Name, Vote and the amount columns open an edit box (the
+        checkbox columns toggle on a single click instead). On the header of
+        an amount column: rename that round. The Attend headers are left to
+        their single-click "tick everyone" - a double-click there would fire
+        it twice and turn a partly ticked column into an unticked one."""
         tree = self.tree_attendance
         region = tree.identify("region", event.x, event.y)
-        if region != "cell":
+        col_name = self._tree_column_name_at(tree, tree.identify_column(event.x))
+        if col_name is None:
             return
-        col = tree.identify_column(event.x)
+        if region == "heading":
+            if col_name == "amount":
+                self._rename_round(None)
+            elif col_name.startswith("extra_"):
+                self._rename_round(col_name[len("extra_"):])
+            return
         row_id = tree.identify_row(event.y)
-        if not row_id or not col:
-            return
-        columns = tree["columns"]
-        try:
-            col_index = int(col.replace("#", "")) - 1
-        except ValueError:
-            return
-        if col_index < 0 or col_index >= len(columns):
-            return
-        col_name = columns[col_index]
-        if col_name == "actual_attend":
-            self._begin_cell_edit_combobox(tree, row_id, col_name, ["Yes", "No"], self._commit_attendance_edit)
-        elif col_name in ("name", "vote", "amount"):
+        if region == "cell" and row_id and (
+                col_name in ("name", "vote", "amount") or col_name.startswith("extra_")):
             self._begin_cell_edit(tree, row_id, col_name, self._commit_attendance_edit)
-        # "no" and "free" columns: not double-click editable, ignored here
 
     def _on_attendance_free_click(self, event):
-        """Single-click toggle for the "Free" column (simulated checkbox,
-        same ✅/⬜ pattern as the Gift Contribution tab's "Contributed"
-        column) — marking someone Free forces their Amount to 0 regardless
-        of Actual Attend, for people exempt from the contribution."""
-        region = self.tree_attendance.identify("region", event.x, event.y)
-        if region != "cell":
+        """Single click on a checkbox cell - Attend (any round) or Free -
+        toggles it. Free exempts the person from every round; Attend fills
+        that round's amount from the expected event budget, or empties it."""
+        tree = self.tree_attendance
+        if tree.identify("region", event.x, event.y) != "cell":
             return
-        col = self.tree_attendance.identify_column(event.x)
-        row_id = self.tree_attendance.identify_row(event.y)
-        if not row_id or col != "#5":  # "#5" = the "free" column (no,name,vote,actual_attend,free,amount)
+        row_id = tree.identify_row(event.y)
+        col_name = self._tree_column_name_at(tree, tree.identify_column(event.x))
+        if not row_id or row_id not in self._attendance_roster or col_name is None:
             return
-        email = row_id
-        if email not in self._attendance_roster:
+        info = self._attendance_roster[row_id]
+        if col_name == "free":
+            info["free"] = not info.get("free", False)
+            self._sync_attendance_amount(row_id)
+            for r in self._extra_rounds:
+                self._sync_round_amount(row_id, r["key"])
+        elif col_name == "actual_attend":
+            info["actual_attend"] = "No" if is_yes(info.get("actual_attend")) else "Yes"
+            self._sync_attendance_amount(row_id)
+        elif col_name.startswith("attend_"):
+            key = col_name[len("attend_"):]
+            attends = info.setdefault("extra_attends", {})
+            attends[key] = "No" if is_yes(attends.get(key)) else "Yes"
+            self._sync_round_amount(row_id, key)
+        else:
             return
-        info = self._attendance_roster[email]
-        info["free"] = not info.get("free", False)
-        self._sync_attendance_amount(email)
+        self._render_attendance_tree()
+        self._save_attendance_sheet_to_file(silent=True)
+
+    def _toggle_all_attendance_column(self, col_name):
+        """A checkbox column's header: ticks every row, or unticks every row
+        when all are ticked already. Amounts follow as for a single tick."""
+        roster = self._attendance_roster
+        shown = [iid for iid in self.tree_attendance.get_children() if iid in roster]
+        if not shown:
+            return
+        # Rows already as the header sets them keep their typed amounts.
+        if col_name == "free":
+            new_state = not all(roster[iid].get("free") for iid in shown)
+            for iid in shown:
+                if bool(roster[iid].get("free")) == new_state:
+                    continue
+                roster[iid]["free"] = new_state
+                self._sync_attendance_amount(iid)
+                for r in self._extra_rounds:
+                    self._sync_round_amount(iid, r["key"])
+        elif col_name == "actual_attend":
+            value = "No" if all(is_yes(roster[iid].get("actual_attend")) for iid in shown) else "Yes"
+            for iid in shown:
+                if roster[iid].get("actual_attend") == value:
+                    continue
+                roster[iid]["actual_attend"] = value
+                self._sync_attendance_amount(iid)
+        elif col_name.startswith("attend_"):
+            key = col_name[len("attend_"):]
+            value = "No" if all(is_yes((roster[iid].get("extra_attends") or {}).get(key))
+                                for iid in shown) else "Yes"
+            for iid in shown:
+                attends = roster[iid].setdefault("extra_attends", {})
+                if attends.get(key) == value:
+                    continue
+                attends[key] = value
+                self._sync_round_amount(iid, key)
+        else:
+            return
         self._render_attendance_tree()
         self._save_attendance_sheet_to_file(silent=True)
 
     def _on_attendance_delete_key(self, event):
-        """Delete/Backspace on selected row(s) — clears that row's
-        tracking fields (Actual Attend → blank, Free → off, Amount → 0)
-        back to an untouched state. Name and Vote are left as-is (they're
-        identity data pulled from Tab 4, not meant to be blanked by a
-        stray Delete press); to change those, double-click and type a new
-        value, or leave them blank by hand via that same edit box.
-        Treeview only supports selecting whole ROWS (not individual
-        cells), so this clears the row's editable tracking fields as a
-        group rather than a single cell — the closest practical match to
-        "delete a cell's content" the widget allows."""
+        """Delete/Backspace on selected rows clears their tracking fields -
+        Attend, Free and the amount of every round - back to untouched. Name
+        and Vote come from Tab 4 and are left alone. (A Treeview selects
+        whole rows, so the row's tracking fields are cleared together.)"""
         changed = False
         for row_id in self.tree_attendance.selection():
-            if row_id not in self._attendance_roster:
+            info = self._attendance_roster.get(row_id)
+            if info is None:
                 continue
-            info = self._attendance_roster[row_id]
-            info["actual_attend"] = ""
-            info["free"] = False
-            info["amount"] = 0.0
+            info.update(actual_attend="", free=False, amount=0.0, extra_amounts={}, extra_attends={})
             changed = True
         if changed:
             self._render_attendance_tree()
@@ -3817,23 +4474,132 @@ class RSVPApp(tk.Tk):
         return "break"
 
     def _update_attendance_totals(self):
-        rows = self._attendance_roster.values()
-        self.var_total_actual_attend.set(str(count_actual_attendees(rows)))
-        self.var_total_collected_amount.set(format_amount(sum_contributions(rows)))
-        self._refresh_remaining_amount()
+        """Every figure on Tab 5 from the table and the paid boxes: each
+        round's row in the rounds card, and the totals over all rounds."""
+        if not hasattr(self, "lbl_rounds_warning"):
+            return  # Tab 5 is still being built
+        figures = self._attendance_figures()
+        first = figures[0]
+        self.var_total_actual_attend.set(str(first.attendees))
+        self.var_round1_collected.set(format_amount(first.collected))
+        self.var_remaining_amount.set(format_amount(first.remaining))
+        for f in figures[1:]:
+            v = self._round_vars.get(f.key)
+            if v is not None:
+                v["attend"].set(str(f.attendees))
+                v["collected"].set(format_amount(f.collected))
+                v["remaining"].set(format_amount(f.remaining))
+        typed = {r["key"]: r.get("amount_paid") for r in self._extra_rounds}
+        typed[first.key] = self.var_amount_paid.get()
+        unclear = [f"{f.label}: “{typed.get(f.key)}” is read as {format_amount(f.paid)}"
+                   for f in figures if unclear_typed_amount(typed.get(f.key))]
+        self._show_typed_amount_warning(self.lbl_rounds_warning, unclear, self.rounds_container)
+        collected, paid, remaining = round_totals(figures)
+        self.var_total_collected_amount.set(format_amount(collected))
+        self.var_total_paid_amount.set(format_amount(paid))
+        self.var_total_remaining_amount.set(format_amount(remaining))
+        # Tab 6's Event + Gift figures use these when linked.
+        self._update_gift_summary()
+
+    @staticmethod
+    def _show_typed_amount_warning(label, unclear, after):
+        """Shows, under `after`, which typed amounts are not read as they
+        look - "1 000" counts as 1 everywhere it is used (totals, History,
+        the emails, Excel) - or hides the warning when there are none."""
+        if unclear:
+            label.configure(text="⚠ Type just the figure (e.g. 1000 or 1,000). " + "; ".join(unclear) + ".")
+            label.pack(fill="x", pady=(8, 0), after=after)
+        else:
+            label.configure(text="")
+            label.pack_forget()
 
     def _refresh_remaining_amount(self):
-        """Remaining amount = Total collected amount − Amount paid. Called
-        both when the Attendance table changes (Total collected amount
-        moves) and when the user types into "Amount paid" directly (see
-        the trace_add on self.var_amount_paid) — either side changing
-        should immediately update this."""
-        if not hasattr(self, "var_amount_paid") or not hasattr(self, "var_remaining_amount"):
+        """Kept for its callers: every Remaining moves together now."""
+        self._update_attendance_totals()
+
+    # ── Tab 5: payment rounds ──
+
+    def _add_amount_round(self):
+        """"➕ Add round": asks for a name and adds the round - an Attend and
+        an amount column in the table and a row in the rounds card."""
+        event_id = self._attendance_event
+        if not event_id:
+            messagebox.showwarning(
+                "No event", "Open this page with an Event ID on Tab 1 first - rounds are saved with "
+                            "the event the table belongs to.")
             return
-        total_collected = parse_amount_from_text(self.var_total_collected_amount.get())
-        amount_paid = parse_amount_from_text(self.var_amount_paid.get())
-        self.var_remaining_amount.set(
-            format_amount(remaining_amount(total_collected, amount_paid)))
+        label = simpledialog.askstring(
+            "Add round", "Name for the new payment round (e.g. \"Karaoke\"):", parent=self)
+        if label is None:
+            return  # Cancel
+        label = label.strip() or f"Round {len(self._extra_rounds) + 2}"
+        key = f"round_{self._next_round_index}"
+        self._next_round_index += 1
+        self._extra_rounds.append({"key": key, "label": label, "amount_paid": "0"})
+        self._after_rounds_changed()
+
+    def _rename_round(self, round_key):
+        """Renames a round (None = round 1). The name follows into the table,
+        the rounds card, the Excel report and the Thank-you email."""
+        if round_key is None:
+            current = self._round1_label_text()
+        else:
+            current = next((r["label"] for r in self._extra_rounds if r["key"] == round_key), None)
+            if current is None:
+                return
+        label = simpledialog.askstring(
+            "Rename round", "New name for this payment round:", initialvalue=current, parent=self)
+        if label is None or not label.strip() or label.strip() == current:
+            return
+        label = label.strip()
+        if round_key is None:
+            self._round1_label = label
+            if self._attendance_event:
+                self._save_event_fields(self._attendance_event, {"Round1Label": label},
+                                        "The name of the first round")
+        else:
+            for r in self._extra_rounds:
+                if r["key"] == round_key:
+                    r["label"] = label
+        self._after_rounds_changed(save=round_key is not None)
+
+    def _remove_amount_round(self, round_key):
+        """Removes a further round and everyone's values for it, after a
+        confirmation. Round 1 cannot be removed."""
+        label = next((r["label"] for r in self._extra_rounds if r["key"] == round_key), round_key)
+        if not messagebox.askyesno(
+                "Remove round",
+                f"Remove the \"{label}\" round? Everyone's Attend and amount for it will be deleted."):
+            return
+        self._extra_rounds = [r for r in self._extra_rounds if r["key"] != round_key]
+        for info in self._attendance_roster.values():
+            (info.get("extra_amounts") or {}).pop(round_key, None)
+            (info.get("extra_attends") or {}).pop(round_key, None)
+        self._after_rounds_changed()
+
+    def _after_rounds_changed(self, save=True):
+        self._rebuild_attendance_tree_columns()
+        self._rebuild_rounds_ui()
+        self._render_attendance_tree()
+        if save and not self._save_attendance_sheet_to_file(silent=True) and self._attendance_event:
+            self._report_save_failure(
+                "rounds", "The payment rounds",
+                f"they could not be written to {self.history_path.get()}. Check that the file is "
+                "writable and not open in another program, then change them again.")
+        # The Thank-you text names the rounds; rebuild it unless hand-edited.
+        self._refresh_thankyou_body_display()
+
+    def _on_round_paid_changed(self, round_key):
+        """A further round's "paid" box: totals follow, and it is saved with
+        the rounds."""
+        v = self._round_vars.get(round_key)
+        if v is None:
+            return
+        for r in self._extra_rounds:
+            if r["key"] == round_key:
+                r["amount_paid"] = v["paid"].get()
+        self._update_attendance_totals()
+        self._save_attendance_sheet_to_file(silent=True)
 
     def _on_amount_paid_changed(self):
         """Recomputes Remaining amount and auto-saves "Amount paid" as the user
@@ -3843,7 +4609,7 @@ class RSVPApp(tk.Tk):
         swallow every exception, losing the figure while the UI still showed
         it as entered. It only UPDATEs: an event that is not in History yet
         gets no row of its own, and the user is told to save it first."""
-        self._refresh_remaining_amount()
+        self._update_attendance_totals()
         if self._amount_paid_quiet:
             return
         event_id = self._amount_paid_event
@@ -3861,6 +4627,10 @@ class RSVPApp(tk.Tk):
                       f"('💾 Save event details'), then re-enter Amount paid.")
         if saved:
             self._amount_paid_save_failed = False
+            # Typing what was paid out is working on this event's money -
+            # even with nobody in the table (a cancelled event's costs) - so
+            # History follows it, as for every other Tab 5 change.
+            self._sync_event_money(event_id, was_tracked=True)
         elif not self._amount_paid_save_failed:
             self._amount_paid_save_failed = True
             messagebox.showwarning("Amount paid not saved",
@@ -3873,7 +4643,7 @@ class RSVPApp(tk.Tk):
             self.var_amount_paid.set(value)
         finally:
             self._amount_paid_quiet = False
-        self._refresh_remaining_amount()
+        self._update_attendance_totals()
 
     def _refresh_amount_paid_for_current_event(self):
         """Tab 5 opened: when the Amount paid on screen belongs to another
@@ -3884,52 +4654,199 @@ class RSVPApp(tk.Tk):
         saved = "0"
         if current_id:
             try:
-                rec = next((r for r in db.load_history(self.history_path.get())
-                            if r.get("EventID") == current_id), None)
-            except Exception:
-                rec = None
+                rec = self._history_record(current_id)
+            except Exception as exc:
+                # Shown as 0 but owned by no event, so neither typing here nor
+                # Tab 1's save writes the 0 over the real figure; the next
+                # visit to this page reads it again.
+                messagebox.showerror(
+                    "Amount paid not loaded",
+                    f"Couldn't read the Amount paid of '{current_id}':\n\n{exc}\n\n"
+                    "It is shown as 0 and will not be saved until it can be read.")
+                self._amount_paid_event = None
+                self._set_amount_paid_quietly(saved)
+                return
             if rec and rec.get("AmountPaid"):
                 saved = rec["AmountPaid"]
         self._amount_paid_event = current_id or None
         self._set_amount_paid_quietly(saved)
 
-    # ── Attendance & Payment / Responded result — lưu vào database ──
-    # MỚI: đã đổi từ file Excel Attendance_Payment_{EventID}.xlsx (2 sheet)
-    # sang lưu THẲNG vào database (bảng attendance + responses trong
-    # db.py) — auto-save mỗi khi có thay đổi, không tự ghi Excel liên tục
-    # nữa. Muốn có file Excel để báo cáo/gửi người khác, dùng nút
-    # "📊 Export to Excel" (xem _export_attendance_to_excel()). Cả 2 đều
-    # được đọc lại tự động bởi '⬅ Load setup from selected event' trên
-    # Tab 1, không cần quét lại Outlook để xem lại dữ liệu cũ.
+    def _refresh_attendance_list(self):
+        """Rebuilds the table from the Yes/Maybe voters scanned on Tab 4 - the
+        same people as the Calendar Invite list. Marks and amounts already in
+        the table are kept, every round's included; new voters start as
+        attending round 1, with its amount filled in.
 
-    def _save_attendance_sheet_to_file(self, silent=True):
-        """Lưu bảng Attendance & Payment hiện tại (self._attendance_roster)
-        vào database — gọi TỰ ĐỘNG sau mọi thay đổi (double-click, toggle
-        Free, paste, Delete). Tên hàm giữ nguyên như cũ (dù giờ không còn
-        ghi "file" Excel nữa) để không phải sửa lại các nơi đang gọi nó."""
-        event_id = self._attendance_event  # the event this table belongs to
-        if not event_id or not self._attendance_roster:
+        Runs when Tab 5 opens. The table belongs to one event
+        (self._attendance_event): when Tab 1 now shows another, that event's
+        own table and rounds are loaded first (_adopt_attendance_owner()), so
+        marks and rounds never move between events; votes are merged only from
+        a Tab 4 table that was scanned for that same event."""
+        current_id = self.var_event_id.get().strip()
+        if self._attendance_event != (current_id or None):
+            self._adopt_attendance_owner(current_id)
+        if not current_id or current_id != self._last_scanned_event_id:
+            self._render_attendance_tree()
             return
+        new_roster = {}
+        newly_added = []
+        for iid in self.tree_responses.get_children():
+            _manual, name, email, vote, _received = self.tree_responses.item(iid, "values")
+            if vote not in ("Yes", "Maybe"):
+                continue
+            prev = self._attendance_roster.get(email)
+            if prev is None:
+                newly_added.append(email)
+                prev = {}
+            new_roster[email] = {
+                "name": name,
+                "vote": vote,
+                "actual_attend": prev.get("actual_attend", "Yes"),
+                "free": prev.get("free", False),
+                "amount": prev.get("amount", 0.0),
+                "extra_amounts": dict(prev.get("extra_amounts") or {}),
+                "extra_attends": dict(prev.get("extra_attends") or {}),
+            }
+        people_changed = set(new_roster) != set(self._attendance_roster)
+        self._attendance_roster = new_roster
+        # Only new people get round 1's amount filled in; anyone already in
+        # the table keeps theirs, even a 0 chosen by hand.
+        for email in newly_added:
+            self._sync_attendance_amount(email)
+        self._render_attendance_tree()
+        # Votes added or dropped people: save the table as shown, so what is
+        # saved - and History's money computed from it - matches the screen.
+        # Rebuilt from this event's votes, an empty table means nobody comes.
+        if people_changed:
+            self._save_attendance_sheet_to_file(silent=True, reconciled=True)
+
+    # ── Attendance & Payment / Responded result — lưu vào database ──
+    # Every change on Tab 5 is saved as it is made; '⬅ Load setup from
+    # selected event' reads it back. "📊 Export to Excel" only writes a copy.
+
+    def _save_attendance_sheet_to_file(self, silent=True, reconciled=False):
+        """Saves the table and its payment rounds, in one transaction, to the
+        event the table belongs to; then History's money columns follow.
+        Returns True when saved. An empty table on screen replaces a saved
+        one only when `reconciled` - rebuilt from the event's own votes, so
+        nobody is attending; otherwise it may simply not have been loaded."""
+        event_id = self._attendance_event
+        if not event_id:
+            return False
+        cleared = reconciled and not self._attendance_roster
+        was_tracked = self._was_money_tracked(event_id)
         try:
-            db.save_attendance_roster(event_id, self._attendance_roster, self.history_path.get())
-        except Exception:
+            db.save_attendance(event_id, self._attendance_roster or ({} if cleared else None),
+                               self._extra_rounds, self.history_path.get())
+        except Exception as exc:
             if not silent:
                 raise
-            pass  # best-effort silent auto-save
+            # Money: a lost save is reported (once per run), not swallowed.
+            self._report_save_failure("attendance", "Attendance & payment", self._unwritable_reason(exc))
+            return False
+        self._save_failures_reported.discard("attendance")
+        self._sync_event_money(event_id, was_tracked=was_tracked)
+        return True
 
     def _load_attendance_sheet_from_file(self, event_id):
-        """Đọc bảng Attendance & Payment đã lưu trong database cho
-        event_id, nạp vào self._attendance_roster và vẽ lại — dùng bởi
-        '⬅ Load setup from selected event'. Trả về True nếu có dữ liệu để
-        nạp, False nếu chưa từng lưu gì cho sự kiện này (không phải lỗi)."""
+        """'⬅ Load setup from selected event': the event's saved table and
+        rounds. True when it had any."""
+        return self._adopt_attendance_owner(event_id)
+
+    # ── History's money columns ──
+
+    def _money_tracked(self, event_id):
+        """Whether what is saved for event_id gives History's money columns:
+        an attendance table, a payment round, someone marked as having
+        contributed to the gift, or a gift price. A gift list's rows do not
+        count on their own: they exist as soon as Tab 6 opens or "Send email"
+        is ticked. Raises when the database cannot be read."""
+        path = self.history_path.get()
+        rec = self._history_record(event_id) or {}
+        return bool(db.load_attendance_roster(event_id, path)
+                    or db.load_attendance_rounds(event_id, path)
+                    or any(info.get("checked") for info in db.load_gift_roster(event_id, path).values())
+                    or (rec.get("GiftItemPrice") or "").strip())
+
+    def _was_money_tracked(self, event_id):
+        """_money_tracked() before a save, for _sync_event_money() after it;
+        False when it cannot be read (the save and the sync report that)."""
+        if self._suspend_money_sync or not event_id:
+            return False  # no sync follows
         try:
-            roster = db.load_attendance_roster(event_id, self.history_path.get())
+            return self._money_tracked(event_id)
         except Exception:
-            roster = {}
-        self._attendance_roster = roster
-        self._attendance_event = event_id
-        self._render_attendance_tree()
-        return bool(roster)
+            return False
+
+    def _sync_event_money(self, event_id, was_tracked=False):
+        """Recomputes event_id's money columns in History - Actual Att.
+        (main), Cost/Person, Income, Expense, Balance - from what is SAVED for
+        it: its attendance table and rounds, Amount paid, gift contributions
+        and gift price. Called after each successful save, so the figures can
+        only describe one event's saved data, never a mix of tables on
+        screen. An event with nothing tracked here (_money_tracked()) keeps
+        whatever History holds - figures typed in the other copy of the app,
+        for instance - unless `was_tracked`: it was tracked before the save
+        that called this, so the save removed the last of it (the table
+        emptied, the last contributor unticked, the gift price cleared) and
+        the figures left behind would count money no longer there. One
+        without a History row is left alone too."""
+        if self._suspend_money_sync or not event_id:
+            return
+        path = self.history_path.get()
+        try:
+            rec = self._history_record(event_id)
+            if rec is None:
+                return
+            if not was_tracked and not self._money_tracked(event_id):
+                return
+            roster = db.load_attendance_roster(event_id, path)
+            rounds = db.load_attendance_rounds(event_id, path)
+            gift = db.load_gift_roster(event_id, path)
+            figures = payment_rounds(roster.values(), rec.get("Round1Label") or ROUND1_DEFAULT_LABEL,
+                                     rec.get("AmountPaid"), rounds)
+            fields = history_figures(figures, contributed_total(gift.values()), rec.get("GiftItemPrice"))
+            changed = {k: v for k, v in fields.items() if str(rec.get(k) or "") != v}
+            if changed:
+                db.update_event(event_id, changed, path)
+                if hasattr(self, "tree_history"):
+                    self._refresh_history_tree()
+        except Exception as exc:
+            self._report_save_failure(
+                "money", "History's money columns",
+                f"they could not be updated:\n\n{exc}\n\nThey are recalculated at the next change "
+                "on Attendance & payment or Gift contribution.")
+
+    def _unwritable_reason(self, exc):
+        return (f"it could not be written to the database:\n\n{exc}\n\nCheck that "
+                f"{self.history_path.get()} is writable and not open in another program, "
+                "then change it again.")
+
+    def _report_save_failure(self, key, what, reason):
+        """Tells the user once per run that `what` was not saved."""
+        if key in self._save_failures_reported:
+            return
+        self._save_failures_reported.add(key)
+        messagebox.showwarning("Not saved", f"{what}: the value on screen is NOT saved - {reason}")
+
+    def _save_event_fields(self, event_id, fields, what):
+        """Writes `fields` to event_id's History row - UPDATE only, like every
+        automatic write - and reports once when that is impossible. Returns
+        True when saved."""
+        key = f"fields:{what}"
+        try:
+            saved = db.update_event(event_id, fields, self.history_path.get())
+        except Exception as exc:
+            saved, reason = False, (f"it could not be written to the database:\n\n{exc}\n\nCheck that "
+                                    f"{self.history_path.get()} is writable, then change it again.")
+        else:
+            reason = (f"Event ID '{event_id}' is not in History yet. Save it on Tab 1 "
+                      "('💾 Save event details'), which also saves this.")
+        if saved:
+            self._save_failures_reported.discard(key)
+        else:
+            self._report_save_failure(key, what, reason)
+        return saved
 
     def _vote_counts_record(self):
         """The Tab 4 table's counts, keyed by their History columns.
@@ -3989,8 +4906,7 @@ class RSVPApp(tk.Tk):
     def _build_attendance_workbook(self):
         """The Attendance & Payment report for the Export button and the
         Thank-you email's attachment (see reports.attendance_workbook())."""
-        return reports.attendance_workbook(
-            self._attendance_roster, parse_amount_from_text(self.var_amount_paid.get()))
+        return reports.attendance_workbook(self._attendance_roster, self._attendance_figures())
 
     def _export_attendance_to_excel(self):
         """Xuất bảng Attendance & Payment ra 1 file Excel — CHỈ khi bấm nút
@@ -4057,21 +4973,22 @@ class RSVPApp(tk.Tk):
         self.txt_appt_body.insert("1.0", new_body)
 
     def _thankyou_body_args(self):
-        """Lấy đúng (event_name, event_date, location, total_attend,
-        total_collected, amount_paid, remaining_amount) hiện tại từ Tab 1
-        + bảng Attendance & Payment (Tab 5) — dùng để build nội dung email
-        cảm ơn mặc định (build_thankyou_body()). Các số liệu Attendance
-        luôn đọc TRỰC TIẾP từ 3 StringVar hiển thị trên UI (đã được
-        _update_attendance_totals()/_refresh_remaining_amount() giữ luôn
-        cập nhật), tránh phải tính lại từ self._attendance_roster ở đây."""
+        """Tab 1's event and the table's figures for build_thankyou_body():
+        one row per round (label, attendees, collected, paid, remaining) and
+        the totals over all rounds - from the same figures as the screen."""
+        figures = self._attendance_figures()
+        rounds_info = [(f.label, str(f.attendees), format_amount(f.collected),
+                        format_amount(f.paid), format_amount(f.remaining)) for f in figures]
+        collected, paid, remaining = round_totals(figures)
         return (
             self.var_event_name.get(),
             get_date_str(self.date_event),
             self.var_location.get(),
-            getattr(self, "var_total_actual_attend", tk.StringVar(value="0")).get(),
-            getattr(self, "var_total_collected_amount", tk.StringVar(value="0")).get(),
-            getattr(self, "var_amount_paid", tk.StringVar(value="0")).get(),
-            getattr(self, "var_remaining_amount", tk.StringVar(value="0")).get(),
+            str(figures[0].attendees),
+            rounds_info,
+            format_amount(collected),
+            format_amount(paid),
+            format_amount(remaining),
         )
 
     def _refresh_thankyou_body_display(self):
@@ -4083,6 +5000,19 @@ class RSVPApp(tk.Tk):
             current_text = self.txt_thankyou_body.get("1.0", "end").strip()
             if current_text == (getattr(self, "var_thankyou_body_default", "") or "").strip():
                 self._apply_thankyou_body_lang()
+
+    def _update_thankyou_body_from_table(self):
+        """"🔄 Update from table": rebuilds the text from the current figures,
+        asking first when it was edited by hand."""
+        current = self.txt_thankyou_body.get("1.0", "end").strip()
+        if current and current != (self.var_thankyou_body_default or "").strip():
+            if not messagebox.askyesno(
+                    "Update Thank You email",
+                    "The email content has been edited by hand.\n\n"
+                    "Rebuild it from the current Attendance & Payment table? "
+                    "Your manual edits will be lost."):
+                return
+        self._apply_thankyou_body_lang()
 
     def _apply_thankyou_body_lang(self):
         lang_label = self.combo_thankyou_lang.get() or LANG_LABELS["en"]
@@ -4212,6 +5142,13 @@ class RSVPApp(tk.Tk):
             return
 
         body = self.txt_thankyou_body.get("1.0", "end").strip()
+        # Text the app generated (not edited by hand) is rebuilt from the
+        # table first: it is generated when the page opens, and the table may
+        # have changed since. Hand-edited text is sent as it is ("🔄 Update
+        # from table" rebuilds it on request).
+        if not body or body == (self.var_thankyou_body_default or "").strip():
+            self._apply_thankyou_body_lang()
+            body = self.txt_thankyou_body.get("1.0", "end").strip()
         if not body:
             messagebox.showwarning(
                 "Empty content",
@@ -4239,12 +5176,15 @@ class RSVPApp(tk.Tk):
             return
 
         attendee_count = len(actual_attendees)
+        # Sent as HTML: Outlook's proportional font breaks the space-aligned
+        # table of rounds, so every block of "│" lines becomes a real table.
+        html_body = text_body_to_html(body)
 
         def worker():
             try:
                 mail, calendar_attached = self.outlook.send_thankyou_email(
                     actual_attendees, subject, body,
-                    excel_path=excel_path, event_name=event_name,
+                    excel_path=excel_path, event_name=event_name, html_body=html_body,
                 )
                 if calendar_attached:
                     attach_note = "\n\n📎 Attached the attendance report and the Calendar Invite."
@@ -4279,7 +5219,8 @@ class RSVPApp(tk.Tk):
         events = Card(f, "Saved events",
                       "Double-click a cell to edit it (Ctrl+C / Ctrl+V work with Excel too), then save: "
                       "only the cells you edited are written. Renaming an Event ID moves the whole "
-                      "event — recipients, votes, attendance and gift list — to the new ID.")
+                      "event — recipients, votes, attendance, rounds and gift list — to the new ID. "
+                      "Drag a column heading sideways to reorder the columns; the order is remembered.")
         events.pack(fill="both", expand=True)
         # The database is the working copy; Export writes a snapshot file with
         # every stored column. Nothing is written until "Save changes".
@@ -4290,29 +5231,40 @@ class RSVPApp(tk.Tk):
         ttk.Button(events.actions, text="💾 Save changes", style="Primary.TButton",
                    command=self._save_history_edits).pack(side="right", padx=(0, 8))
 
-        cols = tuple(c for c, _h, _w in HISTORY_TABLE_COLUMNS)
+        WrapLabel(events.body, style="Hint.TLabel",
+                  text="The money columns are calculated from Attendance & payment and Gift contribution "
+                       "and cannot be typed here. Actual Att. (main) counts round 1 only; Income, Expense "
+                       "and Balance cover every round and the gift. Dept. Fund Left is the running total "
+                       "of Balance from the first event down to that row.").pack(fill="x")
+        layout = ttk.Frame(events.body, style="Card.TFrame")
+        layout.pack(fill="x", pady=(8, 10))
+        ttk.Button(layout, text="↺ Reset order", style="Small.TButton",
+                   command=self._reset_history_column_order).pack(side="right")
+        ttk.Button(layout, text="↔ Fit columns", style="Small.TButton",
+                   command=self._autofit_history_columns).pack(side="right", padx=(0, 6))
         tree_container, self.tree_history = make_scrollable_treeview(
-            events.body, columns=cols, height=16, horizontal=True)
+            events.body, columns=HISTORY_TABLE_KEYS, height=16, horizontal=True)
         for c, h, w in HISTORY_TABLE_COLUMNS:
             self.tree_history.heading(c, text=h, anchor="w")
             self.tree_history.column(c, width=w, stretch=False)
         tree_container.pack(fill="both", expand=True)
-        # Every column is editable via double-click (editable_cols=None ->
-        # no restriction) — see _commit_history_edit(). This only updates
-        # what's shown in the table; nothing is saved to disk until
-        # '💾 Save changes' is clicked.
+        self.lbl_history_note = WrapLabel(events.body, style="Hint.TLabel", text="")
+        self.lbl_history_note.pack(fill="x", pady=(8, 0))
+        # Double-click or paste edits only what is shown; nothing is written
+        # until '💾 Save changes'. The calculated columns are left out.
+        editable = set(HISTORY_TABLE_KEYS) - HISTORY_READ_ONLY
         self.tree_history.bind(
             "<Double-1>",
             lambda e: self._on_editable_tree_double_click(
-                self.tree_history, e, None, self._commit_history_edit))
-        # Select rows and use Ctrl+C / Ctrl+V to copy/paste to or from
-        # Excel — pasted cells go through the same _commit_history_edit()
-        # used by double-click, so it only edits what's on screen; nothing
-        # is written to the database until '💾 Save changes' is clicked.
-        self._enable_treeview_copy_paste(self.tree_history, on_commit=self._commit_history_edit)
+                self.tree_history, e, editable, self._commit_history_edit))
+        self._enable_treeview_copy_paste(self.tree_history, on_commit=self._commit_history_edit,
+                                         editable_cols=editable)
+        self._enable_column_drag_reorder(self.tree_history, self._on_history_columns_reordered)
+        self._apply_history_column_order()
 
         self._history_edits = {}    # row iid -> {column: edited value}, not saved yet
         self._history_row_ids = {}  # row iid -> the EventID that row has in the database
+        self._history_fund = {}     # row iid -> Dept. Fund Left as shown
         self._refresh_history_tree()
 
     def _browse_history_file(self):
@@ -4320,20 +5272,27 @@ class RSVPApp(tk.Tk):
         if path:
             self.history_path.set(path)
             self._history_edits = {}
+            # The column order is stored in the database file itself.
+            self._apply_history_column_order()
             self._refresh_history_tree()
 
     def _refresh_history_tree(self):
         """Redraws Tab 7 from the database. Edits not saved yet are laid back
         on top, so an automatic write elsewhere (a scan, a reminder) that
-        refreshes this table never throws them away."""
+        refreshes this table never throws them away. Dept. Fund Left is the
+        running total of Balance in History order, computed here and never
+        written back: reading the table must not change the database."""
         self.tree_history.delete(*self.tree_history.get_children())
         try:
             records = db.load_history(self.history_path.get())
         except Exception:
             records = []
+        fund = running_fund(r.get("Balance") for r in records)
         cols = self.tree_history["columns"]
         self._history_row_ids = {}
-        for rec in records:
+        self._history_fund = {}
+        unreadable = None
+        for rec, total in zip(records, fund):
             # The row's iid is its ORIGINAL Event ID, so an edited Event ID
             # cell can still be traced back to its row in the database.
             base_iid = (rec.get("EventID") or "").strip() or "(blank)"
@@ -4343,18 +5302,115 @@ class RSVPApp(tk.Tk):
                 iid = f"{base_iid}__{suffix}"
                 suffix += 1
             self._history_row_ids[iid] = rec.get("EventID")
+            self._history_fund[iid] = "?" if total is None else format_amount(total)
+            if total is None and unreadable is None:
+                unreadable = rec
             pending = self._history_edits.get(iid, {})
-            values = [pending.get(c, "" if rec.get(c) is None else rec.get(c)) for c in cols]
+            shown = dict(rec, DeptFundRemaining=self._history_fund[iid])
+            values = [pending.get(c, "" if shown.get(c) is None else shown.get(c)) for c in cols]
             self.tree_history.insert("", "end", iid=iid, values=values)
         # Edits of rows that no longer exist cannot be saved anywhere.
         self._history_edits = {iid: e for iid, e in self._history_edits.items()
                                if iid in self._history_row_ids}
+        self.lbl_history_note.configure(text=(
+            f"Dept. Fund Left shows ? from '{unreadable.get('EventID')}' on: its Balance "
+            f"'{unreadable.get('Balance')}' is not a plain amount. Correct it in that copy of the app "
+            "or change its money on Attendance & payment." if unreadable else ""))
+        self._autofit_history_columns()
+
+    # ── Tab 7: column order and widths ──
+
+    def _load_history_column_order(self):
+        """The order the user dragged the columns into, saved in the database
+        (app_settings). Healed on the way in: unknown names are dropped (a Tk
+        error would leave the table empty) and columns added since are
+        appended, so an order saved by the other copy of the app, or an older
+        one, still works."""
+        try:
+            raw = db.get_setting(HISTORY_COLUMN_ORDER_KEY, "", self.history_path.get())
+        except Exception:
+            raw = ""
+        saved = [c.strip() for c in (raw or "").split(",") if c.strip()]
+        valid = list(dict.fromkeys(c for c in saved if c in HISTORY_TABLE_KEYS))
+        return valid + [c for c in HISTORY_TABLE_KEYS if c not in valid] if valid else list(HISTORY_TABLE_KEYS)
+
+    def _apply_history_column_order(self, order=None, save=False):
+        order = list(order) if order else self._load_history_column_order()
+        try:
+            self.tree_history.configure(displaycolumns=order)
+        except tk.TclError:
+            self.tree_history.configure(displaycolumns=list(HISTORY_TABLE_KEYS))
+            return
+        if save:
+            try:
+                db.set_setting(HISTORY_COLUMN_ORDER_KEY, ",".join(order), self.history_path.get())
+            except Exception:
+                pass  # a layout preference; the table still works
+
+    def _on_history_columns_reordered(self, order):
+        self._apply_history_column_order(order, save=True)
+
+    def _reset_history_column_order(self):
+        self._apply_history_column_order(list(HISTORY_TABLE_KEYS), save=True)
+        self._autofit_history_columns()
+
+    def _autofit_history_columns(self):
+        """Every heading readable, cells as wide as their longest line up to a
+        cap - measured with the table's fonts, since Japanese text and emoji
+        are wider than their character count."""
+        tree = self.tree_history
+        try:
+            heading_font = tkfont.nametofont(self.fonts.small_medium)
+            cell_font = tkfont.nametofont(self.fonts.body)
+        except tk.TclError:
+            return
+        rows = [tree.item(iid, "values") for iid in tree.get_children()[:400]]
+        for i, col in enumerate(tree["columns"]):
+            need_head = heading_font.measure(HISTORY_TABLE_HEADERS.get(col, col)) + 30
+            widest = max((cell_font.measure(line) for values in rows if i < len(values)
+                          for line in str(values[i] or "").splitlines()), default=0)
+            width = max(need_head, min(widest + 24, 320) if widest else 0, 44)
+            tree.column(col, width=width, minwidth=need_head, stretch=False)
+
+    def _enable_column_drag_reorder(self, tree, on_reorder):
+        """Drag a heading sideways to move its column (ttk.Treeview cannot).
+        Presses on the thin line between headings are left alone - that is
+        where Tk resizes a column - and on cells, so selection still works.
+        Dropped right of where it started, the column lands after the target;
+        dropped left, before it - as in Excel."""
+        state = {"col": None}
+
+        def press(event):
+            state["col"] = (self._tree_column_name_at(tree, tree.identify_column(event.x))
+                            if tree.identify_region(event.x, event.y) == "heading" else None)
+
+        def motion(event):
+            if state["col"] is not None:
+                tree.configure(cursor="exchange")
+
+        def release(event):
+            source, state["col"] = state["col"], None
+            tree.configure(cursor="")
+            if source is None or tree.identify_region(event.x, event.y) != "heading":
+                return
+            target = self._tree_column_name_at(tree, tree.identify_column(event.x))
+            if not target or target == source:
+                return
+            order = list(self._tree_display_columns(tree))
+            moving_right = order.index(source) < order.index(target)
+            order.remove(source)
+            order.insert(order.index(target) + (1 if moving_right else 0), source)
+            on_reorder(order)
+
+        tree.bind("<ButtonPress-1>", press, add="+")
+        tree.bind("<B1-Motion>", motion, add="+")
+        tree.bind("<ButtonRelease-1>", release, add="+")
 
     def _commit_history_edit(self, row_id, col_name, new_value):
         """Called after double-click editing (or pasting into) a cell on Tab
         7 — only updates the table and remembers the edit. Nothing touches
         the database until _save_history_edits() runs."""
-        if not self.tree_history.exists(row_id):
+        if not self.tree_history.exists(row_id) or col_name in HISTORY_READ_ONLY:
             return
         self.tree_history.set(row_id, col_name, new_value)
         self._history_edits.setdefault(row_id, {})[col_name] = new_value
@@ -4415,7 +5471,8 @@ class RSVPApp(tk.Tk):
         instead of re-creating data under the old ID."""
         if self.var_event_id.get().strip() == old_id:
             self.var_event_id.set(new_id)
-        for attr in ("_last_scanned_event_id", "_attendance_event", "_gift_event", "_amount_paid_event"):
+        for attr in ("_last_scanned_event_id", "_attendance_event", "_gift_event", "_gift_item_event",
+                     "_amount_paid_event"):
             if getattr(self, attr) == old_id:
                 setattr(self, attr, new_id)
         self._update_scan_status_banner()
@@ -4449,6 +5506,8 @@ class RSVPApp(tk.Tk):
             for r, row_id in enumerate(self.tree_history.get_children(), start=2):
                 shown = dict(zip(shown_cols, self.tree_history.item(row_id, "values")))
                 record = stored.get(self._history_row_ids.get(row_id), {})
+                # Dept. Fund Left as computed for the table, not a stale copy.
+                record = dict(record, DeptFundRemaining=self._history_fund.get(row_id, ""))
                 for c_idx, c in enumerate(cols, start=1):
                     ws.cell(row=r, column=c_idx, value=shown[c] if c in shown else record.get(c))
             for i in range(1, len(cols) + 1):
