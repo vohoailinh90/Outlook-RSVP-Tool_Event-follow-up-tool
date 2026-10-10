@@ -50,8 +50,8 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
 from rsvp.adapters import outlook_com
-from rsvp.export import history, legacy_excel
-from rsvp.storage import db
+from rsvp.export import legacy_excel
+from rsvp.storage import db, settings
 from rsvp.ports import OutlookPort
 from rsvp.services.invite import InviteRequest, send_invite
 
@@ -345,8 +345,8 @@ class RSVPApp(tk.Tk):
         # để tránh 2 loại nội dung email hoàn toàn khác nhau ghi đè lẫn nhau
         # khi chỉ đổi qua lại Send mode trên CÙNG 1 ngôn ngữ.
         self.gift_full_translations = {"en": "", "ja": "", "vi": "", "bilingual": ""}
-        self.fixed_overrides = history.load_fixed_overrides()  # user-customized default FIXED wording, persisted to disk
-        self.prompt_overrides = history.load_prompt_overrides()  # user-customized Copilot prompt templates, persisted to disk
+        self.fixed_overrides = settings.load_fixed_overrides()  # user-customized default FIXED wording, persisted to disk
+        self.prompt_overrides = settings.load_prompt_overrides()  # user-customized Copilot prompt templates, persisted to disk
 
         # MỚI: nhập 1 LẦN DUY NHẤT dữ liệu từ bộ file Excel CŨ (nếu có, từ
         # trước khi chuyển sang kiến trúc SQLite này) vào rsvp_data.db — an
@@ -1861,7 +1861,7 @@ class RSVPApp(tk.Tk):
             messagebox.showwarning("Empty", "The FIXED box is empty.")
             return
         self.fixed_overrides[lang_code] = text
-        history.save_fixed_overrides(self.fixed_overrides)
+        settings.save_fixed_overrides(self.fixed_overrides)
         messagebox.showinfo(
             "Saved",
             f"Saved your edited wording as the new default FIXED text for "
@@ -1885,7 +1885,7 @@ class RSVPApp(tk.Tk):
             )
             return
         self.fixed_overrides[lang_code] = ""
-        history.save_fixed_overrides(self.fixed_overrides)
+        settings.save_fixed_overrides(self.fixed_overrides)
         self._refresh_compose_preview()
         messagebox.showinfo("Reset", f"{self.combo_email_lang.get()} FIXED wording reset to the system default.")
 
@@ -1897,7 +1897,7 @@ class RSVPApp(tk.Tk):
                                              "'Reset prompt to system default' to restore the built-in one.")
             return
         self.prompt_overrides["single"] = custom_prompt
-        history.save_prompt_overrides(self.prompt_overrides)
+        settings.save_prompt_overrides(self.prompt_overrides)
         messagebox.showinfo(
             "Saved",
             "Custom prompt template saved.\n\n"
@@ -1909,7 +1909,7 @@ class RSVPApp(tk.Tk):
     def _reset_custom_prompt(self):
         """Reset prompt back to system default (with icon instructions) — NOT blank."""
         self.prompt_overrides["single"] = ""
-        history.save_prompt_overrides(self.prompt_overrides)
+        settings.save_prompt_overrides(self.prompt_overrides)
         self.txt_custom_prompt.config(state="normal")
         self.txt_custom_prompt.delete("1.0", "end")
         self.txt_custom_prompt.insert("1.0", DEFAULT_PROMPT_SINGLE)

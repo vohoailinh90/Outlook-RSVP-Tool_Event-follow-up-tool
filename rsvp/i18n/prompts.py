@@ -1,6 +1,6 @@
 """Default Copilot translation prompts.
 
-User overrides live in the JSON files owned by history.py; these are the
+User overrides live in the JSON files owned by rsvp/storage/settings.py; these are the
 fallbacks used until one is saved.
 
 Moved verbatim out of rsvp_app.py (lines 85-154) by the phase 1 extraction in
