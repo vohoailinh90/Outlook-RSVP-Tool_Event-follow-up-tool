@@ -782,12 +782,14 @@ def split_bilingual(text):
     return text[:match.start()].strip(), text[match.end():].strip()
 
 
-def build_bilingual_body(ja_note, en_note, ja_fixed, en_fixed):
+def build_bilingual_body(ja_note, en_note, ja_fixed, en_fixed, is_update=False):
     """The bilingual email: '[English below]', the Japanese half, the
-    divider, the English half. Each half is its greeting, note and fixed
-    part, the order of a single-language email; an empty note leaves no gap."""
+    divider, the English half. Each half is its greeting, the change notice
+    when is_update, the note and the fixed part - the order of a
+    single-language email. An empty note leaves no gap."""
     def half(lang_code, note, fixed):
-        parts = (build_greeting(lang_code), note.strip(), fixed.strip())
+        notice = build_update_notice(lang_code).strip() if is_update else ""
+        parts = (build_greeting(lang_code), notice, note.strip(), fixed.strip())
         return "\n\n".join(part for part in parts if part)
     return ("[English below]\n\n" + half("ja", ja_note, ja_fixed)
             + BILINGUAL_SEPARATOR + half("en", en_note, en_fixed))

@@ -2010,20 +2010,17 @@ class RSVPApp(tk.Tk):
         or, once Copilot's translation is saved, its Japanese and English
         versions either side of the divider line - and the fixed box holds the
         fixed part in Japanese and in English the same way. Both stay editable;
-        _bilingual_body() assembles the email from them."""
-        self.var_greeting_preview.set(
-            f"Greeting (auto): {build_greeting('ja')} opens the Japanese half (first), "
-            f"{build_greeting('en')} the English half (second).")
-        halves = []
-        for code in ("ja", "en"):
-            fixed = self._fixed_text(code)
-            if self._is_update_mode():
-                fixed = build_update_notice(code) + "\n" + fixed
-            halves.append(fixed)
+        _bilingual_body() assembles the email from them, adding the greeting
+        and, in update mode, the change notice to each half, before the note."""
+        greeting = (f"Greeting (auto): {build_greeting('ja')} opens the Japanese half (first), "
+                    f"{build_greeting('en')} the English half (second)")
+        if self._is_update_mode():
+            greeting += ", each followed by the change notice ⚠️ in its language, before your note"
+        self.var_greeting_preview.set(greeting + ".")
         note = self._active_full_translations().get("bilingual", "").strip() or self._source_note_text()
         self.txt_fixed_preview.config(state="normal")
         self.txt_fixed_preview.delete("1.0", "end")
-        self.txt_fixed_preview.insert("1.0", join_bilingual(*halves))
+        self.txt_fixed_preview.insert("1.0", join_bilingual(self._fixed_text("ja"), self._fixed_text("en")))
         self.txt_editable_preview.delete("1.0", "end")
         self.txt_editable_preview.insert("1.0", note)
         self._refresh_translation_status()
@@ -2373,7 +2370,8 @@ class RSVPApp(tk.Tk):
         messagebox.showinfo(
             "Saved & Applied",
             "Your note is now in Japanese and English: the note box above shows both, either "
-            "side of the divider line, and that is what Send uses.\n\n"
+            "side of the divider line, and that is what Send uses. Read it through once, and "
+            "delete anything Copilot added beyond the translation.\n\n"
             "Each language gets its greeting and its fixed part automatically, Japanese first "
             "and English second." + dedupe_note)
 
@@ -2417,12 +2415,13 @@ class RSVPApp(tk.Tk):
         ja_note, en_note = split_bilingual(self.txt_editable_preview.get("1.0", "end"))
         ja_fixed, en_fixed = split_bilingual(self.txt_fixed_preview.get("1.0", "end"))
         return build_bilingual_body(ja_note, ja_note if en_note is None else en_note,
-                                    ja_fixed, en_fixed or "")
+                                    ja_fixed, en_fixed or "", is_update=self._is_update_mode())
 
     def _bilingual_ready_to_send(self):
         """False when the bilingual email cannot be put together, or when the
         note is not translated yet and you would rather translate it first."""
-        if split_bilingual(self.txt_fixed_preview.get("1.0", "end"))[1] is None:
+        ja_fixed, en_fixed = split_bilingual(self.txt_fixed_preview.get("1.0", "end"))
+        if en_fixed is None:
             messagebox.showwarning(
                 "Divider line missing",
                 "The fixed part no longer has the divider line (――――) between its Japanese and "
@@ -2430,12 +2429,21 @@ class RSVPApp(tk.Tk):
                 "Put the line back, or click '🔄 Refresh preview from Tab 1 / Tab 2' to rebuild "
                 "the fixed part.")
             return False
+        if not ja_fixed or not en_fixed:
+            messagebox.showwarning(
+                "Half of the fixed part is empty",
+                f"The {'Japanese' if not ja_fixed else 'English'} side of the fixed part is empty, "
+                "so that half of the email would have no event details or voting instructions.\n\n"
+                "Fill it in, or click '🔄 Refresh preview from Tab 1 / Tab 2' to rebuild the "
+                "fixed part.")
+            return False
         note = self.txt_editable_preview.get("1.0", "end").strip()
-        if note and split_bilingual(note)[1] is None:
+        ja_note, en_note = split_bilingual(note)
+        if note and not (ja_note and en_note):
             return messagebox.askyesno(
                 "Note not translated",
-                "Your note is not in Japanese and English yet, so it would appear exactly as "
-                "written in both halves of the email.\n\n"
+                "Your note is not in both Japanese and English yet: as it stands, it would appear "
+                "as written in both halves of the email, or be missing from one.\n\n"
                 "To translate it: '📋 Copy note + prompt' under Translate with Copilot, paste "
                 "Copilot's answer into the box there, then Save.\n\n"
                 "Continue with the note as written?")

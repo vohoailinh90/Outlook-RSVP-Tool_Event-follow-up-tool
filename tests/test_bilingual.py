@@ -56,6 +56,13 @@ def test_each_half_is_greeting_note_fixed_japanese_first():
                     + "Hello everyone,\n\n" + EN_NOTE + "\n\nEN FIXED")
 
 
+def test_an_update_puts_each_notice_before_the_note():
+    body = build_bilingual_body(JA_NOTE, EN_NOTE, "JA FIXED", "EN FIXED", is_update=True)
+    ja_half, en_half = split_bilingual(body)
+    assert ja_half == f"[English below]\n\n皆様\n\n{UPDATE_NOTICE['ja'].strip()}\n\n{JA_NOTE}\n\nJA FIXED"
+    assert en_half == f"Hello everyone,\n\n{UPDATE_NOTICE['en'].strip()}\n\n{EN_NOTE}\n\nEN FIXED"
+
+
 def test_an_empty_note_leaves_no_gap():
     body = build_bilingual_body("", "  ", "JA FIXED", "EN FIXED")
     assert "皆様\n\nJA FIXED" in body and "Hello everyone,\n\nEN FIXED" in body
@@ -78,9 +85,16 @@ def test_the_prompts_own_reply_format_is_what_the_parser_reads():
     f"[ja] {JA_NOTE}\n[en] {EN_NOTE}",
     f"[EN]\n{EN_NOTE}\n[JA]\n{JA_NOTE}",                 # English first
     f"[JA]\ndraft\n[EN]\ndraft\n[JA]\n{JA_NOTE}\n[EN]\n{EN_NOTE}",  # corrected copy wins
+    f"```\n[JA]\n{JA_NOTE}\n[EN]\n{EN_NOTE}\n```",                # inside a code block
 ])
 def test_a_copilot_answer_gives_the_japanese_and_english_note(reply):
     assert parse_bilingual_reply(reply) == (JA_NOTE, EN_NOTE)
+
+
+def test_a_note_that_mentions_a_marker_mid_line_is_not_cut_there():
+    ja = "英語版は [English] をご覧ください。"
+    en = "For Japanese, see [JA] above."
+    assert parse_bilingual_reply(f"[JA]\n{ja}\n[EN]\n{en}") == (ja, en)
 
 
 @pytest.mark.parametrize("reply", [
@@ -222,6 +236,26 @@ def test_a_fixed_part_that_lost_its_divider_line_is_not_sent(app):
     assert app.dialogs[-1][:2] == ("showwarning", "Divider line missing")
 
 
+@pytest.mark.parametrize("side", [0, 1])
+def test_a_fixed_part_with_an_empty_half_is_not_sent(app, side):
+    _compose(app, note="")
+    halves = list(split_bilingual(_box(app.txt_fixed_preview)))
+    halves[side] = ""
+    _set_box(app.txt_fixed_preview, join_bilingual(*halves))
+    assert _send(app) == []
+    assert app.dialogs[-1][:2] == ("showwarning", "Half of the fixed part is empty")
+
+
+def test_a_note_missing_from_one_half_is_asked_about(app, monolith, monkeypatch):
+    _compose(app)
+    _set_box(app.txt_editable_preview, join_bilingual(JA_NOTE, ""))
+    asked = []
+    monkeypatch.setattr(monolith.messagebox, "askyesno",
+                        lambda title, message=None, **_: asked.append(title) or False)
+    assert _send(app) == []
+    assert asked == ["Note not translated"]
+
+
 def test_a_hand_edited_fixed_part_is_what_is_sent(app):
     _compose(app, note="")
     ja_fixed, en_fixed = split_bilingual(_box(app.txt_fixed_preview))
@@ -231,12 +265,18 @@ def test_a_hand_edited_fixed_part_is_what_is_sent(app):
     assert ja_half.endswith("追記") and en_half.endswith("P.S.")
 
 
-def test_update_mode_opens_each_fixed_half_with_its_own_notice(app):
+def test_update_mode_sends_each_notice_before_the_note_and_shows_it_in_no_box(app):
+    """As in a single-language update: greeting, notice, note, details. The
+    notice is fixed wording, so neither box holds it; the greeting line says
+    it is added."""
     _compose(app, mode="Send update invite")
-    ja_fixed, en_fixed = split_bilingual(_box(app.txt_fixed_preview))
-    assert ja_fixed.startswith(UPDATE_NOTICE["ja"].strip())
-    assert en_fixed.startswith(UPDATE_NOTICE["en"].strip())
-    assert "⚠️" not in _box(app.txt_editable_preview)
+    _paste_and_save(app, f"[JA]\n{JA_NOTE}\n[EN]\n{EN_NOTE}")
+    assert "⚠️" not in _box(app.txt_editable_preview) + _box(app.txt_fixed_preview)
+    assert "change notice" in app.var_greeting_preview.get()
+    (body,) = _send(app)
+    ja_half, en_half = split_bilingual(body)
+    assert ja_half.startswith(f"[English below]\n\n皆様\n\n{UPDATE_NOTICE['ja'].strip()}\n\n{JA_NOTE}\n\n「Party」を")
+    assert en_half.startswith(f"Hello everyone,\n\n{UPDATE_NOTICE['en'].strip()}\n\n{EN_NOTE}\n\nOur team")
 
 
 def test_gift_mode_fixed_part_is_the_gift_notice_in_both_languages(app, monolith):
