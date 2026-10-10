@@ -129,6 +129,30 @@ class TestLayeringGuard:
             "GUARD IS BLIND: the storage layer imported tkinter at module level."
         )
 
+    @pytest.mark.parametrize("target, line", [
+        # The UI layer may use Tk but never reach Outlook or Excel itself.
+        ("rsvp/ui/widgets.py", "from rsvp.adapters import outlook_com\n"),
+        ("rsvp/ui/theme.py", "import win32com.client\n"),
+        ("rsvp/ui/widgets.py", "import openpyxl\n"),
+        # The tokens are plain data: not even Tk.
+        ("rsvp/ui/tokens.py", "import tkinter\n"),
+    ])
+    def test_fails_when_the_ui_layer_imports_past_its_boundary(self, sandbox, target, line):
+        path = sandbox / target
+        text = path.read_text(encoding="utf-8")
+        # After the docstring and __future__ import, where a real import would go.
+        anchor = "from __future__ import annotations\n"
+        assert anchor in text, "mutation did not apply - the module header moved"
+        path.write_text(text.replace(anchor, anchor + line, 1), encoding="utf-8")
+        result = run_guard("check_layering.py", sandbox)
+        assert result.returncode == 1, (
+            f"GUARD IS BLIND: {target} gained {line.strip()!r} and the layer guard passed.")
+
+    def test_ui_layer_may_use_tk(self, sandbox):
+        """The exemption is real: widgets.py already imports tkinter and passes."""
+        assert "import tkinter" in (sandbox / "rsvp/ui/widgets.py").read_text(encoding="utf-8")
+        assert run_guard("check_layering.py", sandbox).returncode == 0
+
     def test_fails_on_undeclared_lazy_heavy_import(self, sandbox):
         """The laundering path: deferring an import must not evade the guard."""
         db = sandbox / "rsvp" / "storage" / "db.py"

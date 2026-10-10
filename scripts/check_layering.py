@@ -130,6 +130,11 @@ LAYERS: list[tuple[str, set[str]]] = [
     ("rsvp/storage/**/*.py", set(HEAVY)),
     ("rsvp/ports/**/*.py", set(HEAVY)),
     ("rsvp/services/**/*.py", set(HEAVY)),
+    # The UI layer needs a display, so Tk is its own business; it never
+    # reaches Outlook or Excel - the app wires those in through ports.
+    ("rsvp/ui/**/*.py", set(HEAVY) - {"tkinter", "tkcalendar"}),
+    # ...except the tokens, which are plain data and test without a display.
+    ("rsvp/ui/tokens.py", set(HEAVY)),
 ]
 
 # The application above the Outlook seam may name outlook_com only to wire it
