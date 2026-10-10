@@ -162,6 +162,10 @@ def test_angle_brackets_that_belong_to_the_text_are_kept():
     ("31/07/2026 18:00, 3,000 JPY", "2026年7月31日 18:00、3000円", []),
     ("Deadline 20/10/2026", "期限 2026年10月", ["20"]),
     ("• Yes • No • Maybe", "• Yes • No", ["Maybe"]),
+    # Found by Codex review: the explanation bullets could go while the
+    # instruction kept each name once.
+    ("Click Yes / No / Maybe.\n• Yes = attend\n• No = cannot\n• Maybe = later",
+     "Yes / No / Maybe を押してください。", ["Yes", "No", "Maybe"]),
     ("「Yes」を押す", "Yesを押してください", []),
     ("Ｙｅｓ 予算３，０００", "Yes budget 3000", []),        # full-width source
     ("", "anything 5", []),

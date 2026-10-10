@@ -266,14 +266,17 @@ def _numbers(text):
 
 
 def _button_names(text):
-    return [b for b in _BUTTONS if re.search(rf"(?<![A-Za-z]){b}(?![A-Za-z])", text)]
+    """How often each voting-button name occurs: the built-in fixed part
+    names each twice, in the instruction and in the bullet that explains it."""
+    return Counter({b: len(re.findall(rf"(?<![A-Za-z]){b}(?![A-Za-z])", text)) for b in _BUTTONS})
 
 
 def translation_gaps(source, translated, template=None, other=None):
     """What `translated` lacks that `source` has: numbers, compared by value
     and by how often they occur (so 07 matches 7, 3,000 matches 3000, a date
     may change its order, and of two identical dates neither may go), and the
-    voting-button names Yes, No and Maybe. [] when nothing is missing.
+    voting-button names Yes, No and Maybe, counted the same way. [] when
+    nothing is missing.
 
     other=(other_source, other_template) adds the numbers typed into the
     other language's source beyond its built-in template - less those typed
@@ -294,4 +297,6 @@ def translation_gaps(source, translated, template=None, other=None):
         n = item[0]
         return (0, int(n), n) if ":" not in n else (1, 0, n)
     gaps = [n if k == 1 else f"{n} (×{k})" for n, k in sorted(missing.items(), key=order)]
-    return gaps + [b for b in _button_names(source) if b not in _button_names(translated)]
+    lost_buttons = _button_names(source) - _button_names(translated)
+    return gaps + [b if lost_buttons[b] == 1 else f"{b} (×{lost_buttons[b]})"
+                   for b in _BUTTONS if lost_buttons[b]]
