@@ -2017,13 +2017,25 @@ class RSVPApp(tk.Tk):
         if self._is_update_mode():
             greeting += ", each followed by the change notice ⚠️ in its language, before your note"
         self.var_greeting_preview.set(greeting + ".")
-        note = self._active_full_translations().get("bilingual", "").strip() or self._source_note_text()
         self.txt_fixed_preview.config(state="normal")
         self.txt_fixed_preview.delete("1.0", "end")
         self.txt_fixed_preview.insert("1.0", join_bilingual(self._fixed_text("ja"), self._fixed_text("en")))
+        self._fill_bilingual_note_box()
+
+    def _fill_bilingual_note_box(self):
+        """The saved Copilot translation of the note, else Tab 1's note."""
+        note = self._active_full_translations().get("bilingual", "").strip() or self._source_note_text()
         self.txt_editable_preview.delete("1.0", "end")
         self.txt_editable_preview.insert("1.0", note)
         self._refresh_translation_status()
+
+    def _refill_bilingual_note_only(self):
+        """After saving or clearing the note's translation: the note box is
+        rewritten, the fixed box is not - it may hold wording edited for this
+        email. The note box counts as generated again; an edited fixed box
+        still counts as edited, so opening the tab does not rebuild it."""
+        self._fill_bilingual_note_box()
+        self._compose_generated = (self.txt_editable_preview.get("1.0", "end"), self._compose_generated[1])
 
     def _sync_translate_controls(self):
         """Bilingual has one target - Japanese and English from your note, in
@@ -2366,7 +2378,7 @@ class RSVPApp(tk.Tk):
                 "click Save again." + dedupe_note)
             return
         self._active_full_translations()["bilingual"] = join_bilingual(*parts)
-        self._refresh_compose_preview()
+        self._refill_bilingual_note_only()
         messagebox.showinfo(
             "Saved & Applied",
             "Your note is now in Japanese and English: the note box above shows both, either "
@@ -2379,7 +2391,10 @@ class RSVPApp(tk.Tk):
         code = self._target_lang_code()
         self._active_full_translations()[code] = ""
         self.txt_translation_paste.delete("1.0", "end")
-        self._refresh_compose_preview()
+        if code == "bilingual":
+            self._refill_bilingual_note_only()
+        else:
+            self._refresh_compose_preview()
 
     def _compose_full_body(self):
         """Assemble the FINAL email body for sending.

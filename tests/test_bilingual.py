@@ -204,6 +204,36 @@ def test_clearing_the_translation_brings_back_the_note(app):
     assert _box(app.txt_editable_preview) == VI_NOTE
 
 
+def test_saving_or_clearing_the_note_keeps_an_edited_fixed_part(app):
+    """Found by Codex review: saving the translation rebuilt the whole
+    preview and threw away wording typed into the fixed box."""
+    _compose(app)
+    ja_fixed, en_fixed = split_bilingual(_box(app.txt_fixed_preview))
+    edited = join_bilingual(ja_fixed + "\n追記", en_fixed + "\nP.S.")
+    _set_box(app.txt_fixed_preview, edited)
+    _paste_and_save(app, f"[JA]\n{JA_NOTE}\n[EN]\n{EN_NOTE}")
+    assert _box(app.txt_fixed_preview) == edited
+    app._refresh_compose_preview_unless_edited()      # what opening the tab runs
+    assert _box(app.txt_fixed_preview) == edited
+    assert split_bilingual(_box(app.txt_editable_preview)) == (JA_NOTE, EN_NOTE)
+    (body,) = _send(app)
+    ja_half, en_half = split_bilingual(body)
+    assert ja_half.endswith("追記") and en_half.endswith("P.S.") and JA_NOTE in ja_half
+
+    app._clear_translated_email()
+    assert _box(app.txt_fixed_preview) == edited
+    assert _box(app.txt_editable_preview) == VI_NOTE
+
+
+def test_after_saving_the_note_an_unedited_preview_still_follows_tab1(app):
+    _compose(app)
+    _paste_and_save(app, f"[JA]\n{JA_NOTE}\n[EN]\n{EN_NOTE}")
+    app.var_location.set("Hall B")
+    app._refresh_compose_preview_unless_edited()
+    assert "Hall B" in _box(app.txt_fixed_preview)
+    assert split_bilingual(_box(app.txt_editable_preview)) == (JA_NOTE, EN_NOTE)
+
+
 def test_an_untranslated_note_is_asked_about_and_no_keeps_it_unsent(app, monolith, monkeypatch):
     _compose(app)
     asked = []
