@@ -272,6 +272,7 @@ def test_a_button_name_the_translation_made_up_is_reported():
     ("Dec 20 $500", "Dec 20 500円", ["500 JPY"]),
     ("$12.50", "¥12.50", ["12.50 JPY"]),
     ("$12.50", "US$12.50", []),
+    ("Refund ¥-500", "Refund $-500", ["-500 USD"]),
 ])
 def test_an_amount_in_another_currency_is_reported(copied, translated, extras):
     assert translation_extras([copied], translated) == extras
@@ -303,6 +304,11 @@ def test_an_amount_in_another_currency_is_reported(copied, translated, extras):
     ("Pay $500 deposit, then $500 balance", "Pay 500 deposit, then 500 balance",
      ["500 USD (×2)"]),
     ("Pay $500 deposit, then $500 balance", "500ドルの手付金と500ドルの残金", []),
+    # Found by Codex review: a signed amount was not read with its currency.
+    ("Refund ¥-3,570", "Refund -3570", ["-3570 JPY"]),
+    ("Balance USD -500", "残高 -500", ["-500 USD"]),
+    ("Refund ¥-3,570", "返金 -3,570円", []),
+    ("Balance USD -500", "残高 −500ドル", []),
 ])
 def test_an_amount_that_loses_its_currency_is_reported(copied, translated, gaps):
     assert translation_gaps(copied, translated) == gaps

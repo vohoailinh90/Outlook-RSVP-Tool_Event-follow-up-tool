@@ -301,7 +301,8 @@ def _is_symbol(unit):
 # Japanese text it still counts ("予算¥500", "500円です"). An amount is the
 # whole number, decimals included, never the end of "12.50" or "300.000".
 _LATIN = "A-Za-z\u00c0-\u1ef9"
-_AMOUNT = r"(?<![\d.,])(\d+(?:,\d{3})*(?:\.\d+)?)(?![\d.,]*\d)"
+# Its sign follows the rule of _NUMBER: "¥-3,570" and "USD -500" keep theirs.
+_AMOUNT = r"((?<![\w+-])[+-])?(?<![\d.,])(\d+(?:,\d{3})*(?:\.\d+)?)(?![\d.,]*\d)"
 _SYMBOL_FIRST = re.compile(rf"(?<![{_LATIN}])({_units(_is_symbol)})[ \t]?{_AMOUNT}",
                            re.IGNORECASE)
 _UNIT_AFTER = re.compile(rf"{_AMOUNT}[ \t-]?({_units(lambda u: True)})(?![{_LATIN}])",
@@ -344,14 +345,15 @@ def _priced(text):
     before an amount is taken first, so in "18:00 $500" the $ is the 500's."""
     pairs = Counter()
 
-    def take(amount, unit):
-        amount = amount.replace(",", "")
-        pairs[(amount if "." in amount else str(int(amount)), _CURRENCY_CODE[unit.lower()])] += 1
+    def take(sign, digits, unit):
+        digits = digits.replace(",", "")
+        amount = (sign or "") + (digits if "." in digits else str(int(digits)))
+        pairs[(amount, _CURRENCY_CODE[unit.lower()])] += 1
         return " "
-    text = unicodedata.normalize("NFKC", text)
-    text = _SYMBOL_FIRST.sub(lambda m: take(m[2], m[1]), text)
-    text = _UNIT_AFTER.sub(lambda m: take(m[1], m[2]), text)
-    _CODE_FIRST.sub(lambda m: take(m[2], m[1]), text)
+    text = unicodedata.normalize("NFKC", text).replace("\u2212", "-")   # − MINUS SIGN
+    text = _SYMBOL_FIRST.sub(lambda m: take(m[2], m[3], m[1]), text)
+    text = _UNIT_AFTER.sub(lambda m: take(m[1], m[2], m[3]), text)
+    _CODE_FIRST.sub(lambda m: take(m[2], m[3], m[1]), text)
     return pairs
 
 
