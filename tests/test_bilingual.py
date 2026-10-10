@@ -368,7 +368,12 @@ def test_an_amount_in_another_currency_is_reported(copied, translated, extras):
     ("Budget 12.500 USD", "Budget 12500 USD", ["12.500 USD"]),
     ("Budget US$3.500", "予算 3,500ドル", ["3.500 USD"]),
     ("Budget 12.500 USD", "予算 12.500 USD", []),
-    ("Budget $3.000", "予算 3,000ドル", []),
+    # Found in review: the same digits match whatever dollar word is beside them.
+    ("Budget 12.500 USD", "予算 12.500ドル", []),
+    ("Budget US$3.500", "予算 3.500ドル", []),
+    ("Budget $3.000", "Budget 3.000 USD", []),
+    ("US$3.500-4.000", "3.500〜4.000ドル", []),
+    ("Budget 3.000 EUR", "Budget 3,000 EUR", []),
 ])
 def test_an_amount_that_loses_its_currency_is_reported(copied, translated, gaps):
     assert translation_gaps(copied, translated) == gaps

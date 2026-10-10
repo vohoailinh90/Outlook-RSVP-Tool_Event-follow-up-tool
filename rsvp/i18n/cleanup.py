@@ -384,9 +384,12 @@ def _priced(text):
     pairs = Counter()
 
     def take(sign, digits, unit):
-        # As rsvp.domain.money reads it: beside an explicit USD or US$ the dot
-        # is a decimal point ("12.500 USD" is 12.5), elsewhere it groups.
-        usd_decimal = unit.lower() in ("usd", "us$") and re.fullmatch(r"\d+\.\d{3}", digits)
+        # rsvp.domain.money reads the dot beside an explicit USD or US$ as a
+        # decimal point ("12.500 USD" is 12.5) and beside a bare "$" as
+        # grouping. A dollar amount "D.DDD" therefore keeps its dot as written,
+        # whatever dollar word is beside it: the same digits always match,
+        # and one turned into "12500" or "12,500" is reported.
+        usd_decimal = _CURRENCY_CODE[unit.lower()] == "USD" and re.fullmatch(r"\d+\.\d{3}", digits)
         whole, fraction = (usd_decimal and re.fullmatch(r"(\d+)\.(\d+)", digits)
                            or re.fullmatch(r"([1-9]\d{0,2}(?:\.\d{3})+)(?:,(\d+))?", digits)
                            or re.fullmatch(r"(\d+(?:,\d{3})*)(?:[.,](\d+))?", digits)).groups()
