@@ -529,3 +529,76 @@ def test_a_table_emptied_by_new_votes_is_saved_empty(app):
     _load(app, "EV1")
     _select(app, app.tab_calendar)
     assert app._attendance_roster == {}
+
+
+# ── Codex review of PR #12: gift totals, imported amounts, lost saves ──
+
+def test_only_people_marked_as_contributing_count_towards_the_gift(app):
+    """An import can leave an amount on someone not marked as having
+    contributed; the contributor report leaves them out, so the totals, the
+    email and History must too."""
+    _start_event(app)
+    _select(app, app.tab_gift)
+    app._gift_roster["alice@example.com"].update(checked=True, amount=2000.0)
+    app._gift_roster["bob@example.com"].update(checked=False, amount=5000.0)
+    app._update_gift_contributed_count()
+    app._save_gift_roster_to_db(silent=True)
+    assert app.var_gift_total_amount.get() == "2,000"
+    assert app._gift_money()["gift_collected"] == 2000.0
+    assert _row(app, "EV1")["TotalIncome"] == "2,000"
+
+
+def test_ticking_everyone_keeps_amounts_loaded_from_a_file(app, monolith, monkeypatch):
+    """A partly ticked imported list: the header tick used to replace every
+    imported amount with the expected budget."""
+    _start_event(app)
+    app.var_gift_budget.set("1,000")
+    _select(app, app.tab_gift)
+    monkeypatch.setattr(monolith.filedialog, "askopenfilename", lambda **_: "gifts.xlsx")
+    monkeypatch.setattr(monolith, "read_gift_contribution_rows", lambda _p: [
+        {"name": "Alice Example", "email": "alice@example.com", "checked": True, "amount": 2500.0},
+        {"name": "Carol Example", "email": "carol@example.com", "checked": False, "amount": 1800.0},
+    ])
+    app._load_gift_list_from_file()
+    app._toggle_all_gift_column("check")
+    roster = app._gift_roster
+    assert (roster["alice@example.com"]["amount"], roster["carol@example.com"]["amount"],
+            roster["bob@example.com"]["amount"]) == (2500.0, 1800.0, 1000.0)
+
+
+@pytest.mark.parametrize("which", ["round", "gift"])
+def test_a_money_save_that_fails_is_reported_once(app, monolith, monkeypatch, which):
+    """A later round's Paid box, like every Tab 5 / Tab 6 edit, saved with
+    its failure swallowed: the screen kept the amount, the database lost it."""
+    _attendance(app)
+    key = _add_round(app, monolith, monkeypatch, "Karaoke")
+    if which == "gift":
+        _select(app, app.tab_gift)
+
+    def locked(*_a, **_kw):
+        raise sqlite3.OperationalError("database is locked")
+
+    save = "save_attendance" if which == "round" else "save_gift_roster"
+    monkeypatch.setattr(db, save, locked)
+    before = len(app.dialogs)
+    for typed in ("1,000", "1,500"):
+        if which == "round":
+            app._round_vars[key]["paid"].set(typed)
+        else:
+            app._commit_gift_amount_edit("alice@example.com", "amount", typed)
+        app.update()
+    reported = app.dialogs[before:]
+    assert [d[1] for d in reported] == ["Not saved"]
+    assert "NOT saved" in reported[0][2] and "database is locked" in reported[0][2]
+
+
+def test_ticking_everyone_leaves_rows_already_ticked_alone(app):
+    """Like Tab 5's headers: only rows the click changes get the budget."""
+    _start_event(app)
+    app.var_gift_budget.set("1,000")
+    _select(app, app.tab_gift)
+    app._gift_roster["alice@example.com"].update(checked=True, amount=1000.0, manual_amount=False)
+    app.var_gift_budget.set("1,500")
+    app._toggle_all_gift_column("check")
+    assert (app._gift_roster["alice@example.com"]["amount"],
+            app._gift_roster["bob@example.com"]["amount"]) == (1000.0, 1500.0)

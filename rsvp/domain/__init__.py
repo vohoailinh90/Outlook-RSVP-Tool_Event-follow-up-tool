@@ -6,6 +6,7 @@ exercised anywhere. scripts/check_layering.py enforces that.
 from .money import (  # noqa: F401
     RoundFigures,
     amount_for,
+    contributed_total,
     count_actual_attendees,
     format_amount,
     gift_figures,
@@ -26,6 +27,7 @@ from .roster import merge_expanded_roster  # noqa: F401
 __all__ = [
     "RoundFigures",
     "amount_for",
+    "contributed_total",
     "gift_figures",
     "history_figures",
     "is_yes",

@@ -267,6 +267,13 @@ def sum_contributions(roster) -> float:
     return sum(info.get("amount", 0.0) or 0.0 for info in roster)
 
 
+def contributed_total(roster) -> float:
+    """What the gift collected: the amounts of the people marked as having
+    contributed - the same people the contributor report lists. A file
+    import can leave an amount on someone not marked; it is not counted."""
+    return sum(info.get("amount", 0.0) or 0.0 for info in roster if info.get("checked"))
+
+
 def count_actual_attendees(roster) -> int:
     """How many people are marked as having actually attended."""
     return sum(1 for info in roster

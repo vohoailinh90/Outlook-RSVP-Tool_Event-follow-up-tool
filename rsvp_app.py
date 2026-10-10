@@ -148,6 +148,7 @@ TRUTHY = ("yes", "true", "1", "✅", "x")
 # ══════════════════════════════════════════════════════════════════════════
 from rsvp.domain import (  # noqa: F401
     amount_for,
+    contributed_total,
     count_actual_attendees,
     gift_figures,
     history_figures,
@@ -3382,6 +3383,9 @@ class RSVPApp(tk.Tk):
                 "name": row["name"] or existing.get("name", row["email"]),
                 "checked": row["checked"],
                 "amount": row["amount"],
+                # What the file says someone gave: ticking Contributed later
+                # must not replace it with the expected budget.
+                "manual_amount": row["amount"] > 0,
                 # "send_email" không có trong file Excel (chỉ là lựa chọn
                 # riêng của app, xem cột "Send email") — GIỮ NGUYÊN giá trị
                 # đã có (nếu người này đã từng được tick chọn nhận báo cáo
@@ -3481,7 +3485,7 @@ class RSVPApp(tk.Tk):
                 event_totals = round_totals(self._event_figures_for(self._gift_event))
             except Exception as exc:
                 unreadable = exc
-        fig = gift_figures(sum_contributions(self._gift_roster.values()),
+        fig = gift_figures(contributed_total(self._gift_roster.values()),
                            self.var_gift_item_price.get(), linked, event_totals)
         fig["unreadable"] = unreadable
         return fig
@@ -3843,6 +3847,8 @@ class RSVPApp(tk.Tk):
             if iid not in self._gift_roster:
                 continue
             if col_key == "check":
+                if bool(self._gift_roster[iid].get("checked")) == new_state:
+                    continue  # already ticked: its amount stays as it is
                 self._gift_roster[iid]["checked"] = new_state
                 # The same rule as a single tick: one header click must not
                 # wipe out every amount typed by hand.
@@ -3861,7 +3867,7 @@ class RSVPApp(tk.Tk):
     def _update_gift_contributed_count(self):
         total = len(self._gift_roster) if hasattr(self, "_gift_roster") else 0
         contributed = sum(1 for info in self._gift_roster.values() if info["checked"]) if hasattr(self, "_gift_roster") else 0
-        total_amount = sum(info.get("amount", 0.0) for info in self._gift_roster.values()) if hasattr(self, "_gift_roster") else 0.0
+        total_amount = contributed_total(self._gift_roster.values()) if hasattr(self, "_gift_roster") else 0.0
         shown = len(self.tree_gift.get_children())
         if shown != total:
             self.var_gift_contributed_count.set(f"{contributed} / {total}  (showing {shown}/{total} due to search)")
@@ -3894,10 +3900,13 @@ class RSVPApp(tk.Tk):
             return
         try:
             db.save_gift_roster(event_id, self._gift_roster, self.history_path.get())
-        except Exception:
+        except Exception as exc:
             if not silent:
                 raise
-            return  # best-effort silent auto-save
+            # Money: a lost save is reported (once per run), not swallowed.
+            self._report_save_failure("gift", "Gift contribution", self._unwritable_reason(exc))
+            return
+        self._save_failures_reported.discard("gift")
         self._sync_event_money(event_id)
 
     def _load_gift_roster_from_db(self, event_id):
@@ -4678,10 +4687,13 @@ class RSVPApp(tk.Tk):
         try:
             db.save_attendance(event_id, self._attendance_roster or ({} if cleared else None),
                                self._extra_rounds, self.history_path.get())
-        except Exception:
+        except Exception as exc:
             if not silent:
                 raise
+            # Money: a lost save is reported (once per run), not swallowed.
+            self._report_save_failure("attendance", "Attendance & payment", self._unwritable_reason(exc))
             return False
+        self._save_failures_reported.discard("attendance")
         self._sync_event_money(event_id, cleared=cleared)
         return True
 
@@ -4717,7 +4729,7 @@ class RSVPApp(tk.Tk):
                 return
             figures = payment_rounds(roster.values(), rec.get("Round1Label") or ROUND1_DEFAULT_LABEL,
                                      rec.get("AmountPaid"), rounds)
-            fields = history_figures(figures, sum_contributions(gift.values()), rec.get("GiftItemPrice"))
+            fields = history_figures(figures, contributed_total(gift.values()), rec.get("GiftItemPrice"))
             changed = {k: v for k, v in fields.items() if str(rec.get(k) or "") != v}
             if changed:
                 db.update_event(event_id, changed, path)
@@ -4728,6 +4740,11 @@ class RSVPApp(tk.Tk):
                 "money", "History's money columns",
                 f"they could not be updated:\n\n{exc}\n\nThey are recalculated at the next change "
                 "on Attendance & payment or Gift contribution.")
+
+    def _unwritable_reason(self, exc):
+        return (f"it could not be written to the database:\n\n{exc}\n\nCheck that "
+                f"{self.history_path.get()} is writable and not open in another program, "
+                "then change it again.")
 
     def _report_save_failure(self, key, what, reason):
         """Tells the user once per run that `what` was not saved."""
