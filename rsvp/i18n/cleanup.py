@@ -210,27 +210,38 @@ def parse_bilingual_reply(text):
 # date, an amount or a deadline reaches colleagues as written, and the buttons
 # Outlook shows are always Yes, No and Maybe.
 _NUMBER = re.compile(r"\d+(?:,\d{3})*")
+_ON_THE_HOUR = re.compile(r"(?<!\d)(\d{1,2}):00(?!\d)")
 _BUTTONS = ("Yes", "No", "Maybe")
 
 
 def _numbers(text):
-    """How often each number occurs. Zero is left out: "18:00" becomes
-    "18時" in a good Japanese translation."""
-    values = (int(n.replace(",", "")) for n in _NUMBER.findall(unicodedata.normalize("NFKC", text)))
-    return Counter(v for v in values if v)
+    """How often each number occurs. The ':00' of a time on the hour is not
+    counted - "18:00" becomes "18時" in a good Japanese translation - but
+    every other zero is, a budget of 0 included."""
+    text = _ON_THE_HOUR.sub(r"\1", unicodedata.normalize("NFKC", text))
+    return Counter(int(n.replace(",", "")) for n in _NUMBER.findall(text))
 
 
 def _button_names(text):
     return [b for b in _BUTTONS if re.search(rf"(?<![A-Za-z]){b}(?![A-Za-z])", text)]
 
 
-def translation_gaps(source, translated):
+def translation_gaps(source, translated, added_in=None):
     """What `translated` lacks that `source` has: numbers, compared by value
     and by how often they occur (so 07 matches 7, 3,000 matches 3000, a date
     may change its order, and of two identical dates neither may go), and the
-    voting-button names Yes, No and Maybe. [] when nothing is missing. A
-    deterministic check, not a judgement: a correct translation that spells a
-    number out ("three") is reported too, for a person to look at."""
-    missing = _numbers(source) - _numbers(translated)
+    voting-button names Yes, No and Maybe. [] when nothing is missing.
+
+    added_in=(other_source, other_template) adds the numbers typed into the
+    other language's source beyond its built-in template: a deadline added by
+    hand to one half of the fixed part must reach both translations, while the
+    halves' own differences in wording ("3 BUTTONS" in English only) do not
+    count. A deterministic check, not a judgement: a correct translation that
+    spells a number out ("three") is reported too, for a person to look at."""
+    expected = _numbers(source)
+    if added_in:
+        other_source, other_template = added_in
+        expected |= _numbers(other_source) - _numbers(other_template)
+    missing = expected - _numbers(translated)
     gaps = [str(n) if k == 1 else f"{n} (×{k})" for n, k in sorted(missing.items())]
     return gaps + [b for b in _button_names(source) if b not in _button_names(translated)]

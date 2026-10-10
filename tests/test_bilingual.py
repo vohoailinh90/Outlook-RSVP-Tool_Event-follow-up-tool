@@ -163,12 +163,28 @@ def test_angle_brackets_that_belong_to_the_text_are_kept():
     ("Ｙｅｓ 予算３，０００", "Yes budget 3000", []),        # full-width source
     ("", "anything 5", []),
     ("18:00 start", "18時開始", []),                         # minutes :00 dropped
+    ("10:30 start", "10時開始", ["30"]),
+    # Found by Codex review: zero was left out everywhere, so a lost budget
+    # of 0 went unnoticed.
+    ("Budget: 0 JPY", "予算: なし", ["0"]),
     # Found by Codex review: with a set, a dropped deadline equal to the event
     # date went unnoticed.
     ("Event 10/10/2026, reply by 10/10/2026", "イベント 2026年10月10日", ["10 (×2)", "2026"]),
 ])
 def test_translation_gaps_reports_lost_numbers_and_buttons(source, translated, gaps):
     assert translation_gaps(source, translated) == gaps
+
+
+def test_numbers_added_by_hand_to_one_half_must_reach_both_translations():
+    """Found by Codex review: a deadline typed into the Japanese half only
+    could be left out of the English translation unnoticed. The template's
+    own differences between the halves are not counted."""
+    ja_template, en_template = "31/10/2026 開催", "Held 31/10/2026. Click one of the 3 buttons."
+    ja_edited = ja_template + "\n締切 25/12/2026"
+    assert translation_gaps(en_template, "Held 31/10/2026. Click one of the 3 buttons.",
+                            added_in=(ja_edited, ja_template)) == ["12", "25"]
+    assert translation_gaps(ja_edited, "2026年10月31日開催、締切2026年12月25日",
+                            added_in=(en_template, en_template)) == []
 
 
 def test_an_answer_without_note_markers_has_empty_notes():
@@ -456,6 +472,21 @@ def test_an_answer_that_drops_the_note_is_refused(app):
     assert app.dialogs[-1][:2] == ("showwarning", "Translated note missing")
     assert app.full_translations["bilingual"] == ""
     assert _box(app.txt_editable_preview) == VI_NOTE
+
+
+def test_a_date_added_to_one_half_and_lost_from_the_other_translation_is_asked_about(
+        app, monolith, monkeypatch):
+    _compose(app)
+    ja_fixed, en_fixed = split_bilingual(_box(app.txt_fixed_preview))
+    _set_box(app.txt_fixed_preview, join_bilingual(ja_fixed + "\n締切 25/12/2026", en_fixed))
+    app._copy_email_for_translation()
+    reply = _answer(app)[0]              # the English details lack the added date
+    asked = []
+    monkeypatch.setattr(monolith.messagebox, "askyesno",
+                        lambda title, message=None, **_: asked.append((title, message)) or False)
+    _paste_and_save(app, reply)
+    assert [title for title, _ in asked] == ["Check the translation"]
+    assert "English details: 12, 25" in asked[0][1] and "Japanese details" not in asked[0][1]
 
 
 def test_an_answer_that_loses_a_date_is_asked_about(app, monolith, monkeypatch):

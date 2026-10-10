@@ -2466,9 +2466,15 @@ class RSVPApp(tk.Tk):
 
         ja_source, en_source = split_bilingual(source_details)
         en_source = ja_source if en_source is None else en_source
-        gaps = [(label, translation_gaps(src, out)) for label, src, out in (
-            ("Japanese note", source_note, ja_note), ("Japanese details", ja_source, ja_details),
-            ("English note", source_note, en_note), ("English details", en_source, en_details))]
+        ja_template, en_template = self._fixed_text("ja"), self._fixed_text("en")
+        gaps = [
+            ("Japanese note", translation_gaps(source_note, ja_note)),
+            ("Japanese details", translation_gaps(ja_source, ja_details,
+                                                  added_in=(en_source, en_template))),
+            ("English note", translation_gaps(source_note, en_note)),
+            ("English details", translation_gaps(en_source, en_details,
+                                                 added_in=(ja_source, ja_template))),
+        ]
         gaps = [(label, missing) for label, missing in gaps if missing]
         if gaps and not messagebox.askyesno(
                 "Check the translation",
