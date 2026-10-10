@@ -242,10 +242,13 @@ def parse_bilingual_reply(text):
 # number keep theirs, while the hyphens of "2026-12-20" or "10-12" are not
 # signs.
 _NUMBER = re.compile(r"((?<![\w+-])[+-])?(\d+(?:,\d{3})*)")
-# Times are compared as times, so "18:00" matches "18時" or "18時00分" and
-# "10:30" matches "10時半", while "18:00" turned into "18:30" is caught.
-_CLOCK_TIME = re.compile(r"(?<!\d)(\d{1,2}):(\d{2})(?!\d)")
-_JA_TIME = re.compile(r"(?<!\d)(\d{1,2})時(?:(\d{1,2})分|(半))?")
+# Times are compared as times of day on a 24-hour clock, so "18:00" matches
+# "18時", "6:00 PM", "6 PM" or "午後6時", and "10:30" matches "10時半" -
+# while "18:00" turned into "18:30", or PM into AM, is caught.
+_MERIDIEM = r"(?:\s*([AaPp])\.?\s*[Mm]\.?(?![A-Za-z]))"
+_CLOCK_TIME = re.compile(r"(午前|午後)?\s*(?<!\d)(\d{1,2}):(\d{2})(?!\d)" + _MERIDIEM + "?")
+_JA_TIME = re.compile(r"(午前|午後)?(?<!\d)(\d{1,2})時(?:(\d{1,2})分|(半))?")
+_HOUR_MERIDIEM = re.compile(r"(?<![\d:])(\d{1,2})" + _MERIDIEM)
 _BUTTONS = ("Yes", "No", "Maybe")
 
 
@@ -255,11 +258,17 @@ def _numbers(text):
     text = unicodedata.normalize("NFKC", text).replace("\u2212", "-")   # − MINUS SIGN
     times = Counter()
 
-    def take(hours, minutes):
-        times[f"{int(hours)}:{int(minutes):02d}"] += 1
+    def take(hours, minutes, half_of_day=None):
+        hours = int(hours)
+        if half_of_day in ("p", "P", "午後"):
+            hours = hours % 12 + 12
+        elif half_of_day in ("a", "A", "午前"):
+            hours = hours % 12
+        times[f"{hours}:{int(minutes):02d}"] += 1
         return " "
-    text = _CLOCK_TIME.sub(lambda m: take(m[1], m[2]), text)
-    text = _JA_TIME.sub(lambda m: take(m[1], 30 if m[3] else (m[2] or 0)), text)
+    text = _CLOCK_TIME.sub(lambda m: take(m[2], m[3], m[4] or m[1]), text)
+    text = _JA_TIME.sub(lambda m: take(m[2], 30 if m[4] else (m[3] or 0), m[1]), text)
+    text = _HOUR_MERIDIEM.sub(lambda m: take(m[1], 0, m[2]), text)
     numbers = Counter(f"{sign}{int(digits.replace(',', ''))}"
                       for sign, digits in _NUMBER.findall(text))
     return numbers + times

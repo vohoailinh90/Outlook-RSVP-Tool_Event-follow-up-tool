@@ -175,6 +175,12 @@ def test_angle_brackets_that_belong_to_the_text_are_kept():
     ("10:30 start", "10時開始", ["10:30"]),
     # Found by Codex review: a changed on-the-hour time went unnoticed.
     ("18:00 start", "18:30 start", ["18:00"]),
+    # Found by Codex review: AM and PM were left out of the comparison.
+    ("Start 6:00 PM", "Start 6:00 AM", ["18:00"]),
+    ("Start 6:00 PM", "開始 18:00", []),
+    ("午後6時開始", "Starts at 6 p.m.", []),
+    ("10:30 a.m.", "午前10時半", []),
+    ("12:00 PM lunch", "正午 12:00", []),
     # Found by Codex review: zero was left out everywhere, so a lost budget
     # of 0 went unnoticed.
     ("Budget: 0 JPY", "予算: なし", ["0"]),
