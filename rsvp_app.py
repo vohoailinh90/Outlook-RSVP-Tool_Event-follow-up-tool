@@ -205,6 +205,7 @@ from rsvp.i18n import (  # noqa: F401
     parse_bilingual_reply,
     split_bilingual,
     text_body_to_html,
+    translation_gaps,
 )
 
 # Bilingual is not a target to pick: with Email language = Bilingual the note,
@@ -465,6 +466,11 @@ class RSVPApp(tk.Tk):
         # để tránh 2 loại nội dung email hoàn toàn khác nhau ghi đè lẫn nhau
         # khi chỉ đổi qua lại Send mode trên CÙNG 1 ngôn ngữ.
         self.gift_full_translations = {"en": "", "ja": "", "vi": "", "bilingual": ""}
+        # Bilingual translation bookkeeping, per Send mode ("invite"/"gift"):
+        # what the last Copy sent, and what Event setup said when the saved
+        # translation was made - see _bilingual_basis().
+        self._bilingual_copied = {}
+        self._bilingual_basis_saved = {}
         # The text each draft generator last put in its box, so a box that
         # differs from it holds hand edits (see _hand_edited_drafts).
         self._generated_drafts = {}
@@ -1025,6 +1031,8 @@ class RSVPApp(tk.Tk):
         # Tab 3 — translations are content of the old event's email
         self.full_translations = {"en": "", "ja": "", "vi": "", "bilingual": ""}
         self.gift_full_translations = {"en": "", "ja": "", "vi": "", "bilingual": ""}
+        self._bilingual_copied = {}
+        self._bilingual_basis_saved = {}
         self.combo_send_mode.current(0)  # về lại "Send first Invite"
         self._refresh_send_button_label()
         self.txt_translation_paste.delete("1.0", "end")
@@ -2021,6 +2029,18 @@ class RSVPApp(tk.Tk):
             greeting += ", each followed by the change notice ⚠️ in its language, before your note"
         self.var_greeting_preview.set(greeting + ".")
         saved = parse_bilingual_reply(self._active_full_translations().get("bilingual", ""))
+        if saved and self._bilingual_translation_is_stale():
+            # Event setup changed since: the translated details would send
+            # the old date, place or amount. Set the translation aside.
+            self._active_full_translations()["bilingual"] = ""
+            self._bilingual_basis_saved.pop(self._mode_key(), None)
+            saved = None
+            messagebox.showwarning(
+                "Translation set aside",
+                "Event setup changed after the Japanese and English translation was saved, so "
+                "it no longer matches the event. The boxes show the current note and details "
+                "again, untranslated.\n\n"
+                "Copy them for Copilot and translate again before sending.")
         if saved:
             ja_note, ja_details, en_note, en_details = saved
             note = join_bilingual(ja_note, en_note) if (ja_note or en_note) else ""
@@ -2034,6 +2054,19 @@ class RSVPApp(tk.Tk):
         self.txt_editable_preview.delete("1.0", "end")
         self.txt_editable_preview.insert("1.0", note)
         self._refresh_translation_status()
+
+    def _mode_key(self):
+        return "gift" if self._is_gift_mode() else "invite"
+
+    def _bilingual_basis(self):
+        """What a bilingual translation is a translation of, as far as Event
+        setup decides it: Tab 1's note and the fixed part built from Tab 1
+        (with any saved FIXED wording). Hand edits on Tab 3 are not part of
+        it - they are in the boxes the translation was made from."""
+        return (self._source_note_text(), join_bilingual(self._fixed_text("ja"), self._fixed_text("en")))
+
+    def _bilingual_translation_is_stale(self):
+        return self._bilingual_basis_saved.get(self._mode_key()) != self._bilingual_basis()
 
     def _sync_translate_controls(self):
         """Bilingual has one target - Japanese and English from your note, in
@@ -2256,6 +2289,7 @@ class RSVPApp(tk.Tk):
                 "The fixed part is empty. Click '🔄 Refresh preview from Tab 1 / Tab 2' to "
                 "rebuild it, then copy again.")
             return
+        self._bilingual_copied[self._mode_key()] = (note, details, self._bilingual_basis())
         self.clipboard_clear()
         self.clipboard_append(build_bilingual_prompt(note, details))
         shown = note if len(note) <= 300 else note[:300].rstrip() + " …"
@@ -2372,15 +2406,71 @@ class RSVPApp(tk.Tk):
     def _save_bilingual_translation(self, text, dedupe_note):
         """Bilingual: Copilot's translated note goes into the note box, its
         translated details into the fixed box, Japanese above the divider line
-        and English below. Nothing is saved unless both details parts are found."""
-        if parse_bilingual_reply(text) is None:
+        and English below. Nothing is saved unless both details parts are found
+        and, when there was a note, both note parts too. Before the boxes are
+        replaced, asks about edits made since the Copy, and about numbers or
+        voting-button names the translation lost."""
+        parts = parse_bilingual_reply(text)
+        if parts is None:
             messagebox.showwarning(
                 "Japanese and English parts not found",
                 "Copilot's answer should have four marker lines: [JA NOTE], [JA DETAILS], "
                 "[EN NOTE] and [EN DETAILS], each followed by its text. If they are missing, "
                 "type them into the box, then click Save again." + dedupe_note)
             return
+        ja_note, ja_details, en_note, en_details = parts
+        mode = self._mode_key()
+        copied = self._bilingual_copied.get(mode)
+        now = (self._editable_box_text_for_translation(), self.txt_fixed_preview.get("1.0", "end").strip())
+        source_note, source_details = copied[:2] if copied else now
+
+        if copied and copied[2] != self._bilingual_basis():
+            messagebox.showwarning(
+                "Event setup changed since the Copy",
+                "Event setup changed after you copied the email for Copilot, so this answer "
+                "translates the old details. Copy again, and paste Copilot's new answer."
+                + dedupe_note)
+            return
+        if source_note and not (ja_note and en_note):
+            messagebox.showwarning(
+                "Translated note missing",
+                "Copilot's answer has no translated note in "
+                + ("Japanese and English" if not (ja_note or en_note) else
+                   "Japanese" if not ja_note else "English")
+                + ", but your note was not empty, so saving would drop it from the email.\n\n"
+                "Check the [JA NOTE] and [EN NOTE] parts of the answer, then click Save again."
+                + dedupe_note)
+            return
+
+        if copied:
+            edited_since = now != (source_note, source_details)
+        else:
+            edited_since = self._compose_box_texts() != getattr(self, "_compose_generated", None)
+        if edited_since and not messagebox.askyesno(
+                "Replace your edits?",
+                ("The boxes changed after you copied them. " if copied else "")
+                + "Saving replaces the note box and the fixed part box with Copilot's translation, "
+                "and the text you typed into them " + ("since then " if copied else "")
+                + "is lost.\n\nSave anyway?"):
+            return
+
+        ja_source, en_source = split_bilingual(source_details)
+        en_source = ja_source if en_source is None else en_source
+        gaps = [(label, translation_gaps(src, out)) for label, src, out in (
+            ("Japanese note", source_note, ja_note), ("Japanese details", ja_source, ja_details),
+            ("English note", source_note, en_note), ("English details", en_source, en_details))]
+        gaps = [(label, missing) for label, missing in gaps if missing]
+        if gaps and not messagebox.askyesno(
+                "Check the translation",
+                "These are in the text you copied but not in Copilot's translation:\n\n"
+                + "\n".join(f"• {label}: {', '.join(missing)}" for label, missing in gaps)
+                + "\n\nDates, amounts, times and the Yes / No / Maybe button names must reach "
+                "colleagues exactly. Correct the answer in the box and Save again, or save it "
+                "as it is?"):
+            return
+
         self._active_full_translations()["bilingual"] = text
+        self._bilingual_basis_saved[mode] = copied[2] if copied else self._bilingual_basis()
         self._refresh_compose_preview()
         messagebox.showinfo(
             "Saved & Applied",
@@ -2393,6 +2483,18 @@ class RSVPApp(tk.Tk):
 
     def _clear_translated_email(self):
         code = self._target_lang_code()
+        if code == "bilingual":
+            self.txt_translation_paste.delete("1.0", "end")
+            if not self._active_full_translations().get("bilingual", "").strip():
+                return      # nothing saved: leave the boxes, and any edits, alone
+            if self._compose_box_texts() != getattr(self, "_compose_generated", None) and \
+                    not messagebox.askyesno(
+                        "Replace your edits?",
+                        "Clearing the translation rebuilds the note box and the fixed part box "
+                        "from Event setup, and the text you typed into them is lost.\n\n"
+                        "Clear anyway?"):
+                return
+            self._bilingual_basis_saved.pop(self._mode_key(), None)
         self._active_full_translations()[code] = ""
         self.txt_translation_paste.delete("1.0", "end")
         self._refresh_compose_preview()
@@ -2452,6 +2554,14 @@ class RSVPApp(tk.Tk):
                 "so that half of the email would have no event details or voting instructions.\n\n"
                 "Fill it in, or click '🔄 Refresh preview from Tab 1 / Tab 2' to rebuild the "
                 "fixed part.")
+            return False
+        if self._active_full_translations().get("bilingual", "").strip() and \
+                self._bilingual_translation_is_stale() and not messagebox.askyesno(
+                    "Translation may be out of date",
+                    "Event setup changed after the Japanese and English translation was saved, "
+                    "and the boxes were edited by hand, so they were not rebuilt: the email may "
+                    "still carry the old date, place or amount.\n\n"
+                    "Check both boxes. Send anyway?"):
             return False
         note = self.txt_editable_preview.get("1.0", "end").strip()
         ja_note, en_note = split_bilingual(note)

@@ -7,6 +7,7 @@ docs/agentic/ARCHITECTURE.md. The code is unchanged; only its location is.
 """
 
 import re
+import unicodedata
 
 # ══════════════════════════════════════════════════════════════════════════
 # Cleanup helper for a known Copilot-copy quirk: pasting a reply copied from
@@ -129,10 +130,11 @@ def cleanup_pasted_translation(text):
 # Copilot's answer to DEFAULT_PROMPT_BILINGUAL: the note and the event
 # details, each in Japanese and in English, under the markers [JA NOTE],
 # [JA DETAILS], [EN NOTE] and [EN DETAILS]. The '#', bold, 【】 and colon
-# Copilot sometimes puts around a marker belong to it. Markers are looked for
-# at the start of a line first, so text that mentions "[EN NOTE]" mid-line is
-# not cut there; only if that finds no complete answer are they looked for
-# anywhere, since the copy quirk above can glue them to the words around them.
+# Copilot sometimes puts around a marker belong to it. Markers at the start of
+# a line are taken first; one found mid-line counts only for a part no
+# line-start marker names. The copy quirk above can glue a marker - any one of
+# them - to the words before it, while text that merely mentions "[EN NOTE]"
+# mid-line sits beside the real marker on its own line, and is not cut there.
 _MARKER = (r"(?:[#>]+[ \t]*)?(?:\*\*|__)?[\[【]\s*"
            r"(?:(?P<ja>JA|JP|JAPANESE|日本語)|(?P<en>EN|ENGLISH|英語))"
            r"[ \t_\-]*(?:(?P<note>NOTE)|(?P<details>DETAILS?))"
@@ -142,22 +144,56 @@ _ANYWHERE_MARKER = re.compile(_MARKER, re.IGNORECASE)
 # Divider lines and code fences Copilot draws around a part.
 _EDGE = r"(?:[―—–\-=_─━]{3,}|`{3}\w*)"
 _EDGE_LINES = re.compile(r"\A(?:" + _EDGE + r"\s*)+|(?:\s*" + _EDGE + r")+\Z")
-_NO_NOTE = re.compile(r"\(?\s*(?:none|なし)\s*\)?", re.IGNORECASE)
+# What Copilot writes for an empty note, as asked or in its own words; and the
+# prompt's own placeholders, which a reply that only echoes the template holds.
+_NO_NOTE = {"none", "なし", "無し", "特になし", "n/a", "na", "-", "—", "ー"}
+_PLACEHOLDER = re.compile(
+    r"the (?:note|event details and voting instructions) in (?:japanese|english)")
 
 
-def _reply_parts(text, marker_pattern):
-    markers = list(marker_pattern.finditer(text))
+def _is_no_note(part):
+    text = unicodedata.normalize("NFKC", part).strip().strip("()[]「」『』.。!！ ").lower()
+    return text in _NO_NOTE
+
+
+def _marker_key(marker):
+    return ("ja" if marker.group("ja") else "en", "note" if marker.group("note") else "details")
+
+
+def _reply_markers(text):
+    at_line_start = list(_LINE_START_MARKER.finditer(text))
+    named = {_marker_key(m) for m in at_line_start}
+    glued = [m for m in _ANYWHERE_MARKER.finditer(text) if _marker_key(m) not in named]
+    return sorted(at_line_start + glued, key=lambda m: m.start())
+
+
+def parse_bilingual_reply(text):
+    """(ja_note, ja_details, en_note, en_details) from Copilot's answer to
+    DEFAULT_PROMPT_BILINGUAL, or None unless both a Japanese and an English
+    details part with text in them are found. A missing note part, or one
+    that says "(none)" in any of the ways Copilot writes it, is "". A part
+    that is still the prompt's placeholder counts as missing. Anything before
+    the first marker ("Here is the translation:") is dropped, and so are
+    divider lines, code fences and the prompt's <...> brackets around a
+    part (but not the brackets of a tag like <b>...</b> in the text). A marker found twice keeps its later part, as
+    dedupe_pasted_translation() keeps the later copy. Text Copilot adds after
+    the last part stays in it: the app shows the result for checking before
+    anything is sent."""
+    text = text or ""
+    markers = _reply_markers(text)
     found = {}
     for i, marker in enumerate(markers):
         end = markers[i + 1].start() if i + 1 < len(markers) else len(text)
         part = _EDGE_LINES.sub("", text[marker.end():end].strip()).strip()
-        if part.startswith("<") and part.endswith(">"):
+        if (part.startswith("<") and part.endswith(">")
+                and not any(c in part[1:-1] for c in "<>")):
             part = part[1:-1].strip()   # the prompt's <...> placeholder brackets, kept
-        is_note = bool(marker.group("note"))
-        if is_note and _NO_NOTE.fullmatch(part):
+        if _PLACEHOLDER.fullmatch(part.lower()):
+            continue
+        key = _marker_key(marker)
+        if key[1] == "note" and _is_no_note(part):
             part = ""
-        key = ("ja" if marker.group("ja") else "en", "note" if is_note else "details")
-        if part or is_note:
+        if part or key[1] == "note":
             found[key] = part
     if not found.get(("ja", "details")) or not found.get(("en", "details")):
         return None
@@ -165,15 +201,26 @@ def _reply_parts(text, marker_pattern):
             found.get(("en", "note"), ""), found[("en", "details")])
 
 
-def parse_bilingual_reply(text):
-    """(ja_note, ja_details, en_note, en_details) from Copilot's answer to
-    DEFAULT_PROMPT_BILINGUAL, or None unless both a Japanese and an English
-    details part with text in them are found. A missing note part, or one
-    that says "(none)", is "". Anything before the first marker ("Here is the
-    translation:") is dropped, and so are divider lines, code fences and the
-    prompt's <...> brackets around a part. A marker found twice keeps its
-    later part, as dedupe_pasted_translation() keeps the later copy. Text
-    Copilot adds after the last part stays in it: the app shows the result
-    for checking before anything is sent."""
-    text = text or ""
-    return _reply_parts(text, _LINE_START_MARKER) or _reply_parts(text, _ANYWHERE_MARKER)
+# Numbers and the voting buttons are what a translation must never change: a
+# date, an amount or a deadline reaches colleagues as written, and the buttons
+# Outlook shows are always Yes, No and Maybe.
+_NUMBER = re.compile(r"\d+(?:,\d{3})*")
+_BUTTONS = ("Yes", "No", "Maybe")
+
+
+def _numbers(text):
+    return {int(n.replace(",", "")) for n in _NUMBER.findall(unicodedata.normalize("NFKC", text))}
+
+
+def _button_names(text):
+    return [b for b in _BUTTONS if re.search(rf"(?<![A-Za-z]){b}(?![A-Za-z])", text)]
+
+
+def translation_gaps(source, translated):
+    """What `translated` lacks that `source` has: numbers, compared by value
+    (so 07 matches 7, 3,000 matches 3000, and a date may change its order),
+    and the voting-button names Yes, No and Maybe. [] when nothing is missing.
+    A deterministic check, not a judgement: a correct translation that spells
+    a number out ("three") is reported too, for a person to look at."""
+    gaps = [str(n) for n in sorted(_numbers(source) - _numbers(translated))]
+    return gaps + [b for b in _button_names(source) if b not in _button_names(translated)]

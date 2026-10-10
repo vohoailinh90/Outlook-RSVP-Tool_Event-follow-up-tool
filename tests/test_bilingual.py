@@ -28,6 +28,7 @@ from rsvp.i18n import (
     join_bilingual,
     parse_bilingual_reply,
     split_bilingual,
+    translation_gaps,
 )
 from tests.test_app_event_state import app  # noqa: F401
 
@@ -86,9 +87,14 @@ def test_the_prompts_own_reply_format_is_what_the_parser_reads():
     start = DEFAULT_PROMPT_BILINGUAL.index("[JA NOTE]\n")
     last = "<the event details and voting instructions in English>"
     example = DEFAULT_PROMPT_BILINGUAL[start:DEFAULT_PROMPT_BILINGUAL.index(last) + len(last)]
-    assert parse_bilingual_reply(example) == (
-        "the note in Japanese", "the event details and voting instructions in Japanese",
-        "the note in English", "the event details and voting instructions in English")
+    answered = (example.replace("<the note in Japanese>", JA_NOTE)
+                .replace("<the event details and voting instructions in Japanese>", JA_DETAILS)
+                .replace("<the note in English>", EN_NOTE)
+                .replace("<the event details and voting instructions in English>", EN_DETAILS))
+    assert answered != example
+    assert parse_bilingual_reply(answered) == PARTS
+    # Copilot echoing the template back, unfilled, is not an answer.
+    assert parse_bilingual_reply(example) is None
 
 
 def test_the_note_and_the_fixed_part_sit_in_marked_blocks_before_the_reply_format():
@@ -131,15 +137,49 @@ def test_a_copilot_answer_gives_both_parts_in_both_languages(reply):
     assert parse_bilingual_reply(reply) == PARTS
 
 
-@pytest.mark.parametrize("ja_note, en_note", [("(none)", "(none)"), ("なし", "None"), ("", "")])
+@pytest.mark.parametrize("ja_note, en_note", [
+    ("(none)", "(none)"), ("なし", "None"), ("", ""), ("（なし）", "None."), ("なし。", "N/A"),
+    ("特になし", "-"),
+])
 def test_a_note_written_as_none_is_empty(ja_note, en_note):
     assert parse_bilingual_reply(_reply(ja_note, JA_DETAILS, en_note, EN_DETAILS)) == (
         "", JA_DETAILS, "", EN_DETAILS)
 
 
+def test_a_note_that_only_starts_like_none_is_kept():
+    assert parse_bilingual_reply(_reply("なしでも大丈夫です。", JA_DETAILS, "None of us can be late.",
+                                        EN_DETAILS))[::2] == ("なしでも大丈夫です。", "None of us can be late.")
+
+
+def test_angle_brackets_that_belong_to_the_text_are_kept():
+    assert parse_bilingual_reply(_reply(ja_note="<b>注意</b>"))[0] == "<b>注意</b>"
+
+
+@pytest.mark.parametrize("source, translated, gaps", [
+    ("31/07/2026 18:00, 3,000 JPY", "2026年7月31日 18:00、3000円", []),
+    ("Deadline 20/10/2026", "期限 2026年10月", ["20"]),
+    ("• Yes • No • Maybe", "• Yes • No", ["Maybe"]),
+    ("「Yes」を押す", "Yesを押してください", []),
+    ("Ｙｅｓ 予算３，０００", "Yes budget 3000", []),        # full-width source
+    ("", "anything 5", []),
+])
+def test_translation_gaps_reports_lost_numbers_and_buttons(source, translated, gaps):
+    assert translation_gaps(source, translated) == gaps
+
+
 def test_an_answer_without_note_markers_has_empty_notes():
     reply = f"[JA DETAILS]\n{JA_DETAILS}\n[EN DETAILS]\n{EN_DETAILS}"
     assert parse_bilingual_reply(reply) == ("", JA_DETAILS, "", EN_DETAILS)
+
+
+@pytest.mark.parametrize("glued", ["[JA DETAILS]", "[EN NOTE]", "[EN DETAILS]"])
+def test_one_marker_glued_to_the_line_before_it_still_splits_there(glued):
+    """Found by Codex review: with only some line breaks lost, the line-start
+    markers alone made a complete answer, and the glued marker's text was
+    left inside the part before it."""
+    reply = _reply().replace("\n" + glued, glued)
+    assert reply.count("\n" + glued) == 0
+    assert parse_bilingual_reply(reply) == PARTS
 
 
 def test_text_that_mentions_a_marker_mid_line_is_not_cut_there():
@@ -180,6 +220,14 @@ def _compose(app, note=VI_NOTE, mode="Send first Invite"):
     app.combo_send_mode.set(mode)
     app.combo_email_lang.set(LANG_LABELS["bilingual"])
     app._refresh_compose_preview()
+
+
+def _answer(app, ja_note=JA_NOTE, en_note=EN_NOTE):
+    """A Copilot answer to what the boxes hold now: the details 'translated'
+    with every number and button name kept. Returns (reply, ja, en)."""
+    ja_fixed, en_fixed = split_bilingual(_box(app.txt_fixed_preview))
+    ja, en = f"⏰ {ja_fixed}", f"⏰ {en_fixed}"
+    return _reply(ja_note, ja, en_note, en), ja, en
 
 
 def _paste_and_save(app, reply):
@@ -235,32 +283,35 @@ def test_copy_uses_what_the_boxes_hold_edits_included(app):
 
 def test_a_saved_answer_fills_both_boxes_and_the_sent_email(app):
     _compose(app)
-    _paste_and_save(app, "Here it is:\n" + _reply())
+    app._copy_email_for_translation()
+    reply, ja, en = _answer(app)
+    _paste_and_save(app, "Here it is:\n" + reply)
     assert app._current_lang_code() == "bilingual"
     assert split_bilingual(_box(app.txt_editable_preview)) == (JA_NOTE, EN_NOTE)
-    assert split_bilingual(_box(app.txt_fixed_preview)) == (JA_DETAILS, EN_DETAILS)
+    assert split_bilingual(_box(app.txt_fixed_preview)) == (ja, en)
 
     bodies = _send(app)
     assert len(bodies) == 1
     ja_half, en_half = split_bilingual(bodies[0])
-    assert ja_half == f"[English below]\n\n皆様\n\n{JA_NOTE}\n\n{JA_DETAILS}"
-    assert en_half == f"Hello everyone,\n\n{EN_NOTE}\n\n{EN_DETAILS}"
+    assert ja_half == f"[English below]\n\n皆様\n\n{JA_NOTE}\n\n{ja}"
+    assert en_half == f"Hello everyone,\n\n{EN_NOTE}\n\n{en}"
     assert not [d for d in app.dialogs if d[0] == "askyesno"]
 
 
 def test_a_saved_answer_with_no_note_leaves_the_note_box_empty(app):
     _compose(app, note="")
-    _paste_and_save(app, _reply("(none)", JA_DETAILS, "(none)", EN_DETAILS))
+    reply, ja, en = _answer(app, "(none)", "（なし）")
+    _paste_and_save(app, reply)
     assert _box(app.txt_editable_preview) == ""
     (body,) = _send(app)
-    assert f"皆様\n\n{JA_DETAILS}" in body and f"Hello everyone,\n\n{EN_DETAILS}" in body
+    assert f"皆様\n\n{ja}" in body and f"Hello everyone,\n\n{en}" in body
     assert not [d for d in app.dialogs if d[0] == "askyesno"]
 
 
 def test_an_answer_without_both_parts_saves_nothing(app):
     _compose(app)
     before = (_box(app.txt_editable_preview), _box(app.txt_fixed_preview))
-    _paste_and_save(app, f"[JA]\n{JA_NOTE}\n[EN]\n{EN_NOTE}")
+    _paste_and_save(app, f"[JA]\n{JA_NOTE}\n[EN]\n{EN_NOTE}")      # the earlier format
     assert app.full_translations["bilingual"] == ""
     assert (_box(app.txt_editable_preview), _box(app.txt_fixed_preview)) == before
     assert app.dialogs[-1][:2] == ("showwarning", "Japanese and English parts not found")
@@ -269,20 +320,119 @@ def test_an_answer_without_both_parts_saves_nothing(app):
 def test_the_translation_stays_through_a_refresh_and_clearing_rebuilds_from_tab1(app):
     _compose(app)
     untranslated = (_box(app.txt_editable_preview), _box(app.txt_fixed_preview))
-    _paste_and_save(app, _reply())
+    reply, ja, en = _answer(app)
+    _paste_and_save(app, reply)
     app._refresh_compose_preview()
-    assert split_bilingual(_box(app.txt_fixed_preview)) == (JA_DETAILS, EN_DETAILS)
+    app._refresh_compose_preview_unless_edited()
+    assert split_bilingual(_box(app.txt_fixed_preview)) == (ja, en)
     app._clear_translated_email()
     assert (_box(app.txt_editable_preview), _box(app.txt_fixed_preview)) == untranslated
+    assert not [d for d in app.dialogs if d[0] in ("askyesno", "showwarning")]
 
 
 def test_an_edit_to_the_saved_translation_is_what_is_sent(app):
     _compose(app)
-    _paste_and_save(app, _reply())
-    _set_box(app.txt_fixed_preview, join_bilingual(JA_DETAILS + "\n追記", EN_DETAILS + "\nP.S."))
+    reply, ja, en = _answer(app)
+    _paste_and_save(app, reply)
+    _set_box(app.txt_fixed_preview, join_bilingual(ja + "\n追記", en + "\nP.S."))
     (body,) = _send(app)
     ja_half, en_half = split_bilingual(body)
     assert ja_half.endswith("追記") and en_half.endswith("P.S.")
+
+
+def test_a_translation_made_before_event_setup_changed_is_set_aside(app):
+    """Found in review: the fixed box came from the saved translation even
+    after Tab 1 changed, so an update invite went out with the old venue."""
+    _compose(app, mode="Send update invite")
+    _paste_and_save(app, _answer(app)[0])
+    app.var_location.set("Hall B")
+    app._refresh_compose_preview_unless_edited()          # opening the tab again
+    assert app.dialogs[-1][:2] == ("showwarning", "Translation set aside")
+    assert app.full_translations["bilingual"] == ""
+    assert _box(app.txt_editable_preview) == VI_NOTE
+    assert "Hall B" in _box(app.txt_fixed_preview)
+    (body,) = _send(app)                                  # untranslated note: the fixture says Yes
+    assert "Hall B" in body and "Hall A" not in body
+
+
+def test_an_edited_translation_after_event_setup_changed_is_asked_about(app, monolith, monkeypatch):
+    _compose(app)
+    reply, ja, en = _answer(app)
+    _paste_and_save(app, reply)
+    _set_box(app.txt_fixed_preview, join_bilingual(ja + "\n追記", en))   # hand edit: not rebuilt
+    app.var_location.set("Hall B")
+    app._refresh_compose_preview_unless_edited()
+    asked = []
+    monkeypatch.setattr(monolith.messagebox, "askyesno",
+                        lambda title, message=None, **_: asked.append(title) or False)
+    assert _send(app) == []
+    assert asked == ["Translation may be out of date"]
+
+
+def test_an_answer_to_a_copy_made_before_event_setup_changed_is_refused(app):
+    _compose(app)
+    app._copy_email_for_translation()
+    reply = _answer(app)[0]
+    app.var_location.set("Hall B")
+    _paste_and_save(app, reply)
+    assert app.dialogs[-1][:2] == ("showwarning", "Event setup changed since the Copy")
+    assert app.full_translations["bilingual"] == ""
+
+
+def test_saving_asks_before_replacing_edits_made_after_the_copy(app, monolith, monkeypatch):
+    """Found in review: an edit typed after Copy was silently replaced."""
+    _compose(app)
+    app._copy_email_for_translation()
+    reply = _answer(app)[0]
+    after = _box(app.txt_fixed_preview) + "\nP.S. AFTER COPY"
+    _set_box(app.txt_fixed_preview, after)
+    asked = []
+    monkeypatch.setattr(monolith.messagebox, "askyesno",
+                        lambda title, message=None, **_: asked.append(title) or False)
+    _paste_and_save(app, reply)
+    assert asked == ["Replace your edits?"]
+    assert _box(app.txt_fixed_preview) == after and app.full_translations["bilingual"] == ""
+
+
+def test_clearing_leaves_the_boxes_alone_when_nothing_was_saved(app):
+    _compose(app)
+    _set_box(app.txt_editable_preview, "Ghi chú mới")
+    app._clear_translated_email()
+    assert _box(app.txt_editable_preview) == "Ghi chú mới"
+
+
+def test_clearing_asks_before_replacing_edits(app, monolith, monkeypatch):
+    _compose(app)
+    reply, ja, en = _answer(app)
+    _paste_and_save(app, reply)
+    _set_box(app.txt_fixed_preview, join_bilingual(ja + "\n追記", en))
+    monkeypatch.setattr(monolith.messagebox, "askyesno", lambda *a, **k: False)
+    app._clear_translated_email()
+    assert _box(app.txt_fixed_preview).startswith(ja + "\n追記")
+    assert app.full_translations["bilingual"]
+
+
+def test_an_answer_that_drops_the_note_is_refused(app):
+    """Found in review: with no NOTE parts, the note vanished from the email."""
+    _compose(app)
+    ja_fixed, en_fixed = split_bilingual(_box(app.txt_fixed_preview))
+    _paste_and_save(app, f"[JA DETAILS]\n{ja_fixed}\n[EN DETAILS]\n{en_fixed}")
+    assert app.dialogs[-1][:2] == ("showwarning", "Translated note missing")
+    assert app.full_translations["bilingual"] == ""
+    assert _box(app.txt_editable_preview) == VI_NOTE
+
+
+def test_an_answer_that_loses_a_date_is_asked_about(app, monolith, monkeypatch):
+    _compose(app)
+    ja_fixed, en_fixed = split_bilingual(_box(app.txt_fixed_preview))
+    deadline = monolith.get_date_str(app.date_deadline)
+    asked = []
+    monkeypatch.setattr(monolith.messagebox, "askyesno",
+                        lambda title, message=None, **_: asked.append((title, message)) or False)
+    _paste_and_save(app, _reply(JA_NOTE, ja_fixed, EN_NOTE, en_fixed.replace(deadline, "soon")))
+    assert [title for title, _ in asked] == ["Check the translation"]
+    assert "English details" in asked[0][1] and "Japanese details" not in asked[0][1]
+    assert app.full_translations["bilingual"] == ""
 
 
 def test_an_untranslated_note_is_asked_about_and_no_keeps_it_unsent(app, monolith, monkeypatch):
@@ -352,13 +502,14 @@ def test_update_mode_sends_each_notice_before_the_note_and_shows_it_in_no_box(ap
     it is added."""
     _compose(app, mode="Send update invite")
     assert "⚠️" not in _box(app.txt_editable_preview) + _box(app.txt_fixed_preview)
-    _paste_and_save(app, _reply())
+    reply, ja, en = _answer(app)
+    _paste_and_save(app, reply)
     assert "⚠️ 重要" not in _box(app.txt_editable_preview) + _box(app.txt_fixed_preview)
     assert "change notice" in app.var_greeting_preview.get()
     (body,) = _send(app)
     ja_half, en_half = split_bilingual(body)
-    assert ja_half == f"[English below]\n\n皆様\n\n{UPDATE_NOTICE['ja'].strip()}\n\n{JA_NOTE}\n\n{JA_DETAILS}"
-    assert en_half == f"Hello everyone,\n\n{UPDATE_NOTICE['en'].strip()}\n\n{EN_NOTE}\n\n{EN_DETAILS}"
+    assert ja_half == f"[English below]\n\n皆様\n\n{UPDATE_NOTICE['ja'].strip()}\n\n{JA_NOTE}\n\n{ja}"
+    assert en_half == f"Hello everyone,\n\n{UPDATE_NOTICE['en'].strip()}\n\n{EN_NOTE}\n\n{en}"
 
 
 def test_gift_mode_fixed_part_is_the_gift_notice_in_both_languages(app, monolith):
@@ -369,9 +520,11 @@ def test_gift_mode_fixed_part_is_the_gift_notice_in_both_languages(app, monolith
             app.var_gift_budget.get())
     assert split_bilingual(_box(app.txt_fixed_preview)) == (
         build_gift_fixed_block("ja", *args), build_gift_fixed_block("en", *args))
-    _paste_and_save(app, _reply())
+    reply, ja, en = _answer(app)
+    _paste_and_save(app, reply)
     assert app.gift_full_translations["bilingual"] and not app.full_translations["bilingual"]
-    assert split_bilingual(_box(app.txt_fixed_preview)) == (JA_DETAILS, EN_DETAILS)
+    assert split_bilingual(_box(app.txt_fixed_preview)) == (ja, en)
+    assert not [d for d in app.dialogs if d[0] == "askyesno"]
 
 
 def test_a_single_language_offers_the_three_targets_again(app, monolith):

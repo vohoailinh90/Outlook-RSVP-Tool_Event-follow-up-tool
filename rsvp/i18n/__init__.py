@@ -24,6 +24,7 @@ from .cleanup import (  # noqa: F401
     detect_possible_duplicate_paste,
     cleanup_pasted_translation,
     parse_bilingual_reply,
+    translation_gaps,
 )
 from .messages import (  # noqa: F401
     build_greeting,
@@ -71,6 +72,7 @@ __all__ = [
     "detect_possible_duplicate_paste",
     "cleanup_pasted_translation",
     "parse_bilingual_reply",
+    "translation_gaps",
     "build_greeting",
     "build_subject",
     "UPDATE_NOTICE",
