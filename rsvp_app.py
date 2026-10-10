@@ -356,7 +356,7 @@ class RSVPApp(tk.Tk):
         # tránh popup chặn trước khi app kịp vẽ xong.
         try:
             migrated, event_count, migrate_notes = legacy_excel.migrate_from_excel_if_needed(
-                db_path=self.history_path.get(), history_xlsx=history.HISTORY_FILE_DEFAULT)
+                db_path=self.history_path.get())
         except Exception:
             migrated, event_count, migrate_notes = False, 0, []
         if migrated and event_count:
@@ -445,13 +445,6 @@ class RSVPApp(tk.Tk):
         # Contribution tự nạp lại danh sách người nhận mới nhất từ Tab 2 mỗi
         # lần mở — cả 2 việc này cần làm mới mỗi khi CHUYỂN SANG đúng tab đó.
         nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
-
-        # Re-wraps long instructional labels (see _make_wrapping_label())
-        # whenever the main app window itself is resized, so guidance text
-        # stays fully readable instead of getting clipped / needing a
-        # horizontal scrollbar when the window is narrowed.
-        self._wrap_labels = []
-        self.bind("<Configure>", self._on_root_resize)
 
     def _on_tab_changed(self, event):
         try:
@@ -595,52 +588,21 @@ class RSVPApp(tk.Tk):
         (khớp chính xác vùng hiển thị thật), wraplength được tính lại theo
         đúng con số đó, không qua trung gian nào khác."""
         lbl = ttk.Label(parent, **kwargs)
+        # Every tab is a ScrollableFrame, so every label has a Canvas ancestor.
         w = parent
-        canvas = None
-        while w is not None:
-            if isinstance(w, tk.Canvas):
-                canvas = w
-                break
+        while w is not None and not isinstance(w, tk.Canvas):
             w = w.master
-        if canvas is not None:
-            if not hasattr(canvas, "wrap_labels"):
-                canvas.wrap_labels = []
-            canvas.wrap_labels.append((lbl, margin))
+        if w is not None:
+            if not hasattr(w, "wrap_labels"):
+                w.wrap_labels = []
+            w.wrap_labels.append((lbl, margin))
             try:
-                current_width = canvas.winfo_width()
-                if current_width > 1:
-                    lbl.configure(wraplength=max(current_width - margin, 250))
-            except Exception:
-                pass
-        else:
-            # Trường hợp hiếm: label không nằm trong ScrollableFrame nào
-            # (không tìm thấy Canvas tổ tiên) — giữ lại cơ chế CŨ dựa theo
-            # cửa sổ gốc làm phương án dự phòng, để label luôn có ít nhất
-            # 1 cơ chế wraplength thay vì hoàn toàn không có.
-            if not hasattr(self, "_wrap_labels"):
-                self._wrap_labels = []
-            self._wrap_labels.append((lbl, margin))
-            try:
-                current_width = self.winfo_width()
+                current_width = w.winfo_width()
                 if current_width > 1:
                     lbl.configure(wraplength=max(current_width - margin, 250))
             except Exception:
                 pass
         return lbl
-
-    def _on_root_resize(self, event):
-        """Bound to the main window's <Configure> — CHỈ còn dùng làm
-        phương án dự phòng cho các label hiếm gặp không nằm trong
-        ScrollableFrame nào (xem nhánh else của _make_wrapping_label() ở
-        trên) — số lượng label trong self._wrap_labels giờ thường RỖNG, vì
-        phần lớn đã chuyển sang cơ chế theo canvas riêng của từng tab."""
-        if event.widget is not self:
-            return  # ignore <Configure> events bubbling up from child widgets — only the root window resizing matters here
-        for lbl, margin in list(getattr(self, "_wrap_labels", [])):
-            try:
-                lbl.configure(wraplength=max(event.width - margin, 250))
-            except tk.TclError:
-                pass  # widget was destroyed — safe to ignore
 
     def _enable_treeview_copy_paste(self, tree, on_commit=None, editable_cols=None):
         """Adds Ctrl+C / Ctrl+V clipboard support to a Treeview:
@@ -2341,16 +2303,6 @@ class RSVPApp(tk.Tk):
         ttk.Button(top, text="🗂 Save event", command=self._save_to_history)\
             .pack(side="left", padx=4)
 
-        # ── folder scanning note ──
-        # Automatic: tool scans ALL folders (AdvancedSearch) to find vote results
-        # No manual folder selection needed — kept simple for better UX
-        self.var_scan_all_folders = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            f,
-            text="✅ Tool automatically scans ALL folders for vote results (powered by AdvancedSearch)",
-            variable=self.var_scan_all_folders,
-        ).pack(anchor="w", padx=10, pady=6)
-
         ttk.Label(f, text="✅ Responded / not yet responded (based on Tab 2 + scanned votes):",
                   font=("Arial", 9, "bold")).pack(anchor="w", padx=10, pady=(4, 0))
         # MỚI: double-click ô "Vote" để sửa tay — dùng cho những người chỉ
@@ -2427,11 +2379,8 @@ class RSVPApp(tk.Tk):
         # requirement, EVERY reminder email (both RSVP and Gift, see Tab 6)
         # now ALWAYS only opens Outlook so the user can review it and click
         # Send themselves; there is no longer an auto-send option from
-        # within the app (see _send_reminder() below — now always called
-        # with auto_send=False). The BACKGROUND script run via Task
-        # Scheduler (send_scheduled_reminders.py) is a SEPARATE case — it
-        # still sends directly as before, since that scenario has no one
-        # sitting at the machine.
+        # within the app (see _send_reminder() below — always called with
+        # auto_send=False).
 
         ttk.Label(reminder_frame, text="Reminder email content (review/edit before sending):",
                   font=("Arial", 9, "italic")).pack(anchor="w", padx=6, pady=(4, 0))
@@ -2458,49 +2407,16 @@ class RSVPApp(tk.Tk):
         # đè thành rỗng).
         self._update_scan_status_banner()
 
-    def _load_folder_list(self):
-        def worker():
-            try:
-                paths = self.outlook.list_folder_paths()
-            except Exception as e:
-                err_msg = str(e)
-                self.after(0, lambda: messagebox.showerror(
-                    "Error", f"Could not load folder list from Outlook:\n{err_msg}"))
-                return
-            self.after(0, lambda: self._fill_folder_listbox(paths))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _fill_folder_listbox(self, paths):
-        self.list_folders.delete(0, "end")
-        for p in paths:
-            self.list_folders.insert("end", p)
-        # Pre-select "Inbox" if present
-        for i in range(self.list_folders.size()):
-            if self.list_folders.get(i).strip().lower() == "inbox":
-                self.list_folders.selection_set(i)
-
-    def _selected_scan_folders(self):
-        sel = self.list_folders.curselection()
-        paths = [self.list_folders.get(i) for i in sel]
-        if not paths:
-            paths = ["Inbox"]  # default if nothing loaded/selected yet
-        elif "inbox" not in [p.lower() for p in paths]:
-            paths = ["Inbox"] + paths  # Inbox is always included
-        return paths
-
     def _collect_responses(self):
         if not self.recipients:
             messagebox.showwarning("No list", "Go to Tab 2 and load the recipient list first.")
             return
         event_id = self.var_event_id.get()
-        scan_all = self.var_scan_all_folders.get()
-        folder_paths = None if scan_all else self._selected_scan_folders()
 
         def worker():
             try:
-                responses, skipped = self.outlook.scan_voting_responses(
-                    event_id, folder_paths=folder_paths, scan_all=scan_all)
+                # Every folder of the mailbox, not just the Inbox.
+                responses, skipped = self.outlook.scan_voting_responses(event_id, scan_all=True)
             except Exception as e:
                 err_msg = str(e)
                 self.after(0, lambda: messagebox.showerror(
@@ -2908,10 +2824,6 @@ class RSVPApp(tk.Tk):
         subject = build_reminder_subject(lang_code, event_id, event_name)
 
         attach = self.var_reminder_attach.get()
-        # MỚI: LUÔN False — mọi email nhắc nhở giờ chỉ mở Outlook để review,
-        # không còn tuỳ chọn tự động gửi thẳng từ trong app (xem ghi chú ở
-        # nơi checkbox cũ đã bị bỏ, phía trên trong _build_tab_collect()).
-        auto_send = False
         sent_date_hint = self._lookup_sent_date_hint(event_id) if attach else None
         pending_count = len(pending)
 
@@ -2919,7 +2831,7 @@ class RSVPApp(tk.Tk):
             try:
                 mail, attached = self.outlook.send_reminder_email(
                     pending, subject, body,
-                    auto_send=auto_send,
+                    auto_send=False,  # a reminder is only ever opened for review
                     attach_event_id=(event_id if attach else None),
                     attach_hint_datetime=sent_date_hint,
                 )
@@ -2936,14 +2848,9 @@ class RSVPApp(tk.Tk):
                 action = "opened"
                 review_note = " Review it, then click Send in Outlook."
 
-                # MỚI: luôn ghi lại thời điểm BẤM gửi/mở email nhắc nhở (bất
-                # kể auto_send hay review mode) vào cột "LastReminderSentDate"
-                # — giống cách _send_invite() ghi SentDate ngay lúc gửi/mở,
-                # để Tab 6 (Event History) luôn có dữ liệu để xem lại, thay
-                # vì bị trống như trước đây. Cột này CHỈ để tra cứu lịch sử,
-                # KHÔNG liên quan tới cơ chế chống gửi trùng của cột
-                # "ReminderSent" bên dưới (cột đó vẫn CHỈ set khi auto_send=
-                # True chắc chắn đã gửi, giữ nguyên logic cũ cho script nền).
+                # Ghi lại thời điểm mở email nhắc nhở vào "LastReminderSentDate"
+                # — giống cách _send_invite() ghi SentDate ngay lúc gửi/mở — để
+                # Tab 7 (Event History) có dữ liệu để xem lại.
                 history_log_note = ""
                 try:
                     db.save_event_record(
@@ -2957,104 +2864,16 @@ class RSVPApp(tk.Tk):
                                          "the database — "
                                          "the email was still " + action + " normally.")
 
-                # Chỉ đánh dấu "ReminderSent" trong History khi email THỰC SỰ
-                # đã được gửi (auto_send=True -> mail.Send() đã chạy) — nếu
-                # chỉ Display() để review thì chưa chắc bạn sẽ bấm Send, nên
-                # KHÔNG đánh dấu (để tránh script chạy nền hiểu nhầm là đã
-                # nhắc rồi trong khi thực ra chưa ai nhận được gì). Việc này
-                # giúp send_scheduled_reminders.py không gửi TRÙNG LẶP nếu
-                # bạn đã tự nhắc tay trước khi tới ngày deadline.
-                mark_note = ""
-                if auto_send:
-                    try:
-                        for rec in db.load_history(self.history_path.get()):
-                            if rec.get("EventID") == event_id:
-                                rec["ReminderSent"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-                                db.save_event_record(rec, self.history_path.get())
-                                mark_note = ("\n\nMarked in the database that this event HAS "
-                                             "been reminded — the background script (if Task "
-                                             "Scheduler is set up) will not send it again.")
-                                break
-                    except Exception:
-                        pass  # best-effort — không có History record thì thôi, không chặn việc gửi
-
                 self.after(0, lambda: messagebox.showinfo(
                     "Done",
                     f"{action.capitalize()} a reminder email for {pending_count} people who haven't responded."
-                    + review_note + attach_note + mark_note + history_log_note))
+                    + review_note + attach_note + history_log_note))
             except Exception as e:
                 err_msg = str(e)
                 self.after(0, lambda: messagebox.showerror(
                     "Error", f"Couldn't send the reminder email:\n{err_msg}"))
 
         threading.Thread(target=worker, daemon=True).start()
-
-    def _export_report(self):
-        if not self.recipients:
-            messagebox.showwarning("No data", "There is no list/response data to export yet.")
-            return
-        event_id = self.var_event_id.get()
-        out_path = f"{event_id}_Report.xlsx"
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = "Details"
-        headers = ["Name", "Email", "Vote", "Received At"]
-        for i, h in enumerate(headers, start=1):
-            c = ws.cell(row=1, column=i, value=h)
-            c.font = Font(bold=True, color="FFFFFF")
-            c.fill = PatternFill("solid", fgColor="003366")
-            c.alignment = Alignment(horizontal="center")
-        colors = {"Yes": "C6EFCE", "No": "FFC7CE", "Maybe": "FFEB9C", "No response": "F0F0F0"}
-        row = 2
-        for iid in self.tree_responses.get_children():
-            _manual, name, email, vote, received = self.tree_responses.item(iid, "values")
-            ws.cell(row=row, column=1, value=name)
-            ws.cell(row=row, column=2, value=email)
-            vc = ws.cell(row=row, column=3, value=vote)
-            vc.fill = PatternFill("solid", fgColor=colors.get(vote, "FFFFFF"))
-            ws.cell(row=row, column=4, value=received)
-            row += 1
-        for col, w in zip("ABCD", [26, 32, 14, 18]):
-            ws.column_dimensions[col].width = w
-        wb.save(out_path)
-        abs_path = os.path.abspath(out_path)
-        self._last_report_path = out_path
-        # BUG ĐÃ SỬA: trước đây hộp thoại chỉ hiện tên file ngắn (vd
-        # "Farewell_Tu_Jul26_Report.xlsx"), không cho biết nó nằm ở THƯ MỤC
-        # nào — vì out_path là đường dẫn TƯƠNG ĐỐI, Python lưu vào đúng thư
-        # mục mà app đang chạy (working directory) — thường là thư mục chứa
-        # rsvp_app.py + RSVP_History.xlsx, nhưng không phải lúc nào cũng rõ
-        # ràng với người dùng. Giờ hiện luôn đường dẫn ĐẦY ĐỦ + có nút mở
-        # thẳng thư mục đó trong File Explorer.
-        self._show_export_done_dialog(abs_path)
-
-    def _show_export_done_dialog(self, abs_path):
-        win = tk.Toplevel(self)
-        win.title("Exported")
-        win.resizable(False, False)
-        frame = ttk.Frame(win, padding=16)
-        frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="✅ Report saved to:", font=("Arial", 10, "bold"))\
-            .pack(anchor="w")
-        path_entry = ttk.Entry(frame, width=70)
-        path_entry.insert(0, abs_path)
-        path_entry.configure(state="readonly")
-        path_entry.pack(anchor="w", pady=(4, 10), fill="x")
-
-        btns = ttk.Frame(frame)
-        btns.pack(anchor="e", fill="x")
-
-        def open_folder():
-            folder = os.path.dirname(abs_path)
-            try:
-                os.startfile(folder)  # chỉ có trên Windows — đúng môi trường chạy app này
-            except Exception as e:
-                messagebox.showerror("Couldn't open the folder", str(e))
-
-        ttk.Button(btns, text="📂 Open containing folder", command=open_folder).pack(side="left", padx=(0, 6))
-        ttk.Button(btns, text="OK", command=win.destroy).pack(side="left")
-        win.transient(self)
-        win.grab_set()
 
     def _save_to_history(self):
         # Đảm bảo danh sách người nhận đã được lưu ra Excel với TÊN CHUẨN HOÁ

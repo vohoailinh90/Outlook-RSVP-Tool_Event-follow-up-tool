@@ -113,40 +113,6 @@ def _smtp_address(item):
     return (getattr(item, "SenderEmailAddress", None) or "unknown").lower()
 
 
-def list_folder_paths(max_depth=3):
-    """
-    Trả về danh sách đường dẫn folder (dạng chuỗi, không phải COM object) có trong
-    mailbox — dùng để hiển thị lên UI cho người dùng chọn thêm folder cần quét
-    (ngoài Inbox mặc định), vd: nếu có rule tự động chuyển mail sang folder khác.
-    Đường dẫn con dùng dấu \\ để phân cách, vd: "Linh", "Inbox\\SubFolder".
-    """
-    pythoncom.CoInitialize()
-    try:
-        outlook = _outlook_app()
-        ns = outlook.GetNamespace("MAPI")
-        paths = []
-
-        def walk(folder, path, depth):
-            paths.append(path)
-            if depth >= max_depth:
-                return
-            try:
-                for sub in folder.Folders:
-                    walk(sub, f"{path}\\{sub.Name}", depth + 1)
-            except Exception:
-                pass
-
-        for store_folder in ns.Folders:
-            try:
-                for sub in store_folder.Folders:
-                    walk(sub, sub.Name, 1)
-            except Exception:
-                continue
-        return sorted(set(paths))
-    finally:
-        pythoncom.CoUninitialize()
-
-
 def _find_folder(ns, path):
     """Tìm folder theo đường dẫn dạng 'Linh' hoặc 'Inbox\\SubFolder' (dò qua mọi mailbox/store)."""
     parts = [p for p in path.split("\\") if p]

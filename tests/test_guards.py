@@ -1297,7 +1297,7 @@ class TestExportsAreGitignored:
 
     def test_the_scan_finds_the_known_exports(self):
         names = self.spreadsheet_names()
-        for expected in ("Participant_List_X.xlsx", "X_Report.xlsx",
+        for expected in ("Participant_List_X.xlsx", "Attendance_Payment_X.xlsx",
                          "RSVP_History_export.xlsx"):
             assert expected in names, f"scan drifted: {sorted(names)}"
 
