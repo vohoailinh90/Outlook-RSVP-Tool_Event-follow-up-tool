@@ -155,17 +155,44 @@ def save_event_record(record: dict, path=DB_FILE_DEFAULT):
             conn.execute(f"INSERT INTO events ({', '.join(cols)}) VALUES ({placeholders})", vals)
         else:
             # merge-preserve: chỉ cập nhật cột nào THỰC SỰ có mặt trong
-            # record — cột không được truyền vào giữ nguyên giá trị cũ
-            # (đúng hành vi history.py cũ, xem PROJECT_CONTEXT).
-            set_cols = [c for c in EVENT_COLUMNS if c in record and c != "EventID"]
-            if set_cols:
-                set_clause = ", ".join(f"{c} = ?" for c in set_cols)
-                vals = [record[c] for c in set_cols] + [event_id]
-                conn.execute(f"UPDATE events SET {set_clause} WHERE EventID = ?", vals)
+            # record — cột không được truyền vào giữ nguyên giá trị cũ.
+            _update_columns(conn, event_id, record)
         conn.commit()
     finally:
         conn.close()
     return path
+
+
+def _update_columns(conn, event_id, fields):
+    """UPDATE the EVENT_COLUMNS present in `fields` on event_id's row, leaving
+    every other column as it is. EventID itself is never changed here (see
+    rename_event). Shared by save_event_record and update_event so the two
+    cannot drift apart."""
+    set_cols = [c for c in EVENT_COLUMNS if c in fields and c != "EventID"]
+    if set_cols:
+        set_clause = ", ".join(f"{c} = ?" for c in set_cols)
+        vals = [fields[c] for c in set_cols] + [event_id]
+        conn.execute(f"UPDATE events SET {set_clause} WHERE EventID = ?", vals)
+
+
+def update_event(event_id, fields: dict, path=DB_FILE_DEFAULT):
+    """Like save_event_record, but UPDATE only: returns False and writes
+    nothing when event_id has no row. For automatic writes (scan counts,
+    reminder and calendar times, Amount paid) that must never create a
+    History row of their own - an INSERT would also stamp SentDate with the
+    current time for an event that was never sent."""
+    if not event_id:
+        return False
+    conn = get_connection(path)
+    try:
+        exists = conn.execute("SELECT 1 FROM events WHERE EventID = ?", (event_id,)).fetchone()
+        if exists is None:
+            return False
+        _update_columns(conn, event_id, fields)
+        conn.commit()
+        return True
+    finally:
+        conn.close()
 
 
 def load_history(path=DB_FILE_DEFAULT):
@@ -194,14 +221,39 @@ def delete_event(event_id, path=DB_FILE_DEFAULT):
         conn.close()
 
 
-def set_last_scan_time(event_id, when: datetime, path=DB_FILE_DEFAULT):
+# Every table keyed by EventID besides events itself.
+_PER_EVENT_TABLES = ("recipients", "gift_contributions", "attendance", "responses")
+
+
+def rename_event(old_id, new_id, path=DB_FILE_DEFAULT):
+    """Moves an event to a new EventID - its History row with every column,
+    and its rows in every per-event table - in one transaction, so nothing is
+    left behind under the old ID. Used when the Event ID is edited on Tab 7.
+
+    Returns False (and changes nothing) when old_id has no row. Raises
+    ValueError when new_id is empty or already holds data, rather than
+    merging two events."""
+    new_id = (new_id or "").strip()
+    if not new_id:
+        raise ValueError("the new Event ID is empty")
+    if new_id == old_id:
+        return True
     conn = get_connection(path)
     try:
-        conn.execute(
-            "UPDATE events SET LastScanTime = ? WHERE EventID = ?",
-            (when.strftime("%Y-%m-%d %H:%M") if when else None, event_id),
-        )
+        for table in ("events",) + _PER_EVENT_TABLES:
+            if conn.execute(f"SELECT 1 FROM {table} WHERE EventID = ?", (new_id,)).fetchone():
+                raise ValueError(f"Event ID '{new_id}' already has data saved ({table})")
+        cur = conn.execute("UPDATE events SET EventID = ? WHERE EventID = ?", (new_id, old_id))
+        if cur.rowcount == 0:
+            conn.rollback()
+            return False
+        for table in _PER_EVENT_TABLES:
+            conn.execute(f"UPDATE {table} SET EventID = ? WHERE EventID = ?", (new_id, old_id))
         conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
