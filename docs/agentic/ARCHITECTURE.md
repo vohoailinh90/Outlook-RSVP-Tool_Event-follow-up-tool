@@ -185,6 +185,27 @@ them, so `nb.select` and `<<NotebookTabChanged>>` behave as before. The tab buil
 in `rsvp_app.py` — moving one per module is Phase 4's job. `check_layering.py` lets `rsvp/ui/`
 use Tk and nothing heavier, and keeps `tokens.py` free even of Tk.
 
+**Lineage merge (done).** The user's live app was a separately developed copy forked from
+this repository's first upload. Its features came across with its database schema kept as it
+is (added to, never altered), so either app opens either database:
+- `rsvp/storage/db.py`: `attendance_rounds`, `attendance_extra_amounts`, `app_settings`, the
+  `Round1Label` / `GiftItem*` / `DeptFundRemaining` columns and the gift `ManualAmount` flag.
+  `save_attendance` writes a table and its rounds in one transaction; round keys are never
+  reused; `rename_event` moves the round tables too.
+- `rsvp/domain/money.py`: one computation of every round, gift and History figure, used by the
+  screen, the emails, Excel and History alike. `parse_signed_amount` reads only amounts the app
+  writes; `running_fund` turns everything after an unreadable Balance into "unknown".
+- `rsvp/i18n`: the thank-you and gift-report builders were replaced by that copy's versions,
+  the one intended change to message output since phase 1. `tests/i18n_snapshot.py` names them
+  in code, the phase-1 golden file is left as it was, and `tests/golden/i18n_merge_snapshot.json`
+  pins the new output with a record of where it came from.
+- Ownership: Tab 5's table, rounds and first-round name change owner only in
+  `_adopt_attendance_owner()`. History's money columns are recomputed from the saved data of one
+  event after a successful save, never on display; Dept. Fund Left is computed on read.
+
+The design was challenged by `architecture-critic` before implementation; its required changes
+are the points above.
+
 **Phase 4 — split `ui/`.** Seven tabs, seven modules, out of the 4,673-line class. Largest
 and last, because it is worth least until the layers beneath it are real.
 

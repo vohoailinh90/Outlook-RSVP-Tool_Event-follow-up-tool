@@ -102,29 +102,62 @@ The reminder (and Tab 5's Calendar Invite) is only sent once the event on Tab 1 
 scanned, so it can never go to another event's list.
 
 ### Tab 5 — Attendance & Payment
-Send Calendar Invites to Yes/Maybe recipients. Track actual attendance (Actual Attend)
-and how much each person contributed. Enter "Amount paid" (the actual amount spent) to
-auto-calculate "Remaining amount". After the event, send a **Thank You** email with the
-Attendance & Payment Excel file and the Calendar Invite attached.
+Send Calendar Invites to Yes/Maybe recipients. After the event, tick who actually came
+(click an Attend or Free cell; click a column header to tick everyone) and correct amounts
+by double-clicking them. Ticking Attend fills that round's amount from the expected event
+budget; Free exempts a person from every round.
+
+**Payment rounds:** round 1 is the main event. **➕ Add round** adds a follow-up (a second
+venue, another evening) with its own Attend and amount columns; rename a round with
+**✎ Rename** (or by double-clicking its amount header), remove it with **✖ Remove**. Type
+what was actually paid out in each round; the rounds card shows each round's attendees,
+collected, paid out and remaining, and the tiles at the top the totals over all rounds.
+
+The **Thank You** email carries a table of every round's money (sent as HTML so the
+columns line up in Outlook), with the Attendance & Payment Excel file and the Calendar
+Invite attached. **🔄 Update from table** rebuilds the text after you change the table;
+text you did not edit is rebuilt automatically before sending.
 
 ### Tab 6 — Gift Contribution
 Track who has contributed gift money (✅/⬜ checkboxes), with name/email search.
-Double-click an Amount to type what someone actually gave. Choose
-who receives the report email (the "Send email" column, independent of "Contributed").
-Send a summary report email (no per-person list included) with a separate Excel file
-containing only the people who contributed.
+Double-click an Amount to type what someone actually gave; a typed amount is kept when
+Contributed is ticked again. Choose who receives the report email (the "Send email"
+column, independent of "Contributed").
+
+**Gift item & money:** the gift's name, order link (**🌐 Open link**) and price give the
+gift's remaining money. Tick **🔗 Add the party's money** to add Tab 5's totals for one
+Event + Gift summary. The report email (HTML, so its table lines up and the link opens)
+quotes these figures, with a separate Excel file listing only the contributors.
 
 ### Tab 7 — Event History
 Review the full history of all created events, Yes/No/Maybe counts, and send status.
 Double-click a cell to edit it; **Save changes** writes only the cells you edited.
-Renaming an Event ID moves the whole event (recipients, votes, attendance, gift list).
+Renaming an Event ID moves the whole event (recipients, votes, attendance, payment
+rounds, gift list). Drag a column heading sideways to reorder the columns (remembered in
+the database file); **↔ Fit columns** and **↺ Reset order** tidy up.
+
+The money columns are calculated, not typed: **Actual Att. (main)** and **Cost/Person**
+describe round 1; **Income**, **Expense** and **Balance** cover every round and the gift;
+**Dept. Fund Left** is the running total of Balance from the first event down to that row.
+An event with nothing tracked on Tab 5/6 keeps the figures it already has.
 
 ### Loading a past event
+Type in the search box above the list to find an event by any field, or pick one field
+(Location, Guest of Honor, Gift Item...) on its left.
 **⬅ Load setup from selected event** (Tab 1) replaces everything the app holds for the
 current event with what is saved for the selected one — nothing carries over. It asks first
 when that would discard Copilot translations or email text you edited by hand. To use an
 event as a template, load it and change the Event ID: the recipient list follows the new ID,
 while votes, attendance, gift ticks and Amount paid stay with the original event.
+
+---
+
+## Moving over from the "Event-Invitation" copy
+
+That copy of the app and this one use the same database layout. Copy its `rsvp_data.db`
+next to this `rsvp_app.py` (keep the original as a backup); every event, payment round,
+gift item and your History column order comes across. The other copy can still open the
+file afterwards.
 
 ---
 
@@ -163,11 +196,11 @@ illustrates the 3 steps.
 ## 7. Current limitations
 
 - Can't distinguish between two people sharing the same email address
-- The old "Actual cost tracking" feature (formerly in Tab 4) has been fully replaced by
-  the more detailed Tab 5 (Attendance & Payment). Its DB columns, and two others nothing
-  writes any more (ReminderSent, ReportFile), are hidden from Tab 7 but kept in the
-  database, and History's **Export to Excel** still writes them
-- Amount paid is saved only for an event that is in History (save it on Tab 1 first)
+- ReminderSent and ReportFile are hidden from Tab 7 (nothing here writes them) but kept in
+  the database, and History's **Export to Excel** still writes them
+- Amount paid, the first round's name and the gift item are stored on the event's History
+  row: for an event not in History yet they are kept on screen and written when you save
+  the event on Tab 1
 
 ---
 
