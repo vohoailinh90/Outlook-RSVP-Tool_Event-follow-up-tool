@@ -15,6 +15,8 @@ from .langs import (  # noqa: F401
 from .prompts import (  # noqa: F401
     DEFAULT_PROMPT_SINGLE,
     DEFAULT_PROMPT_BILINGUAL,
+    build_bilingual_prompt,
+    NO_NOTE,
 )
 from .cleanup import (  # noqa: F401
     EMOJI_PATTERN,
@@ -22,6 +24,8 @@ from .cleanup import (  # noqa: F401
     detect_possible_duplicate_paste,
     cleanup_pasted_translation,
     parse_bilingual_reply,
+    translation_gaps,
+    translation_extras,
 )
 from .messages import (  # noqa: F401
     build_greeting,
@@ -62,11 +66,15 @@ __all__ = [
     "GREETING",
     "DEFAULT_PROMPT_SINGLE",
     "DEFAULT_PROMPT_BILINGUAL",
+    "build_bilingual_prompt",
+    "NO_NOTE",
     "EMOJI_PATTERN",
     "dedupe_pasted_translation",
     "detect_possible_duplicate_paste",
     "cleanup_pasted_translation",
     "parse_bilingual_reply",
+    "translation_gaps",
+    "translation_extras",
     "build_greeting",
     "build_subject",
     "UPDATE_NOTICE",
