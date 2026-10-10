@@ -2463,7 +2463,7 @@ class RSVPApp(tk.Tk):
         KHÔNG sửa self.recipients (Tab 2 vẫn giữ nguyên như đã lưu) — chỉ áp
         dụng cho việc THEO DÕI/HIỂN THỊ ở Tab 4. Muốn áp dụng vĩnh viễn vào
         chính Tab 2 (vd để lần gửi mời SAU tự đúng luôn từ đầu), dùng nút
-        '🔎 Expand group emails in list' ở Tab 2.
+        '🔎 Expand group emails' ở Tab 2.
 
         Kết quả mỗi group được CACHE lại (self._group_expansion_cache) để
         không phải hỏi lại Exchange GAL mỗi lần bấm Scan Inbox trong cùng
@@ -2769,7 +2769,7 @@ class RSVPApp(tk.Tk):
         if not body:
             messagebox.showwarning(
                 "Empty content",
-                "Click '🔄 Regenerate reminder text' or type the content by hand before sending.")
+                "Click '🔄 Regenerate text' or type the content by hand before sending.")
             return
 
         event_id = self.var_event_id.get().strip()
@@ -3007,7 +3007,7 @@ class RSVPApp(tk.Tk):
         if not body:
             messagebox.showwarning(
                 "Empty content",
-                "Click '🔄 Regenerate reminder text' or type the content by hand before sending.")
+                "Click '🔄 Regenerate text' or type the content by hand before sending.")
             return
 
         event_id = self.var_event_id.get().strip()
@@ -3166,7 +3166,7 @@ class RSVPApp(tk.Tk):
         if not body:
             messagebox.showwarning(
                 "Empty content",
-                "Click '🔄 Regenerate report text' or type the content by hand before sending.")
+                "Click '🔄 Regenerate text' or type the content by hand before sending.")
             return
 
         event_id = self.var_event_id.get().strip()
