@@ -339,15 +339,14 @@ def _button_names(text):
 
 
 def _priced(text):
-    """Each (amount, currency code) written in the text, as a Counter of 1s:
-    "¥500", "500円", "500 yen" and "JPY 500" are all ("500", "JPY"). A
-    symbol right before an amount is taken first, so in "18:00 $500" the $ is
-    the 500's."""
+    """How often each (amount, currency code) is written in the text: "¥500",
+    "500円", "500 yen" and "JPY 500" are all ("500", "JPY"). A symbol right
+    before an amount is taken first, so in "18:00 $500" the $ is the 500's."""
     pairs = Counter()
 
     def take(amount, unit):
         amount = amount.replace(",", "")
-        pairs[(amount if "." in amount else str(int(amount)), _CURRENCY_CODE[unit.lower()])] = 1
+        pairs[(amount if "." in amount else str(int(amount)), _CURRENCY_CODE[unit.lower()])] += 1
         return " "
     text = unicodedata.normalize("NFKC", text)
     text = _SYMBOL_FIRST.sub(lambda m: take(m[2], m[1]), text)
@@ -357,8 +356,8 @@ def _priced(text):
 
 
 def _listed_prices(pairs):
-    return [f"{amount} {code}" for amount, code in
-            sorted(pairs, key=lambda pair: (float(pair[0]), pair[1]))]
+    return [f"{amount} {code}" + (f" (×{k})" if k > 1 else "") for (amount, code), k in
+            sorted(pairs.items(), key=lambda item: (float(item[0][0]), item[0][1]))]
 
 
 def _number_order(n):
@@ -402,8 +401,8 @@ def translation_extras(texts, translated):
     for text in texts:
         for amount, code in _counted(text, _priced):
             currencies.setdefault(amount, set()).add(code)
-    changed = {(amount, code) for amount, code in _priced(translated)
-               if amount in currencies and code not in currencies[amount]}
+    changed = Counter({(amount, code): k for (amount, code), k in _priced(translated).items()
+                       if amount in currencies and code not in currencies[amount]})
     return (_listed(extra[_numbers], key=lambda item: _number_order(item[0]))
             + _listed_prices(changed)
             + _listed(extra[_button_names], key=lambda item: _BUTTONS.index(item[0])))
@@ -429,7 +428,7 @@ def translation_gaps(source, translated, template=None, other=None):
     into both counts once; and a value an earlier translation already carried
     across is not expected twice.
 
-    An amount written with a currency ("$500") must keep one that is the
+    Each amount written with a currency ("$500") must keep one that is the
     same ("500ドル"): one left bare ("500") or given in another currency is
     reported as "500 USD" - unless its number went missing too, which is
     reported already. A deterministic check, not a judgement: a correct
@@ -446,8 +445,10 @@ def translation_gaps(source, translated, template=None, other=None):
     found = _numbers(translated)
     missing = expected - found
     lost_buttons = buttons - _button_names(translated)
-    unpriced = {(amount, code) for amount, code in priced - _priced(translated)
-                if not _numbers(amount) - found}
+    # An occurrence whose number is missing is reported as the number.
+    unpriced = Counter({(amount, code): k - max(missing[n] for n in _numbers(amount))
+                        for (amount, code), k in (priced - _priced(translated)).items()})
+    unpriced = +unpriced    # drops what is reported already
     return (_listed(missing, key=lambda item: _number_order(item[0]))
             + _listed_prices(unpriced)
             + _listed(lost_buttons, key=lambda item: _BUTTONS.index(item[0])))

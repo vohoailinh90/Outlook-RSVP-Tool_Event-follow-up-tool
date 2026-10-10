@@ -296,6 +296,13 @@ def test_an_amount_in_another_currency_is_reported(copied, translated, extras):
     ("Fee 500,000 VND", "500,000 Vietnamese dong", []),
     # A lost amount is reported once, as a number.
     ("Budget $500", "Budget", ["500"]),
+    ("Pay $500 deposit, then $500 balance", "Pay $500 deposit", ["500"]),
+    # Found by Codex review: two occurrences counted as one, so one of them
+    # could lose its currency.
+    ("Pay $500 deposit, then $500 balance", "Pay $500 deposit, then 500 balance", ["500 USD"]),
+    ("Pay $500 deposit, then $500 balance", "Pay 500 deposit, then 500 balance",
+     ["500 USD (×2)"]),
+    ("Pay $500 deposit, then $500 balance", "500ドルの手付金と500ドルの残金", []),
 ])
 def test_an_amount_that_loses_its_currency_is_reported(copied, translated, gaps):
     assert translation_gaps(copied, translated) == gaps
