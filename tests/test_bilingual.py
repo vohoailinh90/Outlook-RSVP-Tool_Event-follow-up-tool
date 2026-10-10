@@ -185,6 +185,7 @@ def test_angle_brackets_that_belong_to_the_text_are_kept():
     ("Start 12:00 noon", "Start 12:00 midnight", ["12:00"]),
     ("Ends 12:00 midnight", "午前0時終了", []),
     ("Lunch at 12 noon", "昼12時から昼食", []),
+    ("2 midnight snacks", "夜食 2 つ", []),
     # Found by Codex review: a space after 午後 hid it, so 午後 6時 read as 6:00.
     ("午後 6時開始", "午前6時開始", ["18:00"]),
     ("午後\u30006時開始", "Starts at 6 PM", []),

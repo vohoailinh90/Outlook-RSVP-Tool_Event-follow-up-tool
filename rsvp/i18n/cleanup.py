@@ -340,7 +340,9 @@ def _numbers(text):
         return " "
     text = _CLOCK_TIME.sub(lambda m: take(m[2], m[3], m[4] or m[5] or m[1]), text)
     text = _JA_TIME.sub(lambda m: take(m[2], 30 if m[4] else (m[3] or 0), m[1]), text)
-    text = _HOUR_MERIDIEM.sub(lambda m: take(m[1], 0, m[2] or m[3]), text)
+    # "12 noon" is a time; "2 midnight snacks" is not.
+    text = _HOUR_MERIDIEM.sub(lambda m: take(m[1], 0, m[2] or m[3]) if m[2] or m[1] == "12"
+                              else m[0], text)
     numbers = Counter(f"{sign}{int(digits.replace(',', ''))}"
                       for sign, digits in _NUMBER.findall(text))
     return numbers + times
