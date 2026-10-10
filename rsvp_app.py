@@ -430,6 +430,9 @@ class RSVPApp(tk.Tk):
         self._suspend_money_sync = False
         # Saves that failed and were reported once already, by what they save.
         self._save_failures_reported = set()
+        # While a paste is applied, cells it could not take are collected
+        # here and reported once, not as one dialog per cell.
+        self._paste_refusals = None
         self._yes_emails = []
         self._group_expansion_cache = {}
         # MỚI: đổi kiến trúc lưu trữ — history_path giờ trỏ tới 1 file SQLite
@@ -733,22 +736,33 @@ class RSVPApp(tk.Tk):
             start_index = all_rows.index(start_row) if start_row in all_rows else 0
             columns = self._tree_display_columns(tree)
             pasted_lines = [ln for ln in text.replace("\r\n", "\n").replace("\r", "\n").split("\n") if ln != ""]
-            for offset, line in enumerate(pasted_lines):
-                target_index = start_index + offset
-                if target_index >= len(all_rows):
-                    break  # only fills existing rows, never creates new ones
-                row_id = all_rows[target_index]
-                cells = line.split("\t") if "\t" in line else line.split(",")
-                for col_index, new_value in enumerate(cells):
-                    if col_index >= len(columns):
-                        break
-                    col_name = columns[col_index]
-                    if editable_cols is not None and col_name not in editable_cols:
-                        continue
-                    if on_commit is not None:
-                        on_commit(row_id, col_name, new_value.strip())
-                    else:
-                        tree.set(row_id, col_name, new_value.strip())
+            self._paste_refusals = []
+            try:
+                for offset, line in enumerate(pasted_lines):
+                    target_index = start_index + offset
+                    if target_index >= len(all_rows):
+                        break  # only fills existing rows, never creates new ones
+                    row_id = all_rows[target_index]
+                    cells = line.split("\t") if "\t" in line else line.split(",")
+                    for col_index, new_value in enumerate(cells):
+                        if col_index >= len(columns):
+                            break
+                        col_name = columns[col_index]
+                        if editable_cols is not None and col_name not in editable_cols:
+                            continue
+                        if on_commit is not None:
+                            on_commit(row_id, col_name, new_value.strip())
+                        else:
+                            tree.set(row_id, col_name, new_value.strip())
+            finally:
+                # Back to one dialog per refused cell for typed edits, even
+                # if a commit above raised.
+                refused, self._paste_refusals = self._paste_refusals, None
+            if refused:
+                messagebox.showwarning(
+                    "Some cells not changed",
+                    f"{len(refused)} pasted value(s) are not amounts someone paid and were left as they "
+                    f"were: {', '.join(refused[:5])}{' ...' if len(refused) > 5 else ''}")
             return "break"
 
         tree.bind("<Control-c>", copy_selection)
@@ -1507,6 +1521,16 @@ class RSVPApp(tk.Tk):
             return
         messagebox.showinfo("Exported", f"Exported {len(self.recipients)} people to:\n{path}")
 
+    def _group_members_or_none(self, email):
+        """The people in group `email`, or None to keep the row as it is: it
+        is not a group, or none of its members could be listed (Outlook's
+        offline address book may not have them yet) - tracking nobody for
+        it would hide that its people never answered."""
+        members, failed, _diag = self.outlook.expand_group_members_detailed(email)
+        if members is None or (not members and failed):
+            return None
+        return members
+
     def _expand_group_recipients(self):
         """Với mỗi dòng trong danh sách hiện tại, kiểm tra xem đó có phải 1
         group email (Exchange Distribution List) không — nếu phải, thay dòng
@@ -1535,7 +1559,10 @@ class RSVPApp(tk.Tk):
                     errors.append(f"{email}: {e}")
                 failed_groups.extend(failed)
                 diag_lines.extend(diag)
-                if members is None:
+                if members is None or (not members and failed):
+                    # Not a group - or a group none of whose members could be
+                    # listed: keep the row, rather than save a list that has
+                    # silently lost everyone in it (the dialog says why).
                     # Không phải group (hoặc không resolve được) -> giữ nguyên dòng gốc
                     key = email.lower()
                     if key not in seen_emails:
@@ -2663,7 +2690,7 @@ class RSVPApp(tk.Tk):
         # address book, so it is passed in rather than imported there.
         return merge_expanded_roster(
             self.recipients if recipients is None else recipients,
-            self.outlook.expand_group_members,
+            self._group_members_or_none,
             cache=self._group_expansion_cache,
         )
 
@@ -4200,6 +4227,9 @@ class RSVPApp(tk.Tk):
                 not re.search(r"\d", new_value) or new_value.startswith(("-", "\u2212"))):
             # Reading it as 0 - or a negative as positive - would silently
             # change what that person paid.
+            if self._paste_refusals is not None:
+                self._paste_refusals.append(new_value)
+                return
             messagebox.showwarning(
                 "Amount not changed",
                 f"“{new_value}” is not an amount someone paid, so the cell was left unchanged.\n\n"
@@ -4209,21 +4239,27 @@ class RSVPApp(tk.Tk):
             info["name"] = new_value
         elif col_name == "vote":
             info["vote"] = new_value
+        # Amounts follow Attend and Free only when they change: pasting back
+        # a row whose ticks are as they were keeps its typed amounts.
         elif col_name == "actual_attend":
-            info["actual_attend"] = attend_value
-            self._sync_attendance_amount(email)
+            if attend_value != (info.get("actual_attend") or ""):
+                info["actual_attend"] = attend_value
+                self._sync_attendance_amount(email)
         elif col_name == "free":
-            info["free"] = truthy
-            # Free exempts the person from every round.
-            self._sync_attendance_amount(email)
-            for r in self._extra_rounds:
-                self._sync_round_amount(email, r["key"])
+            if truthy != bool(info.get("free")):
+                info["free"] = truthy
+                # Free exempts the person from every round.
+                self._sync_attendance_amount(email)
+                for r in self._extra_rounds:
+                    self._sync_round_amount(email, r["key"])
         elif col_name == "amount":
             info["amount"] = parse_amount_from_text(new_value)
         elif col_name.startswith("attend_"):
             key = col_name[len("attend_"):]
-            info.setdefault("extra_attends", {})[key] = attend_value
-            self._sync_round_amount(email, key)
+            attends = info.setdefault("extra_attends", {})
+            if attend_value != (attends.get(key) or ""):
+                attends[key] = attend_value
+                self._sync_round_amount(email, key)
         elif col_name.startswith("extra_"):
             info.setdefault("extra_amounts", {})[col_name[len("extra_"):]] = parse_amount_from_text(new_value)
         self._render_attendance_tree()
@@ -4288,9 +4324,12 @@ class RSVPApp(tk.Tk):
         shown = [iid for iid in self.tree_attendance.get_children() if iid in roster]
         if not shown:
             return
+        # Rows already as the header sets them keep their typed amounts.
         if col_name == "free":
             new_state = not all(roster[iid].get("free") for iid in shown)
             for iid in shown:
+                if bool(roster[iid].get("free")) == new_state:
+                    continue
                 roster[iid]["free"] = new_state
                 self._sync_attendance_amount(iid)
                 for r in self._extra_rounds:
@@ -4298,6 +4337,8 @@ class RSVPApp(tk.Tk):
         elif col_name == "actual_attend":
             value = "No" if all(is_yes(roster[iid].get("actual_attend")) for iid in shown) else "Yes"
             for iid in shown:
+                if roster[iid].get("actual_attend") == value:
+                    continue
                 roster[iid]["actual_attend"] = value
                 self._sync_attendance_amount(iid)
         elif col_name.startswith("attend_"):
@@ -4305,7 +4346,10 @@ class RSVPApp(tk.Tk):
             value = "No" if all(is_yes((roster[iid].get("extra_attends") or {}).get(key))
                                 for iid in shown) else "Yes"
             for iid in shown:
-                roster[iid].setdefault("extra_attends", {})[key] = value
+                attends = roster[iid].setdefault("extra_attends", {})
+                if attends.get(key) == value:
+                    continue
+                attends[key] = value
                 self._sync_round_amount(iid, key)
         else:
             return

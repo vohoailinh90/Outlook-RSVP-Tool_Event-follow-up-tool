@@ -132,6 +132,7 @@ ROUNDS = [
     [("Round 1", "14", "82,000", "70,000", "12,000")],
     [("Round 1", "14", "82,000", "70,000", "12,000"),
      ("Karaoke", "5", "10,000", "13,570", "-3,570")],
+    [("Dinner (tiệc tối)", "3", "0", "0", "0")],   # renamed, wide characters
 ]
 GIFT_ROWS = [("Party", "82,000", "70,000", "12,000"), ("Gift", "0", "3,570", "-3,570")]
 HTML_BODIES = [
@@ -139,6 +140,8 @@ HTML_BODIES = [
     "Totals:\n\n  │ 👥 Attendees │ 💰 Collected\n  ─┼─\n  Round 1 │ 14 │ 82,000\n\nThanks!",
     "Order at https://shop.example.com/item?a=1&b=2. Thanks",
     "A <b>tag</b> & an \"ampersand\"\n――――――――――――――――――――――――――――\nsecond half",
+    "See https://example.com/a), (https://example.com/b). 詳細：https://example.com/c。",
+    "  Round │ Link\n  ─┼─\n  A & B │ https://example.com/r?x=1&y=2",
 ]
 MERGE_CONSTANTS = ["THANKYOU_LABELS", "GIFT_REPORT_LABELS"]
 
@@ -164,6 +167,19 @@ def _merge_calls():
                     contributor_count="7", total_amount="35,000", gift_name="",
                     gift_link="", gift_price="", summary_rows=[GIFT_ROWS[1]],
                     link_event=False, gift_remaining="35,000"))
+        # A gift item without a link, not added to the event's money.
+        yield ("build_gift_report_body_item_no_link", "build_gift_report_body", (L,),
+               dict(guest_of_honor=G["guest_of_honor"], event_name=E["event_name"],
+                    contributor_count="7", total_amount="35,000", gift_name="Speaker",
+                    gift_link="", gift_price="3,570", summary_rows=[GIFT_ROWS[1]],
+                    link_event=False, gift_remaining="31,430"))
+        # Added to the event's money with no gift item chosen yet.
+        yield ("build_gift_report_body_linked_no_item", "build_gift_report_body", (L,),
+               dict(guest_of_honor=G["guest_of_honor"], event_name=E["event_name"],
+                    contributor_count="0", total_amount="0", gift_name="",
+                    gift_link="", gift_price="", summary_rows=GIFT_ROWS,
+                    grand_collected="82,000", grand_paid="70,000", grand_remaining="12,000",
+                    link_event=True, gift_remaining="0"))
     for i, body in enumerate(HTML_BODIES):
         yield f"text_body_to_html_{i}", "text_body_to_html", (body,), {}
 

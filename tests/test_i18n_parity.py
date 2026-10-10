@@ -112,14 +112,28 @@ def test_the_replaced_builders_match_their_pin(merge_golden):
         "the change is meant.")
 
 
-def test_the_pin_notices_a_changed_builder(merge_golden, monkeypatch):
-    """The pin must not be blind: change one line of one builder and require
-    the comparison above to report it."""
+@pytest.mark.parametrize("name, old, new", [
+    ("build_thankyou_body", "Thanks again", "Thanks"),
+    ("build_gift_report_body", "3,570", "3570"),
+    ("text_body_to_html", "<a href=", "<a target=_blank href="),
+    ("text_body_to_html", "&amp;", "&"),
+])
+def test_the_pin_notices_a_changed_builder(merge_golden, monkeypatch, name, old, new):
+    """The pin must not be blind: change one detail of one builder's output
+    and require the comparison above to report it."""
     import rsvp.i18n as i18n
-    original = i18n.build_thankyou_body
-    monkeypatch.setattr(i18n, "build_thankyou_body",
-                        lambda *a, **kw: original(*a, **kw).replace("Thanks again", "Thanks"))
-    assert _merge_differences(merge_golden, build_merge_snapshot())
+    original = getattr(i18n, name)
+    outputs = []
+
+    def changed(*a, **kw):
+        out = original(*a, **kw)
+        outputs.append(out)
+        return out.replace(old, new)
+
+    monkeypatch.setattr(i18n, name, changed)
+    differences = _merge_differences(merge_golden, build_merge_snapshot())
+    assert any(old in out for out in outputs), f"{old!r} never rendered: the change tested nothing"
+    assert differences and all(k.startswith(f"{name}_") for k in differences)
 
 
 FORBIDDEN = ("tkinter", "tkcalendar", "pythoncom", "win32com", "openpyxl")

@@ -313,3 +313,116 @@ def test_pasting_a_blank_attend_leaves_it_untouched(app):
     assert app._attendance_roster["alice@example.com"]["actual_attend"] == ""
     app._commit_attendance_edit("alice@example.com", "actual_attend", "Maybe")
     assert app._attendance_roster["alice@example.com"]["actual_attend"] == "No"
+
+
+def test_a_group_none_of_whose_members_could_be_listed_keeps_its_row(app):
+    """Second review: replacing such a group by nobody saved a list that had
+    silently lost everyone in it. The row stays and the dialog says why."""
+    app.recipients = [("Team", "team@example.com"), ("Dee Example", "dee@example.com")]
+    app.fake.groups["team@example.com"] = ([], ["Team"], ["Team: 0 members listed"])
+    app._expand_group_recipients()
+    app.update()
+    assert app.recipients == [("Team", "team@example.com"), ("Dee Example", "dee@example.com")]
+    assert "Team" in app.dialogs[-1][2]
+
+
+def test_response_tracking_keeps_a_group_whose_members_could_not_be_listed(app):
+    """Tab 4 follows the same rule: a group it cannot list stays one row to
+    chase, rather than vanishing from "not responded"."""
+    app.fake.groups["team@example.com"] = ([], ["Team"], [])
+    app.fake.groups["club@example.com"] = ([("Person A", "a@example.com")], [], [])
+    roster = app._build_effective_roster([("Team", "team@example.com"), ("Club", "club@example.com")])
+    assert roster == [("Team", "team@example.com"), ("Person A", "a@example.com")]
+
+
+def _press(widget, sequence):
+    widget.focus_force()
+    widget.update()
+    widget.event_generate(sequence)
+    widget.update()
+
+
+def test_a_paste_reports_the_cells_it_refused_once(app):
+    """One dialog for the whole paste, not one per refused cell - and every
+    refused amount is left as it was."""
+    _attendance(app)
+    tree = app.tree_attendance
+    rows = list(tree.get_children())
+    for iid in rows:
+        app._commit_attendance_edit(iid, "amount", "2,000")
+    app._render_attendance_tree()
+    tree.selection_set(rows[0])
+    shown = app._tree_display_columns(tree)
+    amount_at = shown.index("amount")
+    lines = []
+    for iid in rows:
+        cells = [tree.set(iid, c) for c in shown]
+        cells[amount_at] = "abc"
+        lines.append("\t".join(cells))
+    tree.clipboard_clear()
+    tree.clipboard_append("\n".join(lines))
+    before = len(app.dialogs)
+
+    _press(tree, "<Control-v>")
+
+    assert [d[1] for d in app.dialogs[before:]] == ["Some cells not changed"]
+    assert f"{len(rows)} pasted value(s)" in app.dialogs[-1][2]
+    assert all(app._attendance_roster[iid]["amount"] == 2000.0 for iid in rows)
+    app._commit_attendance_edit(rows[0], "amount", "abc")   # typed again: its own dialog
+    assert app.dialogs[-1][1] == "Amount not changed"
+
+
+def test_a_rounds_attend_header_ticks_everyone_and_fills_their_amounts(app, monolith, monkeypatch):
+    _attendance(app)
+    key = _add_round(app, monolith, monkeypatch, "Karaoke")
+    header = app.tree_attendance.heading(f"attend_{key}", "command")
+    shown = [iid for iid in app.tree_attendance.get_children() if iid in app._attendance_roster]
+    assert shown
+
+    app.tk.call(header)
+    app.update()
+    saved = db.load_attendance_roster("EV1", app.db_path)
+    assert {e: (saved[e]["extra_attends"][key], saved[e]["extra_amounts"][key]) for e in shown} == {
+        e: ("Yes", 3000.0) for e in shown}
+
+    app.tk.call(header)
+    app.update()
+    saved = db.load_attendance_roster("EV1", app.db_path)
+    assert {saved[e]["extra_attends"][key] for e in shown} == {"No"}
+
+
+def test_copy_follows_the_column_order_shown_on_tab_7(app):
+    _start_event(app)
+    _select(app, app.tab_history)
+    order = list(app.tree_history["columns"])
+    order.insert(0, order.pop(order.index("EventName")))
+    app._on_history_columns_reordered(order)
+    app._apply_history_column_order()
+    tree = app.tree_history
+    row = next(iid for iid in tree.get_children() if tree.set(iid, "EventID") == "EV1")
+    tree.selection_set(row)
+
+    _press(tree, "<Control-c>")
+
+    assert tree.clipboard_get().split("\t")[:2] == ["Party", "EV1"]
+
+
+def test_a_typed_amount_stays_until_attend_or_free_really_changes(app, monolith, monkeypatch):
+    """Pasting back a copied row re-commits its unchanged ✅/⬜ cells; that
+    used to reset every typed amount to the budget."""
+    _attendance(app)
+    key = _add_round(app, monolith, monkeypatch, "Karaoke")
+    app._commit_attendance_edit("alice@example.com", f"attend_{key}", "Yes")
+    app._commit_attendance_edit("alice@example.com", "amount", "2,000")
+    app._commit_attendance_edit("alice@example.com", f"extra_{key}", "1,000")
+    alice = app._attendance_roster["alice@example.com"]
+    attend = alice["actual_attend"]
+
+    app._commit_attendance_edit("alice@example.com", "actual_attend", "✅" if attend == "Yes" else "⬜")
+    app._commit_attendance_edit("alice@example.com", "free", "⬜")
+    app._commit_attendance_edit("alice@example.com", f"attend_{key}", "✅")
+    app.tk.call(app.tree_attendance.heading(f"attend_{key}", "command"))   # ticks the others
+    assert (alice["amount"], alice["extra_amounts"][key]) == (2000.0, 1000.0)
+
+    app._commit_attendance_edit("alice@example.com", "free", "✅")
+    assert (alice["amount"], alice["extra_amounts"][key]) == (0.0, 0.0)

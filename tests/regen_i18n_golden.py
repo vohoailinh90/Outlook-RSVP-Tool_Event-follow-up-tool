@@ -19,6 +19,9 @@ from tests.i18n_snapshot import build_snapshot
 GOLDEN = Path(__file__).parent / "golden" / "i18n_snapshot.json"
 
 if __name__ == "__main__":
+    raise SystemExit(
+        "tests/golden/i18n_snapshot.json is the frozen phase-1 record; regenerate "
+        "tests/golden/i18n_merge_snapshot.json instead (python -m tests.regen_i18n_merge_golden).")
     snap = build_snapshot()
     bad = {k: v for k, v in snap.items() if v.startswith("!!")}
     if bad:
