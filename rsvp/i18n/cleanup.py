@@ -263,16 +263,16 @@ def parse_bilingual_reply(text):
 # date, an amount or a deadline reaches colleagues as written, and the buttons
 # Outlook shows are always Yes, No and Maybe.
 # A sign belongs to a number when it is attached to it and does not follow a
-# letter, digit or another sign: "-500", "¥-500" and the "+81" of a phone
+# letter, digit, percent sign ("50%-60%" is a range) or another sign: "-500", "¥-500" and the "+81" of a phone
 # number keep theirs, while the hyphens of "2026-12-20" or "10-12" are not
 # signs.
 # Thousands are grouped with commas or, as in Vietnamese and European
 # amounts, with dots: "3,000", "3.000" and "3000" are one number. A dot
 # before anything but three digits ("12.20", "1.5") does not group.
-_NUMBER = re.compile(r"((?<![\w+-])[+-])?([1-9]\d{0,2}(?:\.\d{3})+(?!\.?\d)|\d+(?:,\d{3})*)")
+_NUMBER = re.compile(r"((?<![\w%+-])[+-])?([1-9]\d{0,2}(?:\.\d{3})+(?!\.?\d)|\d+(?:,\d{3})*)")
 # A sign written before a currency symbol is the amount's: "-¥500" is ¥-500.
 # Only one written against the symbol: in "$10 - $20" the hyphen is a dash.
-_SIGN_BEFORE_SYMBOL = re.compile(r"(?<![\w+-])([+-])(US\$|[¥$€₫])[ \t]?(?=\d)")
+_SIGN_BEFORE_SYMBOL = re.compile(r"(?<![\w%+-])([+-])(US\$|[¥$€₫])[ \t]?(?=\d)")
 
 
 def _normalized(text):
@@ -328,7 +328,7 @@ _LATIN = "A-Za-z\u00c0-\u1ef9"
 # Grouped as in _NUMBER; a comma that does not group thousands is a decimal
 # mark ("12,5 EUR" is 12.5, "1.000,50 €" 1000.50).
 _DIGITS = r"[1-9]\d{0,2}(?:\.\d{3})+(?:,\d+)?(?!\.?\d)|\d+(?:,\d{3})*(?:[.,]\d+)?"
-_AMOUNT = rf"((?<![\w+-])[+-])?(?<![\d.,])({_DIGITS})(?![\d.,]*\d)"
+_AMOUNT = rf"((?<![\w%+-])[+-])?(?<![\d.,])({_DIGITS})(?![\d.,]*\d)"
 _SYMBOL_FIRST = re.compile(rf"(?<![{_LATIN}\d])({_units(lambda u: _is_symbol(u) and u != '%')})"
                            rf"[ \t]?{_AMOUNT}",
                            re.IGNORECASE)   # "20€ 30€": the first € is the 20's

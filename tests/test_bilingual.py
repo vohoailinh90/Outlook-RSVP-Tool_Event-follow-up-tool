@@ -356,6 +356,9 @@ def test_an_amount_in_another_currency_is_reported(copied, translated, extras):
     ("3,000〜5,000円", "¥3,000–5,000", []),
     ("JPY 500-1,000", "500〜1,000円", []),
     ("10-20%", "10〜20パーセント", []),
+    # Found by Codex review: the dash after a percent sign is a range, not a minus.
+    ("Discount 50%-60%", "Discount 50% to 60%", []),
+    ("Discount 50%-60%", "Discount 50% to -60%", ["60"]),
     ("3,000〜5,000円", "3,000-5,000", ["3000 JPY", "5000 JPY"]),
     # Found in review: the next amount's symbol is not a range's unit.
     ("Date 2026-12-20 ¥500", "日付 2026/12/20 ¥500", []),
