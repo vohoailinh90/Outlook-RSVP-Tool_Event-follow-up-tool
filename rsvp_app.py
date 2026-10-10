@@ -4194,12 +4194,23 @@ class RSVPApp(tk.Tk):
         info = self._attendance_roster[email]
         new_value = new_value.strip()
         truthy = new_value.lower() in TRUTHY
+        # An empty Attend stays empty (not attending is "No", not blank).
+        attend_value = "Yes" if truthy else ("No" if new_value else "")
+        if (col_name == "amount" or col_name.startswith("extra_")) and new_value and (
+                not re.search(r"\d", new_value) or new_value.startswith(("-", "\u2212"))):
+            # Reading it as 0 - or a negative as positive - would silently
+            # change what that person paid.
+            messagebox.showwarning(
+                "Amount not changed",
+                f"“{new_value}” is not an amount someone paid, so the cell was left unchanged.\n\n"
+                "Type just the figure (e.g. 6000 or 6,000), or clear the cell for 0.")
+            return
         if col_name == "name":
             info["name"] = new_value
         elif col_name == "vote":
             info["vote"] = new_value
         elif col_name == "actual_attend":
-            info["actual_attend"] = "Yes" if truthy else "No"
+            info["actual_attend"] = attend_value
             self._sync_attendance_amount(email)
         elif col_name == "free":
             info["free"] = truthy
@@ -4211,7 +4222,7 @@ class RSVPApp(tk.Tk):
             info["amount"] = parse_amount_from_text(new_value)
         elif col_name.startswith("attend_"):
             key = col_name[len("attend_"):]
-            info.setdefault("extra_attends", {})[key] = "Yes" if truthy else "No"
+            info.setdefault("extra_attends", {})[key] = attend_value
             self._sync_round_amount(email, key)
         elif col_name.startswith("extra_"):
             info.setdefault("extra_amounts", {})[col_name[len("extra_"):]] = parse_amount_from_text(new_value)

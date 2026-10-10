@@ -294,3 +294,22 @@ def test_working_on_an_event_with_no_tracked_money_keeps_its_typed_figures(app):
     app.update()
     row = _row(app, "OLD1")
     assert (row["AmountPaid"], row["TotalIncome"], row["Balance"]) == ("100", "9,999", "500")
+
+
+@pytest.mark.parametrize("typed", ["abc", "-500"])
+def test_an_amount_cell_refuses_what_is_not_a_paid_amount(app, typed):
+    """Review finding: parse_amount_from_text read "-500" as 500 and "abc"
+    as 0, silently changing what someone paid."""
+    _attendance(app)
+    app._commit_attendance_edit("alice@example.com", "amount", "2,000")
+    app._commit_attendance_edit("alice@example.com", "amount", typed)
+    assert app._attendance_roster["alice@example.com"]["amount"] == 2000.0
+    assert app.dialogs[-1][1] == "Amount not changed"
+
+
+def test_pasting_a_blank_attend_leaves_it_untouched(app):
+    _attendance(app)
+    app._commit_attendance_edit("alice@example.com", "actual_attend", "")
+    assert app._attendance_roster["alice@example.com"]["actual_attend"] == ""
+    app._commit_attendance_edit("alice@example.com", "actual_attend", "Maybe")
+    assert app._attendance_roster["alice@example.com"]["actual_attend"] == "No"

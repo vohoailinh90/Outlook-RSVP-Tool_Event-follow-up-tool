@@ -410,3 +410,21 @@ class TestSignedAmountAndFund:
 
     def test_an_unreadable_balance_makes_every_later_total_unknown(self):
         assert money.running_fund(["500", "five", "100"]) == [500.0, None, None]
+
+
+class TestReviewFixes:
+    """From the critical review of the lineage merge."""
+
+    def test_dot_grouped_thousands_are_reported_not_read_as_decimals(self):
+        # "9.930" is 9,930 written the Vietnamese way; 9.93 would put every
+        # later Dept. Fund Left out by about ten thousand.
+        assert money.parse_signed_amount("9.930") is None
+        assert money.running_fund(["500", "9.930", "1"]) == [500.0, None, None]
+        assert money.parse_signed_amount("12.5") == 12.5
+
+    def test_a_typed_refund_keeps_its_minus(self):
+        assert money.parse_typed_amount("-500") == -500.0
+        assert money.parse_typed_amount("−3,570 JPY") == -3570.0
+        assert money.parse_typed_amount("1,500 JPY") == 1500.0
+        figures = money.payment_rounds([], "Round 1", "-500", [])
+        assert (figures[0].paid, figures[0].remaining) == (-500.0, 500.0)

@@ -288,14 +288,27 @@ def parse_signed_amount(text):
     """An amount this app wrote ("8,430", "-3,570", "−3,570", "(3,570)"),
     sign included. None for anything else, so a hand-typed value that is not
     such a number is reported instead of being read as 0 - or, worse, as a
-    positive number found somewhere in the text. Empty text is 0.0."""
+    positive number found somewhere in the text. Empty text is 0.0.
+
+    Exactly three digits after a dot ("9.930") is None too: that is how
+    thousands are grouped in Vietnamese and German, and reading it as 9.93
+    would put every running total after it out by about ten thousand."""
     if text is None or not str(text).strip():
         return 0.0
     match = _SIGNED_AMOUNT.match(str(text))
-    if not match:
+    if not match or len(match.group(3) or "") == 4:
         return None
     value = float(match.group(2).replace(",", "") + (match.group(3) or ""))
     return -value if match.group(1) else value
+
+
+def parse_typed_amount(text):
+    """An amount typed by hand, keeping a leading minus ("-500" is a refund,
+    not 500): parse_amount_from_text finds the number, the sign is read
+    from the text before it."""
+    value = parse_amount_from_text(text)
+    head = str(text or "").strip()
+    return -value if value and head[:1] in ("-", "\u2212") else value
 
 
 def amount_for(attending, free, budget):
@@ -341,14 +354,14 @@ def payment_rounds(roster, round1_label, round1_paid, rounds):
         None, round1_label,
         sum(1 for info in people if is_yes(info.get("actual_attend"))),
         sum(info.get("amount", 0.0) or 0.0 for info in people),
-        parse_amount_from_text(round1_paid))]
+        parse_typed_amount(round1_paid))]
     for r in rounds:
         key = r["key"]
         figures.append(RoundFigures(
             key, r.get("label") or key,
             sum(1 for info in people if is_yes((info.get("extra_attends") or {}).get(key))),
             sum((info.get("extra_amounts") or {}).get(key, 0.0) or 0.0 for info in people),
-            parse_amount_from_text(r.get("amount_paid"))))
+            parse_typed_amount(r.get("amount_paid"))))
     return figures
 
 
