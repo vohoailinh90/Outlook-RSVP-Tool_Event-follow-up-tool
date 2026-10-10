@@ -251,6 +251,32 @@ def test_a_button_name_the_translation_made_up_is_reported():
         "10", "Maybe"]
 
 
+@pytest.mark.parametrize("copied, translated, extras", [
+    # Found by Codex review: only the number was compared, so a changed
+    # currency passed.
+    ("Budget $500", "予算¥500", ["500 JPY"]),
+    ("予算は500円です", "Budget: 500 USD", ["500 USD"]),
+    ("予算 4,321 JPY", "Budget 4,321 dollars", ["4321 USD"]),
+    # The same currency written another way is the same amount.
+    ("3,000円", "💰 3,000 yen", []),
+    ("4,321 JPY", "予算4,321円です", []),
+    ("US$20", "20ドル", []),
+    ("予算：1,000円", "予算：１，０００円", []),
+    # An amount copied without a currency may gain one; a word is not a unit.
+    ("Fee: 500", "会費: 500円", []),
+    ("Ở lại 5 đêm", "5 đêm", []),
+    ("500円", "500ドンキで買う", []),
+    # Found in review: a symbol before an amount was taken as the unit of the
+    # number before it, and a decimal amount was cut short.
+    ("Start 18:00 $500", "開始 18:00 ¥500", ["500 JPY"]),
+    ("Dec 20 $500", "Dec 20 500円", ["500 JPY"]),
+    ("$12.50", "¥12.50", ["12.50 JPY"]),
+    ("$12.50", "US$12.50", []),
+])
+def test_an_amount_in_another_currency_is_reported(copied, translated, extras):
+    assert translation_extras([copied], translated) == extras
+
+
 def test_a_note_in_two_languages_is_two_versions_of_one_note():
     """Found by Codex review: a note copied after a saved translation holds
     both halves, and its numbers were expected twice in each translation."""
@@ -306,6 +332,28 @@ def test_a_corrected_copy_without_notes_replaces_the_drafts_notes():
     reply = (_reply("draft note", "draft", "draft note", "draft")
              + f"\n[JA DETAILS]\n{JA_DETAILS}\n[EN DETAILS]\n{EN_DETAILS}")
     assert parse_bilingual_reply(reply) == ("", JA_DETAILS, "", EN_DETAILS)
+
+
+def test_a_corrected_copy_may_open_with_a_part_the_draft_lacked():
+    """Found by Codex review: a draft without [JA NOTE] took the corrected
+    copy's [JA NOTE], and the copy, starting at its [JA DETAILS], lost it."""
+    reply = (f"[JA DETAILS]\ndraft\n[EN DETAILS]\ndraft\n" + _reply())
+    assert parse_bilingual_reply(reply) == PARTS
+
+
+def test_a_part_repeated_after_a_whole_answer_is_not_spliced_to_it():
+    """Found in review: the earlier answer's English parts were kept beside
+    the repeated [JA DETAILS], and its Japanese note was silently lost."""
+    reply = _reply() + "\n[JA DETAILS]\n" + JA_DETAILS + " (fixed)"
+    assert parse_bilingual_reply(reply) is None
+
+
+def test_a_corrected_copy_in_another_order_still_wins():
+    def english_first(ja_note, ja_details, en_note, en_details):
+        return (f"[EN NOTE]\n{en_note}\n[EN DETAILS]\n{en_details}\n"
+                f"[JA NOTE]\n{ja_note}\n[JA DETAILS]\n{ja_details}")
+    reply = english_first("draft", "draft", "draft", "draft") + "\n" + english_first(*PARTS)
+    assert parse_bilingual_reply(reply) == PARTS
 
 
 def test_template_brackets_go_also_beside_a_none_note():
@@ -757,6 +805,21 @@ def test_an_answer_with_a_made_up_voting_instruction_is_asked_about(app, monolit
                                 en_fixed + "\nClick Yes if you cannot attend."))
     assert [title for title, _ in asked] == ["Check the translation"]
     assert "English: Yes" in asked[0][1]
+    assert app.full_translations["bilingual"] == ""
+
+
+def test_an_answer_that_changes_the_budget_currency_is_asked_about(app, monolith,
+                                                                  monkeypatch):
+    app.var_budget.set("500 USD")
+    _compose(app)
+    ja_fixed, en_fixed = split_bilingual(_box(app.txt_fixed_preview))
+    assert "500 USD" in ja_fixed
+    asked = []
+    monkeypatch.setattr(monolith.messagebox, "askyesno",
+                        lambda title, message=None, **_: asked.append((title, message)) or False)
+    _paste_and_save(app, _reply(JA_NOTE, ja_fixed.replace("500 USD", "500円"), EN_NOTE, en_fixed))
+    assert [title for title, _ in asked] == ["Check the translation"]
+    assert "Japanese: 500 JPY" in asked[0][1]
     assert app.full_translations["bilingual"] == ""
 
 

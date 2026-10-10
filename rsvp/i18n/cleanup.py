@@ -163,6 +163,7 @@ def _marker_key(marker):
     return ("ja" if marker.group("ja") else "en", "note" if marker.group("note") else "details")
 
 
+_PART_ORDER = (("ja", "note"), ("ja", "details"), ("en", "note"), ("en", "details"))
 # The parts that may follow each part, in the order the prompt asks for.
 _NEXT_PARTS = {
     ("ja", "note"): {("ja", "details")},
@@ -208,7 +209,8 @@ def parse_bilingual_reply(text):
     are dropped only when every part kept them - one part written as <TBD>
     is the text itself. A part named a second time starts a later copy, which
     replaces the whole earlier answer - parts it leaves out included - as
-    dedupe_pasted_translation() keeps the later copy. Text Copilot adds after
+    dedupe_pasted_translation() keeps the later copy, which may open with a
+    part the earlier one lacked. Text Copilot adds after
     the last part stays in it: the app shows the result for checking before
     anything is sent."""
     text = text or ""
@@ -227,14 +229,30 @@ def parse_bilingual_reply(text):
     if texts and all(_unwrapped(part) is not None for part in texts):
         raw = [(key, _unwrapped(part) if _unwrapped(part) is not None else part)
                for key, part in raw]
-    found = {}
+    kept = []
     for key, part in raw:
-        if key in found:
-            found = {}  # a part named again starts a later copy, which replaces all of the earlier one
         if key[1] == "note" and _is_no_note(part):
             part = ""
         if part or key[1] == "note":
-            found[key] = part
+            kept.append((key, part))
+    # A part named again starts a later copy. The copy may begin just before
+    # that part, with parts the earlier one lacked ([JA NOTE] after a draft
+    # that skipped it) - as far back as the parts at the end name none twice
+    # and keep the prompt's order. A part repeated after a whole answer
+    # ([JA DETAILS] again after [EN DETAILS]) is out of that order, so the
+    # earlier answer's other parts are not spliced to it.
+    repeat, seen, distinct, last_seen = 0, set(), 0, {}
+    for i, (key, _) in enumerate(kept):
+        if key in seen:
+            repeat, seen = i, set()
+        seen.add(key)
+        if key in last_seen:
+            distinct = max(distinct, last_seen[key] + 1)
+        last_seen[key] = i
+    in_order = len(kept) - 1
+    while in_order > 0 and _PART_ORDER.index(kept[in_order - 1][0]) < _PART_ORDER.index(kept[in_order][0]):
+        in_order -= 1
+    found = dict(kept[min(repeat, max(distinct, in_order)):])
     if not found.get(("ja", "details")) or not found.get(("en", "details")):
         return None
     return (found.get(("ja", "note"), ""), found[("ja", "details")],
@@ -257,6 +275,35 @@ _CLOCK_TIME = re.compile(r"(午前|午後)?\s*(?<!\d)(\d{1,2}):(\d{2})(?!\d)" + 
 _JA_TIME = re.compile(r"(午前|午後)?(?<!\d)(\d{1,2})時(?!間)(?:(\d{1,2})分|(半))?")   # 3時間 is a duration
 _HOUR_MERIDIEM = re.compile(r"(?<![\d:])(\d{1,2})" + _MERIDIEM)
 _BUTTONS = ("Yes", "No", "Maybe")
+# A currency written next to an amount, by code. An amount whose unit Copilot
+# changed ("¥500" for "$500") keeps its number, so only the unit tells.
+_CURRENCIES = {
+    "JPY": ("¥", "円", "yen", "JPY"),
+    "USD": ("US$", "$", "USD", "dollars", "dollar", "ドル"),
+    "EUR": ("€", "EUR", "euros", "euro", "ユーロ"),
+    "VND": ("₫", "đồng", "đ", "VND", "ドン"),
+}
+_CURRENCY_CODE = {unit.lower(): code for code, units in _CURRENCIES.items() for unit in units}
+
+
+def _units(keep):
+    # Longest first; a katakana unit is not the start of a longer word (ドンキ).
+    units = sorted((unit for unit in _CURRENCY_CODE if keep(unit)), key=len, reverse=True)
+    return "|".join(re.escape(unit) + ("(?![ァ-ヶー])" if re.fullmatch("[ァ-ヶー]+", unit) else "")
+                    for unit in units)
+
+
+# A unit is not part of a Latin or Vietnamese word ("S$", "5 đêm"); next to
+# Japanese text it still counts ("予算¥500", "500円です"). An amount is the
+# whole number, decimals included, never the end of "12.50" or "300.000".
+_LATIN = "A-Za-z\u00c0-\u1ef9"
+_AMOUNT = r"(?<![\d.,])(\d+(?:,\d{3})*(?:\.\d+)?)(?![\d.,]*\d)"
+_SYMBOL_FIRST = re.compile(rf"(?<![{_LATIN}])({_units(lambda u: not u.isalpha())}){_AMOUNT}",
+                           re.IGNORECASE)
+_UNIT_AFTER = re.compile(rf"{_AMOUNT}[ \t]?({_units(lambda u: True)})(?![{_LATIN}])",
+                         re.IGNORECASE)
+_CODE_FIRST = re.compile(rf"(?<![{_LATIN}])({'|'.join(_CURRENCIES)})"
+                         rf"[ \t]?{_AMOUNT}", re.IGNORECASE)
 
 
 def _numbers(text):
@@ -287,6 +334,23 @@ def _button_names(text):
     return Counter({b: len(re.findall(rf"(?<![A-Za-z]){b}(?![A-Za-z])", text)) for b in _BUTTONS})
 
 
+def _priced(text):
+    """Each (amount, currency code) written in the text: "¥500", "500円",
+    "500 yen" and "JPY 500" are all ("500", "JPY"). A symbol right before an
+    amount is taken first, so in "18:00 $500" the $ is the 500's."""
+    pairs = set()
+
+    def take(amount, unit):
+        amount = amount.replace(",", "")
+        pairs.add((amount if "." in amount else str(int(amount)), _CURRENCY_CODE[unit.lower()]))
+        return " "
+    text = unicodedata.normalize("NFKC", text)
+    text = _SYMBOL_FIRST.sub(lambda m: take(m[2], m[1]), text)
+    text = _UNIT_AFTER.sub(lambda m: take(m[1], m[2]), text)
+    _CODE_FIRST.sub(lambda m: take(m[2], m[1]), text)
+    return pairs
+
+
 def _number_order(n):
     return (0, int(n), n) if ":" not in n else (1, 0, n)
 
@@ -313,16 +377,27 @@ def translation_extras(texts, translated):
     list of versions of one text (the Japanese and English halves of the
     fixed part), whose values count as often as the version that has them
     most - so a number only one half has ("3 BUTTONS" in English only) is not
-    an invention. Like translation_gaps(), a check rather than a judgement: a
-    plain English "No" ("No parking") that the copied text did not have is
-    reported for a person to look at."""
+    an invention. An amount given in another currency than the copied text
+    gives it ("¥500" for "$500") is reported as "500 JPY"; one the copied
+    text gives without a currency may gain one. Like translation_gaps(), a
+    check rather than a judgement: a plain English "No" ("No parking") that
+    the copied text did not have is reported for a person to look at."""
     extra = {}
     for count in (_numbers, _button_names):
         allowed = Counter()
         for text in texts:
             allowed += _counted(text, count)
         extra[count] = count(translated) - allowed
+    currencies = {}
+    for text in texts:
+        for version in (text if isinstance(text, (list, tuple)) else [text]):
+            for amount, code in _priced(version):
+                currencies.setdefault(amount, set()).add(code)
+    changed = sorted(((amount, code) for amount, code in _priced(translated)
+                      if amount in currencies and code not in currencies[amount]),
+                     key=lambda pair: (float(pair[0]), pair[1]))
     return (_listed(extra[_numbers], key=lambda item: _number_order(item[0]))
+            + [f"{amount} {code}" for amount, code in changed]
             + _listed(extra[_button_names], key=lambda item: _BUTTONS.index(item[0])))
 
 
