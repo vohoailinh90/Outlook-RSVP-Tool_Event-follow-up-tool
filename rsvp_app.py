@@ -2528,9 +2528,11 @@ class RSVPApp(tk.Tk):
         ]
         gaps = [(label, missing) for label, missing in gaps if missing]
         copied_texts = [note_versions, [ja_source, en_source]]
-        extras = [(label, translation_extras(copied_texts, part)) for label, part in (
-            ("Japanese note", ja_note), ("Japanese details", ja_details),
-            ("English note", en_note), ("English details", en_details))]
+        # Each language's whole translation against all that was copied: a
+        # value moved into the note from the details is then counted twice.
+        extras = [(label, translation_extras(copied_texts, f"{note}\n{details}"))
+                  for label, note, details in (("Japanese", ja_note, ja_details),
+                                               ("English", en_note, en_details))]
         extras = [(label, added) for label, added in extras if added]
         if gaps or extras:
             findings = []

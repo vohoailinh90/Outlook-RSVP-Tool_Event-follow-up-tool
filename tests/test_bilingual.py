@@ -181,6 +181,9 @@ def test_angle_brackets_that_belong_to_the_text_are_kept():
     ("Start 6:00 PM", "開始 18:00", []),
     ("午後6時開始", "Starts at 6 p.m.", []),
     ("10:30 a.m.", "午前10時半", []),
+    # Found by Codex review: 3時間 is a duration, not 3:00.
+    ("所要時間は3時間です", "It takes 3 hours", []),
+    ("It takes 3 hours", "所要時間は3時間です", []),
     ("12:00 PM lunch", "正午 12:00", []),
     # Found by Codex review: zero was left out everywhere, so a lost budget
     # of 0 went unnoticed.
@@ -696,8 +699,39 @@ def test_an_answer_with_a_made_up_amount_is_asked_about(app, monolith, monkeypat
                         lambda title, message=None, **_: asked.append((title, message)) or False)
     _paste_and_save(app, _reply(JA_NOTE, ja_fixed + "\n予算 98,765円", EN_NOTE, en_fixed))
     assert [title for title, _ in asked] == ["Check the translation"]
-    assert "nowhere in the text you copied" in asked[0][1] and "Japanese details: 98765" in asked[0][1]
+    assert "nowhere in the text you copied" in asked[0][1] and "Japanese: 98765" in asked[0][1]
     assert app.full_translations["bilingual"] == ""
+
+
+def test_a_value_copied_from_the_details_into_the_note_is_asked_about(app, monolith,
+                                                                     monkeypatch):
+    """Found by Codex review: each part was allowed every number copied, so a
+    budget repeated in the note passed."""
+    app.var_budget.set("4,321 JPY")
+    _compose(app, note="Please bring cash.")
+    ja_fixed, en_fixed = split_bilingual(_box(app.txt_fixed_preview))
+    asked = []
+    monkeypatch.setattr(monolith.messagebox, "askyesno",
+                        lambda title, message=None, **_: asked.append((title, message)) or False)
+    _paste_and_save(app, _reply("現金4,321円をお持ちください。", ja_fixed,
+                                "Please bring cash.", en_fixed))
+    titles = [title for title, _ in asked]
+    assert "Check the translation" in titles
+    assert "Japanese: 4321" in asked[titles.index("Check the translation")][1]
+
+
+def test_a_value_in_both_the_note_and_the_details_is_not_asked_about(app, monolith,
+                                                                     monkeypatch):
+    app.var_budget.set("4,321 JPY")
+    _compose(app, note="Please bring 4,321 yen in cash.")
+    ja_fixed, en_fixed = split_bilingual(_box(app.txt_fixed_preview))
+    asked = []
+    monkeypatch.setattr(monolith.messagebox, "askyesno",
+                        lambda title, message=None, **_: asked.append((title, message)) or False)
+    _paste_and_save(app, _reply("現金4,321円をお持ちください。", ja_fixed,
+                                "Please bring 4,321 yen in cash.", en_fixed))
+    assert asked == []
+    assert "4,321" in app.full_translations["bilingual"]
 
 
 def test_an_answer_that_loses_a_date_is_asked_about(app, monolith, monkeypatch):
