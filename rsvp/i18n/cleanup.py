@@ -278,10 +278,10 @@ _BUTTONS = ("Yes", "No", "Maybe")
 # A currency written next to an amount, by code. An amount whose unit Copilot
 # changed ("¥500" for "$500") keeps its number, so only the unit tells.
 _CURRENCIES = {
-    "JPY": ("¥", "円", "yen", "JPY"),
-    "USD": ("US$", "$", "USD", "dollars", "dollar", "ドル"),
+    "JPY": ("¥", "円", "日本円", "yen", "Japanese yen", "JPY"),
+    "USD": ("US$", "$", "USD", "dollars", "dollar", "US dollars", "US dollar", "ドル", "米ドル"),
     "EUR": ("€", "EUR", "euros", "euro", "ユーロ"),
-    "VND": ("₫", "đồng", "đ", "VND", "ドン"),
+    "VND": ("₫", "đồng", "đ", "dong", "Vietnamese dong", "VND", "ドン"),
 }
 _CURRENCY_CODE = {unit.lower(): code for code, units in _CURRENCIES.items() for unit in units}
 
@@ -289,8 +289,12 @@ _CURRENCY_CODE = {unit.lower(): code for code, units in _CURRENCIES.items() for 
 def _units(keep):
     # Longest first; a katakana unit is not the start of a longer word (ドンキ).
     units = sorted((unit for unit in _CURRENCY_CODE if keep(unit)), key=len, reverse=True)
-    return "|".join(re.escape(unit) + ("(?![ァ-ヶー])" if re.fullmatch("[ァ-ヶー]+", unit) else "")
+    return "|".join(re.escape(unit) + ("(?![ァ-ヶー])" if re.search("[ァ-ヶー]$", unit) else "")
                     for unit in units)
+
+
+def _is_symbol(unit):
+    return any(not (c.isalpha() or c.isspace()) for c in unit)
 
 
 # A unit is not part of a Latin or Vietnamese word ("S$", "5 đêm"); next to
@@ -298,10 +302,10 @@ def _units(keep):
 # whole number, decimals included, never the end of "12.50" or "300.000".
 _LATIN = "A-Za-z\u00c0-\u1ef9"
 _AMOUNT = r"(?<![\d.,])(\d+(?:,\d{3})*(?:\.\d+)?)(?![\d.,]*\d)"
-_SYMBOL_FIRST = re.compile(rf"(?<![{_LATIN}])({_units(lambda u: not u.isalpha())}){_AMOUNT}",
+_SYMBOL_FIRST = re.compile(rf"(?<![{_LATIN}])({_units(_is_symbol)})[ \t]?{_AMOUNT}",
                            re.IGNORECASE)
-_UNIT_AFTER = re.compile(rf"{_AMOUNT}[ \t]?({_units(lambda u: True)})(?![{_LATIN}])",
-                         re.IGNORECASE)
+_UNIT_AFTER = re.compile(rf"{_AMOUNT}[ \t-]?({_units(lambda u: True)})(?![{_LATIN}])",
+                         re.IGNORECASE)   # "3,000 yen", "a 3,000-yen fee", "500円"
 _CODE_FIRST = re.compile(rf"(?<![{_LATIN}])({'|'.join(_CURRENCIES)})"
                          rf"[ \t]?{_AMOUNT}", re.IGNORECASE)
 
@@ -335,20 +339,26 @@ def _button_names(text):
 
 
 def _priced(text):
-    """Each (amount, currency code) written in the text: "¥500", "500円",
-    "500 yen" and "JPY 500" are all ("500", "JPY"). A symbol right before an
-    amount is taken first, so in "18:00 $500" the $ is the 500's."""
-    pairs = set()
+    """Each (amount, currency code) written in the text, as a Counter of 1s:
+    "¥500", "500円", "500 yen" and "JPY 500" are all ("500", "JPY"). A
+    symbol right before an amount is taken first, so in "18:00 $500" the $ is
+    the 500's."""
+    pairs = Counter()
 
     def take(amount, unit):
         amount = amount.replace(",", "")
-        pairs.add((amount if "." in amount else str(int(amount)), _CURRENCY_CODE[unit.lower()]))
+        pairs[(amount if "." in amount else str(int(amount)), _CURRENCY_CODE[unit.lower()])] = 1
         return " "
     text = unicodedata.normalize("NFKC", text)
     text = _SYMBOL_FIRST.sub(lambda m: take(m[2], m[1]), text)
     text = _UNIT_AFTER.sub(lambda m: take(m[1], m[2]), text)
     _CODE_FIRST.sub(lambda m: take(m[2], m[1]), text)
     return pairs
+
+
+def _listed_prices(pairs):
+    return [f"{amount} {code}" for amount, code in
+            sorted(pairs, key=lambda pair: (float(pair[0]), pair[1]))]
 
 
 def _number_order(n):
@@ -390,14 +400,12 @@ def translation_extras(texts, translated):
         extra[count] = count(translated) - allowed
     currencies = {}
     for text in texts:
-        for version in (text if isinstance(text, (list, tuple)) else [text]):
-            for amount, code in _priced(version):
-                currencies.setdefault(amount, set()).add(code)
-    changed = sorted(((amount, code) for amount, code in _priced(translated)
-                      if amount in currencies and code not in currencies[amount]),
-                     key=lambda pair: (float(pair[0]), pair[1]))
+        for amount, code in _counted(text, _priced):
+            currencies.setdefault(amount, set()).add(code)
+    changed = {(amount, code) for amount, code in _priced(translated)
+               if amount in currencies and code not in currencies[amount]}
     return (_listed(extra[_numbers], key=lambda item: _number_order(item[0]))
-            + [f"{amount} {code}" for amount, code in changed]
+            + _listed_prices(changed)
             + _listed(extra[_button_names], key=lambda item: _BUTTONS.index(item[0])))
 
 
@@ -419,17 +427,27 @@ def translation_gaps(source, translated, template=None, other=None):
     ("3 BUTTONS" in English only): so a deadline typed into one half must
     reach both translations, also when it repeats the event date; one typed
     into both counts once; and a value an earlier translation already carried
-    across is not expected twice. A deterministic check, not a judgement: a
-    correct translation that spells a number out ("three") is reported too,
-    for a person to look at."""
+    across is not expected twice.
+
+    An amount written with a currency ("$500") must keep one that is the
+    same ("500ドル"): one left bare ("500") or given in another currency is
+    reported as "500 USD" - unless its number went missing too, which is
+    reported already. A deterministic check, not a judgement: a correct
+    translation that spells a number out ("three") is reported too, for a
+    person to look at."""
     expected = _counted(source, _numbers)
     buttons = _counted(source, _button_names)
+    priced = _counted(source, _priced)
     if other:
         other_source, other_template = other
-        for counted, count in ((expected, _numbers), (buttons, _button_names)):
+        for counted, count in ((expected, _numbers), (buttons, _button_names), (priced, _priced)):
             only_there = count(other_template) - (count(template) if template is not None else Counter())
             counted |= count(other_source) - only_there
-    missing = expected - _numbers(translated)
+    found = _numbers(translated)
+    missing = expected - found
     lost_buttons = buttons - _button_names(translated)
+    unpriced = {(amount, code) for amount, code in priced - _priced(translated)
+                if not _numbers(amount) - found}
     return (_listed(missing, key=lambda item: _number_order(item[0]))
+            + _listed_prices(unpriced)
             + _listed(lost_buttons, key=lambda item: _BUTTONS.index(item[0])))

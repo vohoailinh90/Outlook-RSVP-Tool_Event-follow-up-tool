@@ -277,6 +277,35 @@ def test_an_amount_in_another_currency_is_reported(copied, translated, extras):
     assert translation_extras([copied], translated) == extras
 
 
+@pytest.mark.parametrize("copied, translated, gaps", [
+    # Found by Codex review: only a currency that changed was seen, not one
+    # that was dropped.
+    ("Budget $500", "Budget 500", ["500 USD"]),
+    ("$12.50", "12.50", ["12.50 USD"]),
+    ("Budget $500", "予算¥500", ["500 USD"]),
+    ("Budget $500", "予算500ドル", []),
+    ("3,000円", "3,000 yen", []),
+    ("予算: 4,321 JPY", "Budget: 4,321円", []),
+    # Found in review: these correct wordings were not read as currencies.
+    ("参加費3,000円", "a 3,000-yen fee", []),
+    ("参加費3,000円", "3,000 Japanese yen", []),
+    ("参加費3,000円", "fee ¥ 3,000", []),
+    ("$500", "500米ドル", []),
+    ("$500", "500 US dollars", []),
+    ("Fee 500,000 VND", "500,000 dong", []),
+    ("Fee 500,000 VND", "500,000 Vietnamese dong", []),
+    # A lost amount is reported once, as a number.
+    ("Budget $500", "Budget", ["500"]),
+])
+def test_an_amount_that_loses_its_currency_is_reported(copied, translated, gaps):
+    assert translation_gaps(copied, translated) == gaps
+
+
+def test_a_currency_typed_into_one_half_must_reach_both_translations():
+    assert translation_gaps("締切 12/20、会費 500", "Deadline 12/20, fee 500", template="",
+                            other=("Deadline 12/20, fee $500", "")) == ["500 USD"]
+
+
 def test_a_note_in_two_languages_is_two_versions_of_one_note():
     """Found by Codex review: a note copied after a saved translation holds
     both halves, and its numbers were expected twice in each translation."""
@@ -820,6 +849,19 @@ def test_an_answer_that_changes_the_budget_currency_is_asked_about(app, monolith
     _paste_and_save(app, _reply(JA_NOTE, ja_fixed.replace("500 USD", "500円"), EN_NOTE, en_fixed))
     assert [title for title, _ in asked] == ["Check the translation"]
     assert "Japanese: 500 JPY" in asked[0][1]
+    assert app.full_translations["bilingual"] == ""
+
+
+def test_an_answer_that_drops_the_budget_currency_is_asked_about(app, monolith, monkeypatch):
+    app.var_budget.set("500 USD")
+    _compose(app)
+    ja_fixed, en_fixed = split_bilingual(_box(app.txt_fixed_preview))
+    asked = []
+    monkeypatch.setattr(monolith.messagebox, "askyesno",
+                        lambda title, message=None, **_: asked.append((title, message)) or False)
+    _paste_and_save(app, _reply(JA_NOTE, ja_fixed.replace("500 USD", "500"), EN_NOTE, en_fixed))
+    assert [title for title, _ in asked] == ["Check the translation"]
+    assert "Japanese details: 500 USD" in asked[0][1]
     assert app.full_translations["bilingual"] == ""
 
 
