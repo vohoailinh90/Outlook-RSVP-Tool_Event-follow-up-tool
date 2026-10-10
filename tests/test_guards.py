@@ -1405,6 +1405,19 @@ class TestWindowsEncodingGuard:
         assert result.returncode == 1, (
             "GUARD IS BLIND: open() and read_text() without encoding passed.")
 
+    def test_does_not_flag_opening_a_web_page(self, sandbox):
+        """webbrowser.open(url) shows a page in the browser; there is no file
+        and no encoding. Flagging it made the guard fail on the gift order
+        link's "Open link" button."""
+        probe = sandbox / "rsvp" / "domain" / "_browser_probe.py"
+        probe.write_text(
+            "import webbrowser\n"
+            "def f(url):\n"
+            "    webbrowser.open(url)\n",
+            encoding="utf-8")
+        result = run_guard("check_windows_encoding.py", sandbox)
+        assert result.returncode == 0, f"FALSE POSITIVE on webbrowser.open:\n{result.stderr}"
+
     def test_does_not_flag_binary_io(self, sandbox):
         """`path.open("rb")` and `open(p, "rb")` are correct: no decoding
         happens. An earlier version read the mode from the wrong argument

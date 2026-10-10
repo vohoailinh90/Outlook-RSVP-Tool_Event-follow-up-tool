@@ -40,6 +40,10 @@ def _has_kw(node: ast.Call, name: str) -> bool:
     return any(k.arg == name for k in node.keywords)
 
 
+# Modules whose .open() is not file I/O, so has no encoding to name.
+NOT_FILE_OPENERS = frozenset({"webbrowser"})
+
+
 def _kw_is_true(node: ast.Call, name: str) -> bool:
     for k in node.keywords:
         if k.arg == name and isinstance(k.value, ast.Constant) and k.value.value:
@@ -62,6 +66,9 @@ def check(path: Path) -> list[str]:
         fn = node.func
         name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", None)
 
+        if name == "open" and isinstance(fn, ast.Attribute) and \
+                isinstance(fn.value, ast.Name) and fn.value.id in NOT_FILE_OPENERS:
+            continue  # webbrowser.open(url) opens a page, not a file
         if name == "open":
             # Builtin open(file, mode) takes the mode SECOND; Path.open(mode)
             # takes it FIRST, because the path is the receiver. Reading the

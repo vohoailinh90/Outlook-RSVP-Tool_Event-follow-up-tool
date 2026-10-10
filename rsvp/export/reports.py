@@ -6,15 +6,17 @@ Thank-you email, the contributor list on the gift report), and a wrong
 figure in them is a wrong figure in someone's inbox.
 
 Rosters are the dicts the app keeps per email address:
-    attendance: {"name", "vote", "actual_attend", "free", "amount"}
+    attendance: {"name", "vote", "actual_attend", "free", "amount",
+                 "extra_attends", "extra_amounts"}  (per payment round)
     gift:       {"name", "checked", "amount", "send_email"}
 """
 from __future__ import annotations
 
 import openpyxl
 from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 
-from rsvp.domain import parse_amount_from_text, remaining_amount
+from rsvp.domain import parse_amount_from_text, round_totals
 
 
 def write_header_row(ws, headers):
@@ -26,61 +28,66 @@ def write_header_row(ws, headers):
         c.alignment = Alignment(horizontal="center")
 
 
-def attendance_workbook(roster, amount_paid):
-    """The Attendance & Payment report (Tab 5): one row per Yes/Maybe voter,
-    then Total actual attend, Total collected amount, Amount paid and
-    Remaining amount. Used by "📊 Export to Excel" and as the Thank-you
-    email's attachment.
+def attendance_workbook(roster, figures):
+    """The Attendance & Payment report (Tab 5): one row per Yes/Maybe voter
+    with an Attend and an amount column for every payment round, then per
+    round its attendees, collected, paid and remaining, and the collected
+    and remaining totals over all rounds. Used by "📊 Export to Excel" and
+    as the Thank-you email's attachment. Layout as in the other lineage.
 
-    Remaining is computed from the total and `amount_paid`, never re-read from
-    the label on screen: parse_amount_from_text drops the sign, so an overpaid
-    "-5,000" used to be written into this report as 5,000."""
+    figures: rsvp.domain.payment_rounds(...) for this roster - round 1
+    first. Remaining comes from those figures, never from a label on
+    screen, so an overpaid round keeps its minus sign."""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Attendance & Payment"
-    write_header_row(ws, ["No.", "Name", "Email", "Vote", "Actual Attend", "Free", "Amount"])
+    first, extra = figures[0], figures[1:]
+    headers = ["No.", "Name", "Email", "Vote", f"{first.label} Attend", "Free", first.label]
+    for f in extra:
+        headers += [f"{f.label} Attend", f.label]
+    write_header_row(ws, headers)
     row_idx = 2
-    total_attend = 0
-    total_amount = 0.0
     for i, (email, info) in enumerate(roster.items(), start=1):
-        attend = (info.get("actual_attend") or "").strip()
-        amount = info.get("amount", 0.0)
-        if attend.lower() == "yes":
-            total_attend += 1
-        total_amount += amount
         ws.cell(row=row_idx, column=1, value=i)
         ws.cell(row=row_idx, column=2, value=info["name"])
         ws.cell(row=row_idx, column=3, value=email)
         ws.cell(row=row_idx, column=4, value=info.get("vote", ""))
-        ws.cell(row=row_idx, column=5, value=attend)
+        ws.cell(row=row_idx, column=5, value=(info.get("actual_attend") or "").strip())
         ws.cell(row=row_idx, column=6, value="Yes" if info.get("free") else "No")
-        ws.cell(row=row_idx, column=7, value=amount or None)
+        ws.cell(row=row_idx, column=7, value=info.get("amount", 0.0) or None)
+        col = 8
+        for f in extra:
+            attend = ((info.get("extra_attends") or {}).get(f.key) or "").strip()
+            ws.cell(row=row_idx, column=col, value=attend or None)
+            ws.cell(row=row_idx, column=col + 1,
+                    value=(info.get("extra_amounts") or {}).get(f.key, 0.0) or None)
+            col += 2
         row_idx += 1
-    total_row = row_idx + 1
-    ws.cell(row=total_row, column=2, value="Total actual attend:").font = Font(bold=True)
-    ws.cell(row=total_row, column=5, value=total_attend).font = Font(bold=True)
-    amount_row = total_row + 1
-    ws.cell(row=amount_row, column=2, value="Total collected amount:").font = Font(bold=True)
-    c_amt = ws.cell(row=amount_row, column=7, value=total_amount)
-    c_amt.font = Font(bold=True)
-    c_amt.number_format = "#,##0"
-    paid_row = amount_row + 1
-    ws.cell(row=paid_row, column=2, value="Amount paid:").font = Font(bold=True)
-    c_paid = ws.cell(row=paid_row, column=7, value=amount_paid)
-    c_paid.font = Font(bold=True)
-    c_paid.number_format = "#,##0"
-    remaining_row = paid_row + 1
-    ws.cell(row=remaining_row, column=2, value="Remaining amount:").font = Font(bold=True)
-    c_rem = ws.cell(row=remaining_row, column=7, value=remaining_amount(total_amount, amount_paid))
-    c_rem.font = Font(bold=True)
-    c_rem.number_format = "#,##0"
-    ws.column_dimensions["A"].width = 6
-    ws.column_dimensions["B"].width = 26
-    ws.column_dimensions["C"].width = 30
-    ws.column_dimensions["D"].width = 10
-    ws.column_dimensions["E"].width = 14
-    ws.column_dimensions["F"].width = 10
-    ws.column_dimensions["G"].width = 14
+
+    def total(row, label, column, value, money=True):
+        ws.cell(row=row, column=2, value=label).font = Font(bold=True)
+        cell = ws.cell(row=row, column=column, value=value)
+        cell.font = Font(bold=True)
+        if money:
+            cell.number_format = "#,##0"
+
+    r = row_idx + 1
+    total(r, "Total actual attend:", 5, first.attendees, money=False)
+    r += 1
+    for f in figures:
+        total(r, f"{f.label} — Attendees:", 5, f.attendees, money=False)
+        total(r + 1, f"{f.label} — Collect amount:", 7, f.collected)
+        total(r + 2, f"{f.label} — Amount paid:", 7, f.paid)
+        total(r + 3, f"{f.label} — Remaining amount:", 7, f.remaining)
+        r += 4
+    collected, _paid, remaining = round_totals(figures)
+    total(r, "Total collected amount (all rounds):", 7, collected)
+    total(r + 1, "Total remaining amount (all rounds):", 7, remaining)
+
+    for letter, width in zip("ABCDEFG", (6, 32, 30, 10, 14, 10, 14)):
+        ws.column_dimensions[letter].width = width
+    for i in range(8, 8 + 2 * len(extra)):
+        ws.column_dimensions[get_column_letter(i)].width = 14
     return wb
 
 
