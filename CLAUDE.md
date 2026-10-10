@@ -139,6 +139,19 @@ Implementation is not complete because code was written.
 - COM code cannot be executed anywhere. Say "verified by reading" and mean it, rather than
   implying you ran something.
 
+## Pull requests: request the Codex review yourself
+
+Automatic Codex review is turned off on this repository. Codex reviews a pull request only
+when someone asks, so asking is part of opening one:
+
+- Right after opening a PR, comment `@codex review` on it.
+- After every push that answers Codex's findings, comment `@codex review` again: it does not
+  look at a new head on its own.
+- Codex answers with review comments, one finding each, or with "Didn't find any major
+  issues" (or a 👍 reaction). Keep going until it reports no findings.
+- A finding is a claim to verify, not an order. If it is real, fix it with a test that fails
+  without the fix. If not, reply on its thread with the reason.
+
 ## Sending email is irreversible
 
 This tool sends real mail to real colleagues and creates real calendar invites. Before
