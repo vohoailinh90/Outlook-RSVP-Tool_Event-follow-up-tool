@@ -311,6 +311,18 @@ def parse_typed_amount(text):
     return -value if value and head[:1] in ("-", "\u2212") else value
 
 
+_NUMBER_RUN = re.compile(r"\d[\d,.]*")
+
+
+def unclear_typed_amount(text):
+    """True when a hand-typed amount would not be read as what it shows: no
+    number at all ("abc" is read as 0), or more than one ("1 000" is read as
+    1, "500 + 300" as 500). A currency mark or word around one number is
+    fine ("¥1,500", "1.500.000 VND")."""
+    t = str(text or "").strip()
+    return bool(t) and len(_NUMBER_RUN.findall(t)) != 1
+
+
 def amount_for(attending, free, budget):
     """What someone owes for one round: nothing when exempt (Free applies to
     every round), the expected budget when they came, nothing otherwise."""

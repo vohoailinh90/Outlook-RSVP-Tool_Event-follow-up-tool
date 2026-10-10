@@ -1418,6 +1418,25 @@ class TestWindowsEncodingGuard:
         result = run_guard("check_windows_encoding.py", sandbox)
         assert result.returncode == 0, f"FALSE POSITIVE on webbrowser.open:\n{result.stderr}"
 
+    @pytest.mark.parametrize("source", [
+        "import io as webbrowser\ndef f(p):\n    return webbrowser.open(p)\n",
+        "import io, webbrowser\nwebbrowser = io\ndef f(p):\n    return webbrowser.open(p)\n",
+        "import webbrowser\ndef f(webbrowser, p):\n    return webbrowser.open(p)\n",
+    ])
+    def test_a_name_that_is_not_the_browser_gets_no_exemption(self, sandbox, source):
+        """The exemption is for the webbrowser module, not for any name that
+        spells it: these open a file in text mode with no encoding."""
+        probe = sandbox / "rsvp" / "domain" / "_browser_probe.py"
+        probe.write_text(source, encoding="utf-8")
+        result = run_guard("check_windows_encoding.py", sandbox)
+        assert result.returncode == 1, "GUARD IS BLIND: a renamed open() passed as webbrowser.open"
+
+    def test_an_aliased_browser_import_is_still_the_browser(self, sandbox):
+        probe = sandbox / "rsvp" / "domain" / "_browser_probe.py"
+        probe.write_text("import webbrowser as wb\ndef f(url):\n    wb.open(url)\n", encoding="utf-8")
+        result = run_guard("check_windows_encoding.py", sandbox)
+        assert result.returncode == 0, f"FALSE POSITIVE on an aliased webbrowser:\n{result.stderr}"
+
     def test_does_not_flag_binary_io(self, sandbox):
         """`path.open("rb")` and `open(p, "rb")` are correct: no decoding
         happens. An earlier version read the mode from the wrong argument

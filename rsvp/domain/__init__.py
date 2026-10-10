@@ -19,6 +19,7 @@ from .money import (  # noqa: F401
     round_totals,
     running_fund,
     sum_contributions,
+    unclear_typed_amount,
 )
 from .roster import merge_expanded_roster  # noqa: F401
 
@@ -38,5 +39,6 @@ __all__ = [
     "parse_amount_from_text",
     "remaining_amount",
     "sum_contributions",
+    "unclear_typed_amount",
     "merge_expanded_roster",
 ]

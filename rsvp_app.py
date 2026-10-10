@@ -160,6 +160,7 @@ from rsvp.domain import (  # noqa: F401
     round_totals,
     running_fund,
     sum_contributions,
+    unclear_typed_amount,
 )
 from rsvp.i18n import (  # noqa: F401
     BILINGUAL_SEPARATOR,
@@ -1521,16 +1522,6 @@ class RSVPApp(tk.Tk):
             return
         messagebox.showinfo("Exported", f"Exported {len(self.recipients)} people to:\n{path}")
 
-    def _group_members_or_none(self, email):
-        """The people in group `email`, or None to keep the row as it is: it
-        is not a group, or none of its members could be listed (Outlook's
-        offline address book may not have them yet) - tracking nobody for
-        it would hide that its people never answered."""
-        members, failed, _diag = self.outlook.expand_group_members_detailed(email)
-        if members is None or (not members and failed):
-            return None
-        return members
-
     def _expand_group_recipients(self):
         """Với mỗi dòng trong danh sách hiện tại, kiểm tra xem đó có phải 1
         group email (Exchange Distribution List) không — nếu phải, thay dòng
@@ -1549,6 +1540,7 @@ class RSVPApp(tk.Tk):
             seen_emails = set()
             groups_expanded = []
             failed_groups = []
+            groups_kept = []
             diag_lines = []
             errors = []
             for name, email in original:
@@ -1559,11 +1551,14 @@ class RSVPApp(tk.Tk):
                     errors.append(f"{email}: {e}")
                 failed_groups.extend(failed)
                 diag_lines.extend(diag)
-                if members is None or (not members and failed):
-                    # Not a group - or a group none of whose members could be
-                    # listed: keep the row, rather than save a list that has
-                    # silently lost everyone in it (the dialog says why).
+                if not members:
+                    # Not a group - or a group that listed nobody (members
+                    # Outlook could not list, or none with an email address):
+                    # keep the row, rather than save a list that has silently
+                    # lost everyone in it (the dialog says why).
                     # Không phải group (hoặc không resolve được) -> giữ nguyên dòng gốc
+                    if members is not None and not failed:
+                        groups_kept.append(name or email)
                     key = email.lower()
                     if key not in seen_emails:
                         seen_emails.add(key)
@@ -1592,6 +1587,10 @@ class RSVPApp(tk.Tk):
                 if diag_lines:
                     lines.append("\nStructure detected:")
                     lines.extend(f"  • {d}" for d in dict.fromkeys(diag_lines))
+                if groups_kept:
+                    lines.append("\nThese groups listed nobody with an email address, so each was "
+                                  "kept as one row:")
+                    lines.extend(f"  • {g}" for g in groups_kept)
                 if failed_groups:
                     lines.append("\n⚠️ These groups were found but their members could NOT be listed, "
                                   "so their people are MISSING from the list above:")
@@ -2688,11 +2687,26 @@ class RSVPApp(tk.Tk):
         # The merge and de-duplication rules live in rsvp/domain/roster.py,
         # which is testable without Outlook. Expansion itself needs the
         # address book, so it is passed in rather than imported there.
-        return merge_expanded_roster(
+        # A group that listed nobody stays one row to chase - tracking nobody
+        # for it would hide that its people never answered. Such a result,
+        # or one missing a sub-group, is not cached: the next scan asks again
+        # (Outlook's offline address book may have been downloaded meanwhile).
+        ask_again = set()
+
+        def expand(email):
+            members, failed, _diag = self.outlook.expand_group_members_detailed(email)
+            if members is not None and (failed or not members):
+                ask_again.add((email or "").lower())
+            return members or None
+
+        roster = merge_expanded_roster(
             self.recipients if recipients is None else recipients,
-            self._group_members_or_none,
+            expand,
             cache=self._group_expansion_cache,
         )
+        for key in ask_again:
+            self._group_expansion_cache.pop(key, None)
+        return roster
 
     def _refresh_response_tree(self, skipped=0, roster=None):
         roster = roster if roster is not None else self.recipients
@@ -3150,6 +3164,8 @@ class RSVPApp(tk.Tk):
             .pack(side="left", padx=(8, 0))
         for var in (self.var_gift_item_name, self.var_gift_item_link, self.var_gift_item_price):
             var.trace_add("write", lambda *a: self._on_gift_item_changed())
+        self._gift_fields_frame = fields
+        self.lbl_gift_price_warning = WrapLabel(item.body, style="Danger.TLabel", text="")
 
         self.var_gift_cost_display = tk.StringVar(value="0")
         self.var_gift_remaining = tk.StringVar(value="0")
@@ -3442,41 +3458,65 @@ class RSVPApp(tk.Tk):
 
     def _event_figures_for(self, event_id):
         """Every round's figures of event_id: from the screen when Tab 5 holds
-        that event, else from the database."""
+        that event, else from the database (which may raise)."""
         if event_id and event_id == self._attendance_event == self._amount_paid_event:
             return self._attendance_figures()
         if not event_id:
             return payment_rounds([], ROUND1_DEFAULT_LABEL, "", [])
-        try:
-            path = self.history_path.get()
-            rec = self._history_record(event_id) or {}
-            return payment_rounds(db.load_attendance_roster(event_id, path).values(),
-                                  rec.get("Round1Label") or ROUND1_DEFAULT_LABEL, rec.get("AmountPaid"),
-                                  db.load_attendance_rounds(event_id, path))
-        except Exception:
-            return payment_rounds([], ROUND1_DEFAULT_LABEL, "", [])
+        path = self.history_path.get()
+        rec = self._history_record(event_id) or {}
+        return payment_rounds(db.load_attendance_roster(event_id, path).values(),
+                              rec.get("Round1Label") or ROUND1_DEFAULT_LABEL, rec.get("AmountPaid"),
+                              db.load_attendance_rounds(event_id, path))
 
     def _gift_money(self):
         """The gift's money, plus - when linked - the party's, for the event
-        the gift list belongs to. One source for the screen and the report."""
+        the gift list belongs to. One source for the screen and the report.
+        "unreadable" holds the error when the party's figures could not be
+        read: zeros in their place would report the party as costing nothing."""
         linked = bool(self.var_gift_link_event.get())
-        event_totals = round_totals(self._event_figures_for(self._gift_event)) if linked else (0.0, 0.0, 0.0)
-        return gift_figures(sum_contributions(self._gift_roster.values()),
-                            self.var_gift_item_price.get(), linked, event_totals)
+        event_totals, unreadable = (0.0, 0.0, 0.0), None
+        if linked:
+            try:
+                event_totals = round_totals(self._event_figures_for(self._gift_event))
+            except Exception as exc:
+                unreadable = exc
+        fig = gift_figures(sum_contributions(self._gift_roster.values()),
+                           self.var_gift_item_price.get(), linked, event_totals)
+        fig["unreadable"] = unreadable
+        return fig
+
+    @staticmethod
+    def _gift_amount_text(fig, key):
+        """An amount for the screen or the report; "?" for one that includes
+        the party's figures when those could not be read."""
+        if fig["unreadable"] is not None and (key.startswith("event_") or key.startswith("grand_")):
+            return "?"
+        return format_amount(fig[key])
 
     def _update_gift_summary(self):
         if not hasattr(self, "var_gift_grand_remaining"):
             return  # Tab 6 is still being built
         fig = self._gift_money()
+        price = self.var_gift_item_price.get()
+        self._show_typed_amount_warning(
+            self.lbl_gift_price_warning,
+            [f"Gift price: “{price}” is read as {format_amount(fig['gift_cost'])}"]
+            if unclear_typed_amount(price) else [], self._gift_fields_frame)
         self.var_gift_cost_display.set(format_amount(fig["gift_cost"]))
         self.var_gift_remaining.set(format_amount(fig["gift_remaining"]))
-        self.var_gift_grand_collected.set(format_amount(fig["grand_collected"]))
-        self.var_gift_grand_paid.set(format_amount(fig["grand_paid"]))
-        self.var_gift_grand_remaining.set(format_amount(fig["grand_remaining"]))
-        self.lbl_gift_event_figures.configure(text=(
-            f"From Attendance & payment - collected {format_amount(fig['event_collected'])}, "
-            f"paid out {format_amount(fig['event_paid'])}, remaining {format_amount(fig['event_remaining'])}."
-            if fig["linked"] else "Not linked - the totals below cover the gift only."))
+        self.var_gift_grand_collected.set(self._gift_amount_text(fig, "grand_collected"))
+        self.var_gift_grand_paid.set(self._gift_amount_text(fig, "grand_paid"))
+        self.var_gift_grand_remaining.set(self._gift_amount_text(fig, "grand_remaining"))
+        if fig["unreadable"] is not None:
+            text = (f"⚠ Attendance & payment of {self._gift_event} could not be read "
+                    f"({fig['unreadable']}) - the totals below are unknown. Untick this, or try again.")
+        elif fig["linked"]:
+            text = (f"From Attendance & payment - collected {format_amount(fig['event_collected'])}, "
+                    f"paid out {format_amount(fig['event_paid'])}, remaining {format_amount(fig['event_remaining'])}.")
+        else:
+            text = "Not linked - the totals below cover the gift only."
+        self.lbl_gift_event_figures.configure(text=text)
         # The report quotes these figures: rebuild it unless edited by hand.
         current = self.txt_gift_report_body.get("1.0", "end").strip() if hasattr(
             self, "txt_gift_report_body") else None
@@ -3495,8 +3535,9 @@ class RSVPApp(tk.Tk):
         L = GIFT_REPORT_LABELS.get("en" if lang_code == "bilingual" else lang_code, GIFT_REPORT_LABELS["en"])
         rows = []
         if fig["linked"]:
-            rows.append((L["row_event"], format_amount(fig["event_collected"]),
-                         format_amount(fig["event_paid"]), format_amount(fig["event_remaining"])))
+            rows.append((L["row_event"], self._gift_amount_text(fig, "event_collected"),
+                         self._gift_amount_text(fig, "event_paid"),
+                         self._gift_amount_text(fig, "event_remaining")))
         rows.append((L["row_gift"], format_amount(fig["gift_collected"]),
                      format_amount(fig["gift_cost"]), format_amount(fig["gift_remaining"])))
         return (
@@ -3508,9 +3549,9 @@ class RSVPApp(tk.Tk):
             self.var_gift_item_link.get(),
             format_amount(fig["gift_cost"]) if self.var_gift_item_price.get().strip() else "",
             rows,
-            format_amount(fig["grand_collected"]),
-            format_amount(fig["grand_paid"]),
-            format_amount(fig["grand_remaining"]),
+            self._gift_amount_text(fig, "grand_collected"),
+            self._gift_amount_text(fig, "grand_paid"),
+            self._gift_amount_text(fig, "grand_remaining"),
             fig["linked"],
             format_amount(fig["gift_remaining"]),
         )
@@ -3551,6 +3592,16 @@ class RSVPApp(tk.Tk):
                 "Tick the \"Send email\" checkbox (top-left column) for at least one person first — "
                 "click the ⬜/✅ mark in the column header to select everyone currently shown at once."
             )
+            return
+
+        unreadable = self._gift_money()["unreadable"]
+        if unreadable is not None:
+            messagebox.showwarning(
+                "Party figures unknown",
+                f"Attendance & payment of {self._gift_event} could not be read, so the report's "
+                f"Event + Gift totals would be wrong:\n\n{unreadable}\n\n"
+                "Untick \"Add the party's money from Attendance & payment\" to report the gift "
+                "alone, or try again.")
             return
 
         body = self.txt_gift_report_body.get("1.0", "end").strip()
@@ -3978,6 +4029,8 @@ class RSVPApp(tk.Tk):
         ttk.Button(rounds.actions, text="➕ Add round", command=self._add_amount_round).pack()
         self.rounds_container = ttk.Frame(rounds.body, style="Card.TFrame")
         self.rounds_container.pack(fill="x")
+        # Shown only while a paid box holds text not read as what it shows.
+        self.lbl_rounds_warning = WrapLabel(rounds.body, style="Danger.TLabel", text="")
 
         attendance = Card(f, "Attendance & payment",
                           "Fill in after the event. The list follows the Yes / Maybe votes each time this "
@@ -4376,7 +4429,7 @@ class RSVPApp(tk.Tk):
     def _update_attendance_totals(self):
         """Every figure on Tab 5 from the table and the paid boxes: each
         round's row in the rounds card, and the totals over all rounds."""
-        if not hasattr(self, "var_total_remaining_amount"):
+        if not hasattr(self, "lbl_rounds_warning"):
             return  # Tab 5 is still being built
         figures = self._attendance_figures()
         first = figures[0]
@@ -4389,12 +4442,29 @@ class RSVPApp(tk.Tk):
                 v["attend"].set(str(f.attendees))
                 v["collected"].set(format_amount(f.collected))
                 v["remaining"].set(format_amount(f.remaining))
+        typed = {r["key"]: r.get("amount_paid") for r in self._extra_rounds}
+        typed[first.key] = self.var_amount_paid.get()
+        unclear = [f"{f.label}: “{typed.get(f.key)}” is read as {format_amount(f.paid)}"
+                   for f in figures if unclear_typed_amount(typed.get(f.key))]
+        self._show_typed_amount_warning(self.lbl_rounds_warning, unclear, self.rounds_container)
         collected, paid, remaining = round_totals(figures)
         self.var_total_collected_amount.set(format_amount(collected))
         self.var_total_paid_amount.set(format_amount(paid))
         self.var_total_remaining_amount.set(format_amount(remaining))
         # Tab 6's Event + Gift figures use these when linked.
         self._update_gift_summary()
+
+    @staticmethod
+    def _show_typed_amount_warning(label, unclear, after):
+        """Shows, under `after`, which typed amounts are not read as they
+        look - "1 000" counts as 1 everywhere it is used (totals, History,
+        the emails, Excel) - or hides the warning when there are none."""
+        if unclear:
+            label.configure(text="⚠ Type just the figure (e.g. 1000 or 1,000). " + "; ".join(unclear) + ".")
+            label.pack(fill="x", pady=(8, 0), after=after)
+        else:
+            label.configure(text="")
+            label.pack_forget()
 
     def _refresh_remaining_amount(self):
         """Kept for its callers: every Remaining moves together now."""

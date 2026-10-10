@@ -326,13 +326,44 @@ def test_a_group_none_of_whose_members_could_be_listed_keeps_its_row(app):
     assert "Team" in app.dialogs[-1][2]
 
 
-def test_response_tracking_keeps_a_group_whose_members_could_not_be_listed(app):
+def test_a_group_that_lists_nobody_with_an_address_keeps_its_row(app):
+    """Third review: members without an SMTP address are skipped without
+    counting as a failure, so such a group came back as an empty list."""
+    app.recipients = [("Team", "team@example.com")]
+    app.fake.groups["team@example.com"] = ([], [], [])
+    app._expand_group_recipients()
+    app.update()
+    assert app.recipients == [("Team", "team@example.com")]
+    assert "listed nobody" in app.dialogs[-1][2]
+
+
+@pytest.mark.parametrize("unlisted", [([], ["Team"], []), ([], [], [])])
+def test_response_tracking_keeps_a_group_whose_members_could_not_be_listed(app, unlisted):
     """Tab 4 follows the same rule: a group it cannot list stays one row to
     chase, rather than vanishing from "not responded"."""
-    app.fake.groups["team@example.com"] = ([], ["Team"], [])
+    app.fake.groups["team@example.com"] = unlisted
     app.fake.groups["club@example.com"] = ([("Person A", "a@example.com")], [], [])
     roster = app._build_effective_roster([("Team", "team@example.com"), ("Club", "club@example.com")])
     assert roster == [("Team", "team@example.com"), ("Person A", "a@example.com")]
+
+
+def test_a_group_not_listed_yet_is_asked_again_on_the_next_scan(app):
+    """Third review: the failure was cached for the session, so downloading
+    the address book changed nothing until the app restarted. People and
+    listed groups are still asked once."""
+    people = [("Team", "team@example.com"), ("Dee Example", "dee@example.com"),
+              ("Club", "club@example.com")]
+    app.fake.groups["team@example.com"] = ([], ["Team"], [])
+    app.fake.groups["club@example.com"] = ([("Person A", "a@example.com")], [], [])
+    app._build_effective_roster(people)
+    app.fake.groups["team@example.com"] = ([("Person B", "b@example.com")], [], [])
+    roster = app._build_effective_roster(people)
+    assert roster == [("Person B", "b@example.com"), ("Dee Example", "dee@example.com"),
+                      ("Person A", "a@example.com")]
+    asked = [kw["email_or_name"] for name, kw in app.fake.calls
+             if name == "expand_group_members_detailed"]
+    assert sorted(asked) == ["club@example.com", "dee@example.com",
+                             "team@example.com", "team@example.com"]
 
 
 def _press(widget, sequence):
@@ -426,3 +457,52 @@ def test_a_typed_amount_stays_until_attend_or_free_really_changes(app, monolith,
 
     app._commit_attendance_edit("alice@example.com", "free", "✅")
     assert (alice["amount"], alice["extra_amounts"][key]) == (0.0, 0.0)
+
+
+def test_a_paid_box_not_read_as_it_looks_is_pointed_out(app, monolith, monkeypatch):
+    """Third review: "1 000" counted as 1 in every total, the History, the
+    email and Excel, and nothing on screen said so."""
+    _attendance(app)
+    key = _add_round(app, monolith, monkeypatch, "Karaoke")
+    app._round_vars[key]["paid"].set("1 000")
+    app.update()
+    warning = app.lbl_rounds_warning.cget("text")
+    assert app.lbl_rounds_warning.winfo_manager() == "pack"
+    assert "Karaoke" in warning and "1 000" in warning and "Round 1" not in warning
+    app._round_vars[key]["paid"].set("1,000")
+    app.update()
+    assert app.lbl_rounds_warning.winfo_manager() == ""
+
+
+def test_a_gift_price_not_read_as_it_looks_is_pointed_out(app):
+    _start_event(app)
+    _select(app, app.tab_gift)
+    app.var_gift_item_price.set("3 570")
+    app.update()
+    assert "3 570" in app.lbl_gift_price_warning.cget("text")
+    app.var_gift_item_price.set("3,570 JPY")
+    app.update()
+    assert app.lbl_gift_price_warning.winfo_manager() == ""
+
+
+def test_party_figures_that_cannot_be_read_are_not_reported_as_zero(app, monkeypatch):
+    """Third review: a failed read of the party's figures gave 0 / 0 / 0, so
+    a linked report showed the party as costing nothing."""
+    _start_event(app)
+    _select(app, app.tab_gift)
+    app._gift_roster["alice@example.com"]["send_email"] = True
+
+    def locked(*_a, **_kw):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(db, "load_attendance_roster", locked)
+    app.var_gift_link_event.set(True)
+    app._on_gift_link_event_toggled()
+    app.update()
+    assert app.var_gift_grand_collected.get() == "?"
+    assert "could not be read" in app.lbl_gift_event_figures.cget("text")
+
+    app._send_gift_report_email()
+    app.update()
+    assert app.dialogs[-1][1] == "Party figures unknown"
+    assert not [c for c in app.fake.calls if c[0] == "send_gift_report_email"]

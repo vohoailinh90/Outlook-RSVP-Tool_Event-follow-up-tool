@@ -44,6 +44,35 @@ def _has_kw(node: ast.Call, name: str) -> bool:
 NOT_FILE_OPENERS = frozenset({"webbrowser"})
 
 
+def _not_file_opener_names(tree: ast.AST) -> set[str]:
+    """Names that can only mean one of NOT_FILE_OPENERS in this file: bound by
+    `import webbrowser [as x]` and by nothing else. `import io as webbrowser`,
+    a parameter or an assignment of that name is something else, and its
+    .open() is checked like any other."""
+    imported: set[str] = set()
+    other: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                bound = a.asname or a.name.split(".")[0]
+                (imported if a.name in NOT_FILE_OPENERS else other).add(bound)
+        elif isinstance(node, ast.ImportFrom):
+            other.update(a.asname or a.name for a in node.names)
+        elif isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            other.add(node.id)
+        elif isinstance(node, ast.arg):
+            other.add(node.arg)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            other.add(node.name)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            other.add(node.name)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            other.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            other.add(node.rest)
+    return imported - other
+
+
 def _kw_is_true(node: ast.Call, name: str) -> bool:
     for k in node.keywords:
         if k.arg == name and isinstance(k.value, ast.Constant) and k.value.value:
@@ -59,6 +88,7 @@ def check(path: Path) -> list[str]:
 
     rel = path.relative_to(ROOT).as_posix()
     problems: list[str] = []
+    browser_names = _not_file_opener_names(tree)
 
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -67,7 +97,7 @@ def check(path: Path) -> list[str]:
         name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", None)
 
         if name == "open" and isinstance(fn, ast.Attribute) and \
-                isinstance(fn.value, ast.Name) and fn.value.id in NOT_FILE_OPENERS:
+                isinstance(fn.value, ast.Name) and fn.value.id in browser_names:
             continue  # webbrowser.open(url) opens a page, not a file
         if name == "open":
             # Builtin open(file, mode) takes the mode SECOND; Path.open(mode)
