@@ -283,7 +283,9 @@ def _normalized(text):
 # while "18:00" turned into "18:30", or PM into AM, is caught. "12:00 noon"
 # is 12:00 and "12:00 midnight" 0:00.
 _MERIDIEM = r"(?:\s*(?:([AaPp])\.?\s*[Mm]\.?|((?i:noon|midnight)))(?![A-Za-z]))"
-_CLOCK_TIME = re.compile(r"(午前|午後)?\s*(?<!\d)(\d{1,2}):(\d{2})(?!\d)" + _MERIDIEM + "?")
+# A half of the day may also come first, in Japanese or as "PM 6:00".
+_CLOCK_TIME = re.compile(r"(午前|午後|(?<![A-Za-z])[AaPp]\.?[Mm]\.?)?\s*(?<!\d)(\d{1,2}):(\d{2})(?!\d)"
+                         + _MERIDIEM + "?")
 _JA_TIME = re.compile(r"(午前|午後)?[ \t]*(?<!\d)(\d{1,2})時(?!間)(?:(\d{1,2})分|(半))?")   # 3時間 is a duration
 _HOUR_MERIDIEM = re.compile(r"(?<![\d:])(\d{1,2})" + _MERIDIEM)
 _BUTTONS = ("Yes", "No", "Maybe")
@@ -355,6 +357,7 @@ def _numbers(text):
     def take(hours, minutes, half_of_day=None):
         hours = int(hours)
         half_of_day = (half_of_day or "").lower()
+        half_of_day = half_of_day[0] if half_of_day[:1] in ("a", "p") else half_of_day   # "p.m." is "p"
         if half_of_day in ("p", "午後", "noon"):
             hours = hours % 12 + 12
         elif half_of_day in ("a", "午前", "midnight"):
