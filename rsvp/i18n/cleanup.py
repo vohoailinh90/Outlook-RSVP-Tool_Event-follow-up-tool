@@ -269,9 +269,10 @@ def parse_bilingual_reply(text):
 # Thousands are grouped with commas or, as in Vietnamese and European
 # amounts, with dots: "3,000", "3.000" and "3000" are one number. A dot
 # before anything but three digits ("12.20", "1.5") does not group.
-_NUMBER = re.compile(r"((?<![\w+-])[+-])?(\d{1,3}(?:\.\d{3})+(?!\.?\d)|\d+(?:,\d{3})*)")
+_NUMBER = re.compile(r"((?<![\w+-])[+-])?([1-9]\d{0,2}(?:\.\d{3})+(?!\.?\d)|\d+(?:,\d{3})*)")
 # A sign written before a currency symbol is the amount's: "-¥500" is ¥-500.
-_SIGN_BEFORE_SYMBOL = re.compile(r"(?<![\w+-])([+-])[ \t]?(US\$|[¥$€₫])[ \t]?(?=\d)")
+# Only one written against the symbol: in "$10 - $20" the hyphen is a dash.
+_SIGN_BEFORE_SYMBOL = re.compile(r"(?<![\w+-])([+-])(US\$|[¥$€₫])[ \t]?(?=\d)")
 
 
 def _normalized(text):
@@ -323,7 +324,7 @@ _LATIN = "A-Za-z\u00c0-\u1ef9"
 # Its sign follows the rule of _NUMBER: "¥-3,570" and "USD -500" keep theirs.
 # Grouped as in _NUMBER; a comma that does not group thousands is a decimal
 # mark ("12,5 EUR" is 12.5, "1.000,50 €" 1000.50).
-_DIGITS = r"\d{1,3}(?:\.\d{3})+(?:,\d+)?(?!\.?\d)|\d+(?:,\d{3})*(?:[.,]\d+)?"
+_DIGITS = r"[1-9]\d{0,2}(?:\.\d{3})+(?:,\d+)?(?!\.?\d)|\d+(?:,\d{3})*(?:[.,]\d+)?"
 _AMOUNT = rf"((?<![\w+-])[+-])?(?<![\d.,])({_DIGITS})(?![\d.,]*\d)"
 _SYMBOL_FIRST = re.compile(rf"(?<![{_LATIN}\d])({_units(lambda u: _is_symbol(u) and u != '%')})"
                            rf"[ \t]?{_AMOUNT}",
@@ -333,6 +334,15 @@ _UNIT_AFTER = re.compile(rf"{_AMOUNT}[ \t-]?({_units(lambda u: True)})",
 _CODES = [unit for units in _CURRENCIES.values() for unit in units if unit.isalpha() and unit.isupper()]
 _CODE_FIRST = re.compile(rf"(?<![{_LATIN}])({'|'.join(_CODES)})"
                          rf"[ \t]?{_AMOUNT}", re.IGNORECASE)
+# A range writes its unit once, after the last amount ("10〜20ドル") or before
+# the first ("$10-20", "JPY 500-1,000"); the other end has it too.
+# Rewritten with a neutral "~", so the second amount takes no sign from it.
+_RANGE = r"[ \t]?[-~–—〜][ \t]?"
+_UNIT_AFTER_RANGE = re.compile(rf"(?<![\d.,])((?:{_DIGITS})){_RANGE}(?=(?:{_DIGITS})[ \t-]?"
+                               rf"({_units(lambda u: True)}))", re.IGNORECASE)
+_UNIT_FIRST_RANGE = re.compile(rf"(?<![{_LATIN}\d])((?:{_units(lambda u: _is_symbol(u) and u != '%')}"
+                               rf"|{'|'.join(_CODES)})[ \t]?)((?:{_DIGITS})){_RANGE}(?=\d)",
+                               re.IGNORECASE)
 
 
 def _numbers(text):
@@ -373,13 +383,15 @@ def _priced(text):
     pairs = Counter()
 
     def take(sign, digits, unit):
-        whole, fraction = (re.fullmatch(r"(\d{1,3}(?:\.\d{3})+)(?:,(\d+))?", digits)
+        whole, fraction = (re.fullmatch(r"([1-9]\d{0,2}(?:\.\d{3})+)(?:,(\d+))?", digits)
                            or re.fullmatch(r"(\d+(?:,\d{3})*)(?:[.,](\d+))?", digits)).groups()
         whole = str(int(re.sub("[.,]", "", whole)))
         amount = (sign or "") + (whole if fraction is None else f"{whole}.{fraction}")
         pairs[(amount, _CURRENCY_CODE[unit.lower()])] += 1
         return "_"    # a word character: "¥500-1,000円" leaves the 1,000 unsigned, as _numbers reads it
     text = _normalized(text)
+    text = _UNIT_FIRST_RANGE.sub(lambda m: f"{m[1]}{m[2]} ~ {m[1]}", text)
+    text = _UNIT_AFTER_RANGE.sub(lambda m: f"{m[1]}{m[2]} ~ ", text)
     text = _SYMBOL_FIRST.sub(lambda m: take(m[2], m[3], m[1]), text)
     text = _UNIT_AFTER.sub(lambda m: take(m[1], m[2], m[3]), text)
     _CODE_FIRST.sub(lambda m: take(m[2], m[3], m[1]), text)

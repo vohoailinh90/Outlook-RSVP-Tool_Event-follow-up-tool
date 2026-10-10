@@ -343,6 +343,15 @@ def test_an_amount_in_another_currency_is_reported(copied, translated, extras):
     ("Refund -¥500", "Refund ¥500", ["-500"]),
     ("Refund -¥500", "返金 -500円", []),
     ("Refund −$12.50", "Refund $-12.50", []),
+    # Found in review: a dash between two amounts is not a sign.
+    ("$10 - $20 per person", "$10-$20 per person", []),
+    ("¥500 - ¥1,000", "¥500〜¥1,000", []),
+    # Found in review: a range writes its unit once, and the other end has it too.
+    ("$10 - $20 per person", "10〜20ドル", []),
+    ("3,000〜5,000円", "¥3,000–5,000", []),
+    ("JPY 500-1,000", "500〜1,000円", []),
+    ("10-20%", "10〜20パーセント", []),
+    ("3,000〜5,000円", "3,000-5,000", ["3000 JPY", "5000 JPY"]),
     # Found by Codex review: dot-grouped thousands read as two numbers.
     ("Budget 3.000 EUR", "Budget 3000 EUR", []),
     ("Phí 300.000đ", "Fee 300,000 VND", []),
