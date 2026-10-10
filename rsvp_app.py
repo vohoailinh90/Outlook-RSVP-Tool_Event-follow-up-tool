@@ -4427,12 +4427,11 @@ class RSVPApp(tk.Tk):
         c_amt = ws.cell(row=amount_row, column=7, value=total_amount)
         c_amt.font = Font(bold=True)
         c_amt.number_format = "#,##0"
-        # MỚI: "Amount paid"/"Remaining amount" — đọc trực tiếp từ 2
-        # StringVar trên UI (đã tính sẵn bởi _refresh_remaining_amount()),
-        # thay vì tính lại ở đây, để LUÔN khớp đúng những gì đang hiển thị
-        # trên Tab 5 lúc xuất báo cáo.
+        # Remaining is computed, never re-read from the "Remaining amount"
+        # label: parse_amount_from_text drops the sign, so an overpaid
+        # "-5,000" used to be written into this report as 5,000.
         amount_paid = parse_amount_from_text(getattr(self, "var_amount_paid", tk.StringVar(value="0")).get())
-        remaining = parse_amount_from_text(getattr(self, "var_remaining_amount", tk.StringVar(value="0")).get())
+        remaining = remaining_amount(total_amount, amount_paid)
         paid_row = amount_row + 1
         ws.cell(row=paid_row, column=2, value="Amount paid:").font = Font(bold=True)
         c_paid = ws.cell(row=paid_row, column=7, value=amount_paid)
