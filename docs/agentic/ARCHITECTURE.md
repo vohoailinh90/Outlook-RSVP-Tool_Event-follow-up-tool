@@ -158,6 +158,24 @@ describe them under their old names). `rsvp_app.py` imports the adapter as
 which the move would otherwise have broken silently. `scripts/layout_check.py` keeps the
 root to what a user runs.
 
+**Cleanup (done).** A review of what the tool actually uses removed what was unreachable:
+the Tab 4 folder picker (its widget never existed; unticking its checkbox crashed Scan Inbox)
+with `OutlookPort.list_folder_paths`, a report export no button called, the reminder's
+`auto_send` branch, and the Excel half of `history.py`. What was left of that module is
+the JSON settings, now `rsvp/storage/settings.py` (U6). The Excel report builders moved to
+`rsvp/export/reports.py`, where `tests/test_export_reports.py` pins a sign bug the
+attendance report had (an overpaid event was reported as money left).
+
+The same review found that per-event data crossed between events: '⬅ Load setup' kept
+the previous event's state when the loaded one had none, and every auto-save was keyed on
+whatever Event ID Tab 1 showed. Attendance, the gift roster and Amount paid now record the
+event they belong to; Tab 4's data belongs to the last-scanned event, and the reminder and
+calendar invite refuse a table scanned for another one. Storage gained two primitives:
+`db.update_event` (UPDATE only — automatic writes never create a History row) and
+`db.rename_event` (moves an event's row and its per-event tables in one transaction).
+`tests/test_app_event_state.py` is the first test that constructs `RSVPApp`, against the
+fake Outlook; it needs a display, so it runs on the Windows CI and skips elsewhere.
+
 **Phase 4 — split `ui/`.** Seven tabs, seven modules, out of the 4,673-line class. Largest
 and last, because it is worth least until the layers beneath it are real.
 
@@ -300,3 +318,4 @@ current behavior; fixing them is a behavior change belonging to Phase 2.
   the README.
 - **U6** — `history.py` is half-dead: its Excel history is superseded by `db.py`, but it
   still owns the live JSON override files. The module name no longer describes it.
+  *Resolved:* the Excel half is gone; the rest is `rsvp/storage/settings.py`.
