@@ -55,8 +55,29 @@ from rsvp.export.reports import read_gift_contribution_rows
 from rsvp.storage import db, settings
 from rsvp.ports import OutlookPort
 from rsvp.services.invite import InviteRequest, send_invite
+from rsvp.ui import theme
+from rsvp.ui.tokens import COLORS
+from rsvp.ui.widgets import Banner, Card, PageHeader, Sidebar, WrapLabel, autohide, bordered, kpi_row
 
 APP_TITLE = "Outlook RSVP Tool"
+
+# The sidebar and page header: (attribute of the page, sidebar label, page title, description).
+PAGES = [
+    ("tab_config", "Event Setup", "Event setup",
+     "The details every email is built from. Save the event here, or reload a past one."),
+    ("tab_recipients", "Recipients", "Recipients",
+     "Who is invited. The list is saved for the current Event ID after every change."),
+    ("tab_compose", "Compose & Send", "Compose & send",
+     "Write the invitation, translate it if needed, and open it in Outlook."),
+    ("tab_collect", "Collect Responses", "Collect responses",
+     "Read the Yes / No / Maybe votes from your mailbox, and remind whoever has not answered."),
+    ("tab_calendar", "Attendance & Payment", "Attendance & payment",
+     "Calendar invite for Yes / Maybe, who actually came, what they paid, and the thank-you email."),
+    ("tab_gift", "Gift Contribution", "Gift contribution",
+     "Who has contributed to the gift, reminders, and a report for the people you choose."),
+    ("tab_history", "Event History", "Event history",
+     "Every saved event. Double-click a cell to edit it, then save."),
+]
 
 # Tab 7 (Event History): (column, header, width), in db.EVENT_COLUMNS order.
 # Not shown, because nothing writes them any more: the cost columns of the
@@ -67,7 +88,7 @@ APP_TITLE = "Outlook RSVP Tool"
 # "Export to Excel" still writes them. AmountPaid is edited on Tab 5.
 HISTORY_TABLE_COLUMNS = [
     ("EventID", "Event ID", 110), ("EventName", "Event Name", 170),
-    ("EventDate", "Date", 85), ("Deadline", "Deadline", 85),
+    ("EventDate", "Date", 96), ("Deadline", "Deadline", 96),
     ("Location", "Location", 110), ("Budget", "Budget", 90),
     ("EmailLanguage", "Language", 140), ("OrganizerNote", "Organizer Note", 220),
     ("RecipientFile", "Recipient File", 220), ("SentDate", "Sent Date", 120),
@@ -148,9 +169,22 @@ from rsvp.i18n import (  # noqa: F401
 # ══════════════════════════════════════════════════════════════════════════
 # Date-picker helper widget
 # ══════════════════════════════════════════════════════════════════════════
+# The drop-down calendar in the kit's colours instead of tkcalendar's blue.
+CALENDAR_COLORS = dict(
+    background=COLORS["primary"], foreground=COLORS["primary_foreground"],
+    headersbackground=COLORS["muted"], headersforeground=COLORS["muted_foreground"],
+    normalbackground=COLORS["card"], normalforeground=COLORS["foreground"],
+    weekendbackground=COLORS["card"], weekendforeground=COLORS["foreground"],
+    othermonthbackground=COLORS["muted"], othermonthforeground=COLORS["muted_foreground"],
+    othermonthwebackground=COLORS["muted"], othermonthweforeground=COLORS["muted_foreground"],
+    selectbackground=COLORS["primary"], selectforeground=COLORS["primary_foreground"],
+    bordercolor=COLORS["border"], borderwidth=0,
+)
+
+
 def make_date_picker(parent, initial=None):
     if HAS_TKCALENDAR:
-        w = DateEntry(parent, date_pattern="dd/mm/yyyy", width=14)
+        w = DateEntry(parent, date_pattern="dd/mm/yyyy", width=14, **CALENDAR_COLORS)
         if initial:
             try:
                 w.set_date(initial)
@@ -200,66 +234,34 @@ def set_date_str(widget, date_str):
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# Scrollable tab container — every tab's real content goes inside `.body`,
-# so long tabs get a vertical (and horizontal, if needed) scrollbar instead
-# of being cut off on smaller screens / windows.
+# Scrollable page container — every page's real content goes inside `.body`,
+# so long pages get a vertical scrollbar instead of being cut off on smaller
+# screens / windows.
 # ══════════════════════════════════════════════════════════════════════════
 class ScrollableFrame(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
-        # BUG ĐÃ SỬA: tk.Canvas KHÔNG tự lấy màu nền theo theme ttk ("clam")
-        # — mặc định nó dùng màu trắng thuần của hệ thống, khác hẳn màu nền
-        # xám/xanh nhạt mà mọi ttk.Frame/ttk.Label khác trong app đang dùng.
-        # Kết quả: bất cứ khoảng trống nào trong vùng cuộn (canvas rộng hơn
-        # nội dung thật bên trong self.body) đều lộ ra 1 mảng trắng lệch
-        # tông so với phần nền chứa nút bấm/nhãn thông báo xung quanh. Lấy
-        # đúng màu nền mà style ttk "TFrame" đang dùng (fallback về màu xám
-        # nhạt tiêu chuẩn của theme "clam" nếu vì lý do gì đó chưa tra được)
-        # rồi gán thẳng cho canvas để 2 vùng luôn cùng 1 màu.
-        style = ttk.Style(self)
-        bg_color = style.lookup("TFrame", "background") or "#dcdad5"
-        canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0, background=bg_color)
+        # tk.Canvas does not follow the ttk theme, so it gets the page colour explicitly.
+        canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0, background=COLORS["background"])
         vscroll = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
-        hscroll = ttk.Scrollbar(self, orient="horizontal", command=canvas.xview)
-        self.body = ttk.Frame(canvas)
+        # Page margins of the kit's main area (p-6), minus what the header has.
+        self.body = ttk.Frame(canvas, padding=(28, 20, 28, 28))
 
         self.body.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas_window = canvas.create_window((0, 0), window=self.body, anchor="nw")
 
-        # BUG ĐÃ SỬA: self.body trước đây được đặt vào canvas với kích
-        # thước CỐ ĐỊNH bằng đúng nội dung của nó lúc tạo — khi cửa sổ app
-        # được kéo RỘNG hơn, canvas nới rộng ra theo nhưng self.body (và do
-        # đó mọi nhãn thông báo/nút bấm bên trong) KHÔNG nới theo, để lại 1
-        # dải trống bên phải/dưới, đúng như hiện tượng "phần thông báo
-        # không tự động fix theo" khi resize. Giờ mỗi khi canvas đổi kích
-        # thước, ép item cửa sổ bên trong (self.body) rộng bằng đúng canvas
-        # — nội dung sẽ luôn lấp đầy chiều ngang, và các nhãn word-wrap
-        # (_make_wrapping_label) tính lại đúng bề rộng thật để xuống dòng.
+        # Each time the canvas is resized, the body is forced to exactly its
+        # width, so cards fill the page and wrapping labels (WrapLabel) reflow.
         def _on_canvas_configure(event):
             canvas.itemconfig(canvas_window, width=event.width)
-            # MỚI: cũng tính lại wraplength cho MỌI label đã đăng ký vào
-            # ĐÚNG canvas này (xem RSVPApp._make_wrapping_label() bên dưới)
-            # — dùng TRỰC TIẾP chiều rộng THẬT của canvas, thay vì suy luận
-            # gián tiếp từ chiều rộng cửa sổ gốc (self.winfo_width()) như
-            # cách cũ. 2 con số đó lệch nhau khá nhiều (thanh cuộn dọc,
-            # padding của Notebook, indent riêng của từng frame con...),
-            # khiến 1 số label tính sai độ rộng cần xuống dòng và không co
-            # lại đúng khi cửa sổ bị thu nhỏ — đây là NGUYÊN NHÂN gốc của
-            # lỗi "nội dung hướng dẫn chưa fit theo khi resize". Giờ mỗi
-            # canvas tự quản lý danh sách label của riêng nó, luôn khớp
-            # đúng chiều rộng thực tế đang hiển thị của ĐÚNG tab đó.
-            for lbl, margin in list(getattr(canvas, "wrap_labels", [])):
-                try:
-                    lbl.configure(wraplength=max(event.width - margin, 250))
-                except tk.TclError:
-                    pass  # label đã bị huỷ — bỏ qua an toàn
         canvas.bind("<Configure>", _on_canvas_configure)
 
-        canvas.configure(yscrollcommand=vscroll.set, xscrollcommand=hscroll.set)
+        canvas.configure(yscrollcommand=vscroll.set)
 
+        # The body is always exactly as wide as the canvas, so there is never
+        # anything to scroll sideways.
         canvas.grid(row=0, column=0, sticky="nsew")
         vscroll.grid(row=0, column=1, sticky="ns")
-        hscroll.grid(row=1, column=0, sticky="ew")
         self.rowconfigure(0, weight=1)
         self.columnconfigure(0, weight=1)
 
@@ -277,30 +279,70 @@ class ScrollableFrame(ttk.Frame):
         self.canvas = canvas
 
 
-def make_scrollable_treeview(parent, columns, height=10, show="headings"):
-    """Creates a Treeview WITH its scrollbar, both inside a small container frame.
+def make_scrollable_treeview(parent, columns, height=10, show="headings", horizontal=False):
+    """Creates a Treeview WITH its scrollbar(s), inside a bordered container.
+    `horizontal` adds a bottom scrollbar, for tables wider than the page.
     Returns (container, tree). Grid/pack the returned CONTAINER — never the tree itself —
     since the tree's actual parent is the container, not the outer `parent` passed in."""
-    container = ttk.Frame(parent)
+    container = bordered(parent)
     tree = ttk.Treeview(container, columns=columns, show=show, height=height)
     vscroll = ttk.Scrollbar(container, orient="vertical", command=tree.yview)
-    tree.configure(yscrollcommand=vscroll.set)
-    tree.pack(side="left", fill="both", expand=True)
-    vscroll.pack(side="right", fill="y")
+    tree.configure(yscrollcommand=autohide(vscroll))
+    tree.grid(row=0, column=0, sticky="nsew")
+    vscroll.grid(row=0, column=1, sticky="ns")
+    if horizontal:
+        hscroll = ttk.Scrollbar(container, orient="horizontal", command=tree.xview)
+        tree.configure(xscrollcommand=autohide(hscroll))
+        hscroll.grid(row=1, column=0, sticky="ew")
+    container.rowconfigure(0, weight=1)
+    container.columnconfigure(0, weight=1)
     return container, tree
 
 
 def make_scrollable_text(parent, **text_kwargs):
-    """Creates a Text widget WITH its scrollbar, both inside a small container frame.
+    """Creates a Text widget WITH its scrollbar, both inside a bordered container
+    whose border turns to the focus colour while the text has focus.
     Returns (container, text_widget). Grid/pack the returned CONTAINER — never the text
     widget itself — since the text widget's actual parent is the container."""
-    container = ttk.Frame(parent)
+    background = text_kwargs.get("bg", COLORS["card"])
+    container = bordered(parent, bg=background)
     text_widget = tk.Text(container, **text_kwargs)
     vscroll = ttk.Scrollbar(container, orient="vertical", command=text_widget.yview)
     text_widget.configure(yscrollcommand=vscroll.set, wrap="word")
     text_widget.pack(side="left", fill="both", expand=True)
     vscroll.pack(side="right", fill="y")
+    text_widget.bind("<FocusIn>", lambda e: container.configure(highlightbackground=COLORS["ring"],
+                                                                highlightcolor=COLORS["ring"]), add="+")
+    text_widget.bind("<FocusOut>", lambda e: container.configure(highlightbackground=COLORS["border"],
+                                                                 highlightcolor=COLORS["border"]), add="+")
     return container, text_widget
+
+
+def button_row(parent, *buttons, pady=(12, 0)):
+    """A row of buttons, left-aligned: (text, command[, style])."""
+    row = ttk.Frame(parent)
+    row.pack(fill="x", pady=pady)
+    made = []
+    for i, spec in enumerate(buttons):
+        text, command = spec[0], spec[1]
+        style = spec[2] if len(spec) > 2 else "TButton"
+        b = ttk.Button(row, text=text, command=command, style=style)
+        b.pack(side="left", padx=(0 if i == 0 else 8, 0))
+        made.append(b)
+    return row, made
+
+
+def field(parent, row, column, label, widget_factory, columnspan=1, hint=None):
+    """A form field the kit's way: a small label above its input. Returns the input."""
+    cell = ttk.Frame(parent)
+    cell.grid(row=row, column=column, columnspan=columnspan, sticky="nwe",
+              padx=(0 if column == 0 else 8, 0), pady=(0, 12))
+    ttk.Label(cell, text=label, style="Field.TLabel").pack(anchor="w", pady=(0, 4))
+    widget = widget_factory(cell)
+    widget.pack(anchor="w", fill="x")
+    if hint:
+        WrapLabel(cell, text=hint, style="Hint.TLabel").pack(anchor="w", fill="x", pady=(3, 0))
+    return widget
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -313,7 +355,10 @@ class RSVPApp(tk.Tk):
         # outlook_com - scripts/check_layering.py fails any other use.
         self.outlook: OutlookPort = outlook if outlook is not None else outlook_com
         self.title(APP_TITLE)
-        self.geometry("1020x720")
+        self.geometry("1240x800")
+        self.minsize(980, 640)
+        # Before any widget exists: every style, font and default comes from here.
+        self.fonts = theme.apply(self)
 
         # ── shared state across tabs ──
         self.recipients = []
@@ -386,41 +431,27 @@ class RSVPApp(tk.Tk):
                 "pip install tkcalendar"
             )
 
-        # ── Notebook tab styling ──
-        # By default, ttk uses the OS theme's tab colors — on Windows this
-        # is usually "vista"/"xpnative", which draws the Notebook tab
-        # background NATIVELY and ignores our custom "background" color,
-        # while still respecting our custom "foreground" (text) color. That
-        # mismatch is exactly what caused the bug report: the selected
-        # tab's background stayed the native white/light color while its
-        # text was set to white, making the label invisible. Switching to
-        # the "clam" theme (a pure-Tk theme, not OS-native) makes ttk fully
-        # respect our style customization, so both background AND
-        # foreground actually render as configured below. This does change
-        # the look of other widgets slightly too (buttons, checkboxes,
-        # etc.) to the "clam" style, but keeps the app fully usable and
-        # fixes the readability bug for good, instead of just tweaking
-        # colors that the old theme might ignore again.
-        style = ttk.Style(self)
-        try:
-            style.theme_use("clam")
-        except Exception:
-            pass  # "clam" should always be available, but fall back safely if not
-        style.configure(
-            "TNotebook.Tab",
-            padding=(14, 8),
-            font=("Arial", 10, "bold"),
-            background="#D9E2F3",
-            foreground="#003366",
-        )
-        style.map(
-            "TNotebook.Tab",
-            background=[("selected", "#003366"), ("active", "#B7C9EB")],
-            foreground=[("selected", "#FFFFFF"), ("active", "#003366")],
-        )
+        # ── shell: the kit's sidebar + header + page area ──
+        shell = ttk.Frame(self)
+        shell.pack(fill="both", expand=True)
+        self.var_header_event = tk.StringVar(value="No event selected")
+        self.var_sidebar_footer = tk.StringVar()
+        self.sidebar = Sidebar(
+            shell, self.fonts, APP_TITLE, "Event follow-up",
+            [(i, i + 1, label) for i, (_attr, label, _t, _d) in enumerate(PAGES)],
+            self._show_page, footer_var=self.var_sidebar_footer)
+        self.sidebar.pack(side="left", fill="y")
+        main = ttk.Frame(shell)
+        main.pack(side="left", fill="both", expand=True)
+        self.page_header = PageHeader(main, self.fonts, badge_var=self.var_header_event)
+        self.page_header.pack(fill="x")
+        tk.Frame(main, bg=COLORS["border"], height=1).pack(fill="x")
 
-        nb = ttk.Notebook(self)
-        nb.pack(fill="both", expand=True, padx=8, pady=8)
+        # A notebook still holds the pages - selecting one fires
+        # <<NotebookTabChanged>> - but its tab strip is hidden; the sidebar
+        # is the navigation.
+        nb = ttk.Notebook(main, style="Pages.TNotebook")
+        nb.pack(fill="both", expand=True)
         self.nb = nb
 
         self.tab_config = ScrollableFrame(nb)
@@ -430,14 +461,9 @@ class RSVPApp(tk.Tk):
         self.tab_calendar = ScrollableFrame(nb)
         self.tab_gift = ScrollableFrame(nb)  # MỚI — theo dõi quyên góp quà tặng
         self.tab_history = ScrollableFrame(nb)
-
-        nb.add(self.tab_config, text="  1. Event Setup  ")
-        nb.add(self.tab_recipients, text="  2. Recipients  ")
-        nb.add(self.tab_compose, text="  3. Compose & Send  ")
-        nb.add(self.tab_collect, text="  4. Collect Responses  ")
-        nb.add(self.tab_calendar, text="  5. Attendance & Payment  ")
-        nb.add(self.tab_gift, text="  6. Gift Contribution  ")
-        nb.add(self.tab_history, text="  7. Event History  ")
+        self._pages = [getattr(self, attr) for attr, _l, _t, _d in PAGES]
+        for page in self._pages:
+            nb.add(page)
 
         self._build_tab_config()
         self._build_tab_recipients()
@@ -452,11 +478,40 @@ class RSVPApp(tk.Tk):
         # up to date when the user SWITCHES TO it.
         nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
+        self.var_event_id.trace_add("write", lambda *a: self._refresh_header_event())
+        self.var_event_name.trace_add("write", lambda *a: self._refresh_header_event())
+        self.history_path.trace_add("write", lambda *a: self._refresh_sidebar_footer())
+        self._refresh_header_event()
+        self._refresh_sidebar_footer()
+        self._show_page(0)
+        self._mark_page(self.tab_config)
+
+    def _show_page(self, index):
+        self.nb.select(self._pages[index])
+
+    def _mark_page(self, page):
+        """Sidebar highlight and page header for the page now shown."""
+        index = self._pages.index(page)
+        _attr, _label, title, description = PAGES[index]
+        self.sidebar.set_active(index)
+        self.page_header.set(title, description)
+
+    def _refresh_header_event(self):
+        event_id = self.var_event_id.get().strip()
+        name = self.var_event_name.get().strip()
+        self.var_header_event.set(f"● {event_id}" + (f" · {name}" if name else "") if event_id
+                                  else "No event selected")
+
+    def _refresh_sidebar_footer(self):
+        self.var_sidebar_footer.set(f"Database: {os.path.basename(self.history_path.get()) or '—'}")
+
     def _on_tab_changed(self, event):
         try:
             selected = event.widget.nametowidget(event.widget.select())
         except Exception:
             return
+        if selected in self._pages:
+            self._mark_page(selected)
         if selected is self.tab_compose:
             self._refresh_compose_preview_unless_edited()
         elif selected is self.tab_calendar:
@@ -573,46 +628,6 @@ class RSVPApp(tk.Tk):
             return
         self._begin_cell_edit(tree, row_id, col_name, on_commit)
 
-    def _make_wrapping_label(self, parent, margin=60, **kwargs):
-        """Creates a ttk.Label that automatically re-wraps its text (via
-        wraplength) whenever ITS OWN TAB is resized — used for long
-        instructional/help text that would otherwise get clipped, or
-        trigger the horizontal scrollbar, when the window is narrowed.
-        `margin` is roughly how much horizontal space (in pixels) to
-        reserve for padding/indentation around the label — bump it up a
-        bit for labels nested further to the right. Usage is a drop-in
-        replacement for ttk.Label(...) — chain .grid(...)/.pack(...) on
-        the result exactly the same way:
-            self._make_wrapping_label(f, text="...", font=(...)).grid(row=r, ...)
-
-        BUG ĐÃ SỬA: bản trước tính wraplength dựa theo self.winfo_width()
-        (chiều rộng của CỬA SỔ GỐC toàn app) — con số này luôn RỘNG HƠN
-        vùng nội dung THẬT SỰ nhìn thấy được bên trong 1 tab cụ thể (mất đi
-        vì thanh cuộn dọc, padding của Notebook, indent riêng của từng
-        frame con lồng nhau...), nên nhiều label không co lại đúng khi cửa
-        sổ bị thu nhỏ. Giờ dò ngược lên cây widget cha để tìm đúng
-        tk.Canvas của ScrollableFrame đang bọc tab chứa label này, và đăng
-        ký vào DANH SÁCH RIÊNG của canvas đó (canvas.wrap_labels, xem
-        ScrollableFrame.__init__) — mỗi khi CHÍNH canvas đó đổi kích thước
-        (khớp chính xác vùng hiển thị thật), wraplength được tính lại theo
-        đúng con số đó, không qua trung gian nào khác."""
-        lbl = ttk.Label(parent, **kwargs)
-        # Every tab is a ScrollableFrame, so every label has a Canvas ancestor.
-        w = parent
-        while w is not None and not isinstance(w, tk.Canvas):
-            w = w.master
-        if w is not None:
-            if not hasattr(w, "wrap_labels"):
-                w.wrap_labels = []
-            w.wrap_labels.append((lbl, margin))
-            try:
-                current_width = w.winfo_width()
-                if current_width > 1:
-                    lbl.configure(wraplength=max(current_width - margin, 250))
-            except Exception:
-                pass
-        return lbl
-
     def _enable_treeview_copy_paste(self, tree, on_commit=None, editable_cols=None):
         """Adds Ctrl+C / Ctrl+V clipboard support to a Treeview:
         - Ctrl+C copies the selected rows (or all rows, if none selected)
@@ -681,154 +696,105 @@ class RSVPApp(tk.Tk):
     # ══════════════════════════════════════════════════════════════════
     def _build_tab_config(self):
         f = self.tab_config.body
-        pad = {"padx": 10, "pady": 6}
+        gap = {"fill": "x", "pady": (0, 16)}
 
-        header_bar = ttk.Frame(f)
-        header_bar.grid(row=0, column=0, columnspan=3, sticky="we", **pad)
-        ttk.Label(header_bar, text="Event details (these fields auto-fill into the invite email)",
-                  font=("Arial", 11, "bold")).pack(side="left")
-        # MỚI: "Event mode" — chọn sự kiện này thuộc dạng nào:
-        #  - "Event": chỉ RSVP bình thường (mặc định, hành vi y hệt trước giờ)
-        #  - "Gift": CHỈ thông báo kêu gọi đóng góp mua quà tặng (Tab 3 có
-        #    thêm mode "Send Gift Contribution Notice"), không cần RSVP
-        #  - "Event + Gift": vừa RSVP vừa có kêu gọi đóng góp quà — dùng khi
-        #    cùng lúc tổ chức tiệc (cần biết số người tham dự) VÀ muốn quyên
-        #    góp mua quà tặng (vd tiệc farewell tặng quà người sắp nghỉ việc)
-        # Bản thân "Event mode" chỉ là NHÃN LƯU Ý — không tự động khoá/ẩn
-        # tính năng nào cả, bạn vẫn luôn có thể dùng bất kỳ Send mode nào ở
-        # Tab 3 bất kể chọn gì ở đây; nó giúp bạn nhớ lại mục đích sự kiện
-        # khi xem lại History sau này (cột "EventMode").
-        ttk.Label(header_bar, text="   Event mode:", font=("Arial", 10, "bold")).pack(side="left")
+        # "Event mode" chỉ là NHÃN LƯU Ý (Event / Gift / Event + Gift) — không
+        # khoá/ẩn tính năng nào; nó giúp nhớ lại mục đích sự kiện ở History.
         self.var_event_mode = tk.StringVar(value="Event")
-        self.combo_event_mode = ttk.Combobox(
-            header_bar, width=16, state="readonly", textvariable=self.var_event_mode,
-            values=["Event", "Gift", "Event + Gift"],
-        )
-        self.combo_event_mode.pack(side="left", padx=(4, 0))
-
         self.var_event_name = tk.StringVar(value="Team Building Q3 2026")
         self.var_event_id = tk.StringVar(value="TB2026-Q3")
         # Mỗi khi Event ID đổi (gõ tay hoặc do Load setup/Register event...),
         # tự cập nhật banner trạng thái ở đầu Tab 4 — báo ngay nếu bảng kết
         # quả đang hiện là của 1 Event ID KHÁC (còn sót từ lần Scan trước).
         self.var_event_id.trace_add(
-            "write", lambda *a: self._update_scan_status_banner() if hasattr(self, "lbl_scan_status") else None)
+            "write", lambda *a: self._update_scan_status_banner() if hasattr(self, "banner_scan") else None)
         self.var_location = tk.StringVar(value="")
         self.var_budget = tk.StringVar(value="")
         self.var_gift_budget = tk.StringVar(value="")
         self.var_organizer = tk.StringVar(value="")
         self.var_guest_of_honor = tk.StringVar(value="")
-
-        r = 1
-        ttk.Label(f, text="Event Name:").grid(row=r, column=0, sticky="w", **pad)
-        ttk.Entry(f, textvariable=self.var_event_name, width=50).grid(row=r, column=1, sticky="w", **pad)
-        r += 1
-        ttk.Label(f, text="Event ID (no spaces/accents, must be unique):").grid(row=r, column=0, sticky="w", **pad)
-        ttk.Entry(f, textvariable=self.var_event_id, width=50).grid(row=r, column=1, sticky="w", **pad)
-        r += 1
-        ttk.Label(f, text="Location:").grid(row=r, column=0, sticky="w", **pad)
-        ttk.Entry(f, textvariable=self.var_location, width=50).grid(row=r, column=1, sticky="w", **pad)
-        r += 1
-        # Đổi tên "Expected Budget" -> "Expected EVENT Budget" để phân biệt rõ
-        # với "Expected GIFT Budget" mới thêm ngay bên dưới (2 khoản chi khác
-        # nhau: ngân sách tổ chức sự kiện vs ngân sách mua quà tặng).
-        ttk.Label(f, text="Expected event budget (e.g. \"5,000 JPY / person\"):").grid(row=r, column=0, sticky="w", **pad)
-        ttk.Entry(f, textvariable=self.var_budget, width=50).grid(row=r, column=1, sticky="w", **pad)
-        r += 1
-        ttk.Label(f, text="Expected gift budget (e.g. \"3,000 JPY / person\"):").grid(row=r, column=0, sticky="w", **pad)
-        ttk.Entry(f, textvariable=self.var_gift_budget, width=50).grid(row=r, column=1, sticky="w", **pad)
-        r += 1
-
-        ttk.Label(f, text="Event Date:").grid(row=r, column=0, sticky="w", **pad)
-        self.date_event = make_date_picker(f, datetime.now() + timedelta(days=21))
-        self.date_event.grid(row=r, column=1, sticky="w", **pad)
-        r += 1
-
-        # MỚI: Start time / End time CHUYỂN TỪ TAB 5 LÊN ĐÂY (ngay dưới Event
-        # Date) — trước đây 2 ô này chỉ tồn tại ở Tab 5 (Attendance & Payment) và
-        # KHÔNG được lưu vào History, nên "Load setup from selected event"
-        # không nạp lại được, mỗi lần mở Tab 5 lại phải gõ tay lại giờ. Giờ
-        # thuộc Tab 1 nên được lưu/nạp cùng các thông tin sự kiện khác, và
-        # Tab 5 dùng lại TRỰC TIẾP 2 biến này (self.var_start_time/
-        # self.var_end_time) khi tạo Calendar Invite — không còn ô riêng ở
-        # Tab 5 nữa.
-        ttk.Label(f, text="Start time (HH:MM):").grid(row=r, column=0, sticky="w", **pad)
         self.var_start_time = tk.StringVar(value="18:00")
-        ttk.Entry(f, textvariable=self.var_start_time, width=10).grid(row=r, column=1, sticky="w", **pad)
-        r += 1
-        ttk.Label(f, text="End time (HH:MM):").grid(row=r, column=0, sticky="w", **pad)
         self.var_end_time = tk.StringVar(value="21:00")
-        ttk.Entry(f, textvariable=self.var_end_time, width=10).grid(row=r, column=1, sticky="w", **pad)
-        r += 1
 
-        ttk.Label(f, text="Event response deadline:").grid(row=r, column=0, sticky="w", **pad)
-        self.date_deadline = make_date_picker(f, datetime.now() + timedelta(days=10))
-        self.date_deadline.grid(row=r, column=1, sticky="w", **pad)
-        r += 1
+        details = Card(f, "Event details",
+                       "Name, place and budget fill the subject and body of every email. The Event ID is "
+                       "how replies are matched to this event: unique, no spaces or accents.")
+        details.pack(**gap)
+        g = details.body
+        g.columnconfigure((0, 1), weight=1, uniform="form")
+        field(g, 0, 0, "Event name", lambda p: ttk.Entry(p, textvariable=self.var_event_name))
+        field(g, 0, 1, "Event ID", lambda p: ttk.Entry(p, textvariable=self.var_event_id))
+        field(g, 1, 0, "Location", lambda p: ttk.Entry(p, textvariable=self.var_location))
+        self.combo_event_mode = field(
+            g, 1, 1, "Event mode",
+            lambda p: ttk.Combobox(p, state="readonly", textvariable=self.var_event_mode,
+                                   values=["Event", "Gift", "Event + Gift"]),
+            hint="A reminder of what the event is for; every send mode stays available.")
+        field(g, 2, 0, "Expected event budget", lambda p: ttk.Entry(p, textvariable=self.var_budget),
+              hint='e.g. "5,000 JPY / person"')
 
-        # MỚI: "Gift contribution deadline" — hạn RIÊNG để mọi người đóng
-        # góp tiền mua quà, khác với "Event response deadline" (hạn RSVP có
-        # tham dự hay không) ở trên — 2 việc này thường không cùng ngày (vd
-        # cần chốt RSVP sớm hơn để chuẩn bị tiệc, nhưng có thể gia hạn thời
-        # gian đóng góp quà lâu hơn 1 chút). Dùng cho email "Send Gift
-        # Contribution Notice" ở Tab 3 (xem build_gift_fixed_block()).
-        ttk.Label(f, text="Gift contribution deadline:").grid(row=r, column=0, sticky="w", **pad)
-        self.date_gift_deadline = make_date_picker(f, datetime.now() + timedelta(days=10))
-        self.date_gift_deadline.grid(row=r, column=1, sticky="w", **pad)
-        r += 1
+        schedule = Card(f, "Date & deadlines",
+                        "Start and end time also set the Calendar Invite on Attendance & payment.")
+        schedule.pack(**gap)
+        g = schedule.body
+        g.columnconfigure((0, 1, 2), weight=1, uniform="form")
+        self.date_event = field(g, 0, 0, "Event date",
+                                lambda p: make_date_picker(p, datetime.now() + timedelta(days=21)))
+        field(g, 0, 1, "Start time (HH:MM)", lambda p: ttk.Entry(p, textvariable=self.var_start_time))
+        field(g, 0, 2, "End time (HH:MM)", lambda p: ttk.Entry(p, textvariable=self.var_end_time))
+        self.date_deadline = field(g, 1, 0, "Response deadline",
+                                   lambda p: make_date_picker(p, datetime.now() + timedelta(days=10)))
 
-        # MỚI: Organizer / Guest of Honor — dùng cho email "Send Gift
-        # Contribution Notice" ở Tab 3 (Organizer = người nhận đóng góp,
-        # Guest of Honor = người được tặng quà, vd người sắp nghỉ việc) —
-        # nhưng vẫn hiển thị luôn ở Event mode "Event" (không bị ẩn) vì đôi
-        # khi hữu ích để ghi chú ai là người tổ chức/nhân vật chính dù
-        # không quyên góp quà, không bắt buộc phải điền.
-        ttk.Label(f, text="Organizer (contact person for gift contributions):").grid(row=r, column=0, sticky="w", **pad)
-        ttk.Entry(f, textvariable=self.var_organizer, width=50).grid(row=r, column=1, sticky="w", **pad)
-        r += 1
-        ttk.Label(f, text="Guest of Honor (who the gift is for):").grid(row=r, column=0, sticky="w", **pad)
-        ttk.Entry(f, textvariable=self.var_guest_of_honor, width=50).grid(row=r, column=1, sticky="w", **pad)
-        r += 1
+        # Organizer = người nhận đóng góp, Guest of Honor = người được tặng
+        # quà — dùng cho email "Send Gift Contribution Notice" ở Tab 3.
+        gift = Card(f, "Gift contribution",
+                    "Only for events that collect money for a gift (Event mode Gift, or Event + Gift). "
+                    "The contribution deadline can be later than the response deadline.")
+        gift.pack(**gap)
+        g = gift.body
+        g.columnconfigure((0, 1), weight=1, uniform="form")
+        field(g, 0, 0, "Guest of honor (who the gift is for)",
+              lambda p: ttk.Entry(p, textvariable=self.var_guest_of_honor))
+        field(g, 0, 1, "Organizer (collects the contributions)",
+              lambda p: ttk.Entry(p, textvariable=self.var_organizer))
+        field(g, 1, 0, "Expected gift budget", lambda p: ttk.Entry(p, textvariable=self.var_gift_budget),
+              hint='e.g. "3,000 JPY / person"')
+        self.date_gift_deadline = field(g, 1, 1, "Gift contribution deadline",
+                                        lambda p: make_date_picker(p, datetime.now() + timedelta(days=10)))
 
-        ttk.Label(f, text="Organizer note (free text — you can write in any language;\n"
-                          "translate it per-language on the Compose tab):").grid(row=r, column=0, sticky="nw", **pad)
-        self.entry_note = tk.Text(f, width=55, height=3)
+        note = Card(f, "Organizer note",
+                    "Free text in any language, shown right after the greeting. Translate it per "
+                    "language on Compose & send.")
+        note.pack(**gap)
+        note_box, self.entry_note = make_scrollable_text(note.body, height=4)
         self.entry_note.insert("1.0", "Please respond before the deadline so we can prepare accurate numbers.")
-        self.entry_note.grid(row=r, column=1, sticky="w", **pad)
-        r += 1
+        note_box.pack(fill="x")
 
-        ttk.Button(f, text="📝 Register event (save to History + reset form for a NEW event)",
-                   command=self._register_event).grid(row=r, column=0, columnspan=2, sticky="w", **pad)
-        r += 1
-        ttk.Label(f, text="→ Saves as a NEW event in History, then clears this form for the next one.",
-                  font=("Arial", 8, "italic")).grid(row=r, column=0, columnspan=2, sticky="w", padx=4)
-        r += 1
+        bottom = ttk.Frame(f)
+        bottom.pack(fill="x")
+        bottom.columnconfigure((0, 1), weight=1, uniform="half")
+        save = Card(bottom, "Save this event",
+                    "Writes the details above to History. No email is sent: to tell people about a "
+                    "change, use 'Send update invite' on Compose & send.")
+        save.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        ttk.Button(save.body, text="💾 Save event details", style="Primary.TButton",
+                   command=self._update_history_from_tab1).pack(anchor="w")
+        ttk.Button(save.body, text="🆕 Save & start a new event", command=self._register_event)\
+            .pack(anchor="w", pady=(8, 0))
+        ttk.Label(save.body, text="Starting a new event clears every page; this one stays in History.",
+                  style="Hint.TLabel").pack(anchor="w", pady=(6, 0))
 
-        ttk.Separator(f).grid(row=r, column=0, columnspan=3, sticky="ew", pady=10)
-        r += 1
-
-        ttk.Label(f, text="Reload setup from a past event saved in history:",
-                  font=("Arial", 10, "italic")).grid(row=r, column=0, columnspan=2, sticky="w", **pad)
-        r += 1
+        reload = Card(bottom, "Reload a past event",
+                      "Brings back its details, recipients, votes, attendance and gift list. "
+                      "Outlook is not scanned.")
+        reload.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
         # postcommand re-reads the database each time the list opens, so an
         # event saved from any tab shows up without a manual refresh.
-        self.combo_load_history = ttk.Combobox(f, width=50, state="readonly",
+        self.combo_load_history = ttk.Combobox(reload.body, state="readonly",
                                                postcommand=self._refresh_history_combo_values)
-        self.combo_load_history.grid(row=r, column=1, sticky="w", **pad)
-        ttk.Button(f, text="⬅ Load setup from selected event", command=self._load_from_history)\
-            .grid(row=r, column=0, sticky="w", **pad)
-        r += 1
-
-        ttk.Separator(f).grid(row=r, column=0, columnspan=3, sticky="ew", pady=10)
-        r += 1
-        self._make_wrapping_label(f, text="Already sent invites for this Event ID, but the details above changed since "
-                          "(location/date/deadline/budget/note)? Push the update into History directly —\n"
-                          "no email needs to be sent for this. (To also NOTIFY people by email, use "
-                          "'Send update invite' mode on Tab 3 instead — that sends AND updates History.)",
-                  font=("Arial", 9, "italic")).grid(row=r, column=0, columnspan=3, sticky="w", **pad)
-        r += 1
-        ttk.Button(f, text="💾 Update this event in History (no email sent)", command=self._update_history_from_tab1)\
-            .grid(row=r, column=0, columnspan=2, sticky="w", **pad)
+        self.combo_load_history.pack(fill="x")
+        ttk.Button(reload.body, text="⬅ Load setup from selected event", command=self._load_from_history)\
+            .pack(anchor="w", pady=(8, 0))
 
         self._refresh_history_combo()
 
@@ -883,15 +849,15 @@ class RSVPApp(tk.Tk):
         '⬅ Load setup from selected event'."""
         event_id = self.var_event_id.get().strip()
         if not event_id:
-            messagebox.showwarning("Missing Event ID", "Enter an Event ID before registering the event.")
+            messagebox.showwarning("Missing Event ID", "Enter an Event ID before saving the event.")
             return
 
         if not messagebox.askyesno(
-            "Register new event",
-            f"Register event '{event_id}' to the database?\n\n"
-            "After registering, the WHOLE form (Tab 1 → 6: event info, recipient list, "
+            "Save & start a new event",
+            f"Save event '{event_id}' to History and start a new one?\n\n"
+            "After saving, the WHOLE form (Tab 1 → 6: event info, recipient list, "
             "composed content and translations, scanned results...) will be CLEARED so you can "
-            "start entering a NEW event. The event you just registered is still safely stored in "
+            "start entering a NEW event. The event you just saved is still safely stored in "
             "History, and can be reloaded any time via '⬅ Load setup from selected event'."
         ):
             return
@@ -900,8 +866,8 @@ class RSVPApp(tk.Tk):
             return
         self._reset_for_new_event()
         messagebox.showinfo(
-            "Registered",
-            f"Event '{event_id}' registered to History.\n\n"
+            "Saved",
+            f"Event '{event_id}' saved to History.\n\n"
             "The form has been reset to defaults — ready to enter a new event."
         )
 
@@ -939,7 +905,10 @@ class RSVPApp(tk.Tk):
         self.tree_responses.delete(*self.tree_responses.get_children())
         self.tree_pending.delete(*self.tree_pending.get_children())
         self.lbl_summary.config(text="No responses scanned yet.")
-        self.lbl_deadline_banner.config(text="")
+        for var in (self.var_kpi_total, self.var_kpi_yes, self.var_kpi_no, self.var_kpi_maybe,
+                    self.var_kpi_pending):
+            var.set("0")
+        self.banner_deadline.set("")
         self.txt_reminder_body.delete("1.0", "end")
 
         # Tab 5 — the two bodies are regenerated from Tab 1 when the tab opens
@@ -1152,60 +1121,60 @@ class RSVPApp(tk.Tk):
     # ══════════════════════════════════════════════════════════════════
     def _build_tab_recipients(self):
         f = self.tab_recipients.body
-        top = ttk.Frame(f)
-        top.pack(fill="x", padx=10, pady=8)
 
-        # The list is saved to the database automatically after every change
-        # (Import/Add/Delete row/Expand group); Excel is only an import source
-        # and an export format.
-        ttk.Button(top, text="📥 Import from Excel...", command=self._load_recipients).pack(side="left")
-        ttk.Button(top, text="📊 Export to Excel", command=self._export_recipients_to_excel).pack(side="left", padx=6)
-        ttk.Label(top, textvariable=self.recipient_file, font=("Arial", 8, "italic")).pack(side="left", padx=6)
+        people = Card(f, "Recipient list",
+                      "Import from Excel (Name in column A, Email in column B) or add people below. "
+                      "The list is saved for the current Event ID after every change.")
+        people.pack(fill="both", expand=True, pady=(0, 16))
+        ttk.Button(people.actions, text="📊 Export to Excel", command=self._export_recipients_to_excel)\
+            .pack(side="right")
+        ttk.Button(people.actions, text="📥 Import from Excel...", style="Primary.TButton",
+                   command=self._load_recipients).pack(side="right", padx=(0, 8))
 
-        expand_bar = ttk.Frame(f)
-        expand_bar.pack(fill="x", padx=10, pady=(0, 6))
-        ttk.Button(expand_bar, text="🔎 Expand group emails in list (incl. sub-groups)",
-                   command=self._expand_group_recipients).pack(side="left")
-        # margin: the button to its left takes ~380px of the row.
-        self._make_wrapping_label(expand_bar, margin=420, text="  → Any row that is a company Distribution List (group email, "
-                                   "e.g. 'EET Employees All') gets replaced with its REAL individual "
-                                   "members, so Tab 4 can track exactly who hasn't responded yet.",
-                  font=("Arial", 8, "italic")).pack(side="left")
-
-        # MỚI: ô tìm kiếm nhanh theo Name/Email — lọc TRỰC TIẾP bảng bên dưới
-        # khi gõ (không cần bấm nút), khớp theo dạng "chứa chuỗi" (không phân
-        # biệt hoa/thường), tìm trên CẢ Name lẫn Email cùng lúc.
-        search_bar = ttk.Frame(f)
-        search_bar.pack(fill="x", padx=10, pady=(0, 6))
-        ttk.Label(search_bar, text="🔎 Search (name or email):").pack(side="left")
+        # Lọc TRỰC TIẾP bảng bên dưới khi gõ, trên CẢ Name lẫn Email.
+        toolbar = ttk.Frame(people.body)
+        toolbar.pack(fill="x", pady=(0, 12))
         self.var_recipient_search = tk.StringVar(value="")
-        search_entry = ttk.Entry(search_bar, textvariable=self.var_recipient_search, width=40)
-        search_entry.pack(side="left", padx=6)
+        ttk.Label(toolbar, text="🔎", style="Muted.TLabel").pack(side="left", padx=(0, 6))
+        ttk.Entry(toolbar, textvariable=self.var_recipient_search, width=36).pack(side="left")
         self.var_recipient_search.trace_add("write", lambda *a: self._apply_recipient_filter())
-        ttk.Button(search_bar, text="✕ Clear", command=lambda: self.var_recipient_search.set(""))\
-            .pack(side="left", padx=4)
+        ttk.Button(toolbar, text="✕ Clear", style="Ghost.TButton",
+                   command=lambda: self.var_recipient_search.set("")).pack(side="left", padx=(6, 0))
+        ttk.Button(toolbar, text="🔎 Expand group emails", command=self._expand_group_recipients)\
+            .pack(side="right")
 
         cols = ("name", "email")
-        tree_container, self.tree_recipients = make_scrollable_treeview(f, columns=cols, height=18)
-        self.tree_recipients.heading("name", text="Name")
-        self.tree_recipients.heading("email", text="Email")
+        tree_container, self.tree_recipients = make_scrollable_treeview(people.body, columns=cols, height=16)
+        self.tree_recipients.heading("name", text="Name", anchor="w")
+        self.tree_recipients.heading("email", text="Email", anchor="w")
         self.tree_recipients.column("name", width=280)
         self.tree_recipients.column("email", width=320)
-        tree_container.pack(fill="both", expand=True, padx=10, pady=6)
+        tree_container.pack(fill="both", expand=True)
 
-        edit_bar = ttk.Frame(f)
-        edit_bar.pack(fill="x", padx=10, pady=6)
+        footer = ttk.Frame(people.body)
+        footer.pack(fill="x", pady=(10, 0))
+        self.lbl_recipient_count = ttk.Label(footer, text="No list loaded yet.", style="Muted.TLabel")
+        self.lbl_recipient_count.pack(side="left")
+        ttk.Label(footer, textvariable=self.recipient_file, style="Hint.TLabel").pack(side="right")
+        WrapLabel(people.body, style="Hint.TLabel",
+                  text="Expand group emails replaces a distribution list (e.g. 'EET Employees All') "
+                       "with its real members, sub-groups included, so Collect responses can tell "
+                       "exactly who has not answered.").pack(fill="x", pady=(8, 0))
+
+        add = Card(f, "Add a person")
+        add.pack(fill="x")
+        g = add.body
+        g.columnconfigure((0, 1), weight=1, uniform="form")
         self.var_new_name = tk.StringVar()
         self.var_new_email = tk.StringVar()
-        ttk.Label(edit_bar, text="Name:").pack(side="left")
-        ttk.Entry(edit_bar, textvariable=self.var_new_name, width=28).pack(side="left", padx=3)
-        ttk.Label(edit_bar, text="Email:").pack(side="left", padx=(6, 0))
-        ttk.Entry(edit_bar, textvariable=self.var_new_email, width=28).pack(side="left", padx=3)
-        ttk.Button(edit_bar, text="➕ Add person", command=self._add_recipient_row).pack(side="left", padx=6)
-        ttk.Button(edit_bar, text="🗑 Delete selected row", command=self._delete_recipient_row).pack(side="left", padx=6)
-
-        self.lbl_recipient_count = ttk.Label(f, text="No list loaded yet.")
-        self.lbl_recipient_count.pack(anchor="w", padx=10, pady=4)
+        field(g, 0, 0, "Name", lambda p: ttk.Entry(p, textvariable=self.var_new_name))
+        field(g, 0, 1, "Email", lambda p: ttk.Entry(p, textvariable=self.var_new_email))
+        buttons = ttk.Frame(g)
+        buttons.grid(row=1, column=0, columnspan=2, sticky="w")
+        ttk.Button(buttons, text="➕ Add person", style="Primary.TButton",
+                   command=self._add_recipient_row).pack(side="left")
+        ttk.Button(buttons, text="🗑 Delete selected row", command=self._delete_recipient_row)\
+            .pack(side="left", padx=(8, 0))
 
     def _load_recipients(self):
         """Asks for an Excel file and replaces Tab 2's list with it. Reads
@@ -1429,166 +1398,135 @@ class RSVPApp(tk.Tk):
     # ══════════════════════════════════════════════════════════════════
     def _build_tab_compose(self):
         f = self.tab_compose.body
-        pad = {"padx": 10, "pady": 5}
+        gap = {"fill": "x", "pady": (0, 16)}
 
-        # ── send mode selector (TOP-MOST — important choice, made first) ──
-        send_mode_bar = ttk.Frame(f, relief="ridge", borderwidth=1)
-        send_mode_bar.grid(row=0, column=0, columnspan=2, sticky="we", padx=10, pady=(8, 4))
-        ttk.Label(send_mode_bar, text="📤 Send mode:", font=("Arial", 11, "bold"))\
-            .pack(side="left", padx=(8, 6), pady=6)
-        self.combo_send_mode = ttk.Combobox(
-            send_mode_bar, width=28, state="readonly",
-            values=["Send first Invite", "Send update invite", "Send Gift Contribution Notice"],
-        )
+        # ── send mode + language (TOP-MOST — important choice, made first) ──
+        message = Card(f, "Message", "What kind of email this is, and in which language.")
+        message.pack(**gap)
+        g = message.body
+        g.columnconfigure((0, 1), weight=1, uniform="form")
+        self.combo_send_mode = field(
+            g, 0, 0, "Send mode",
+            lambda p: ttk.Combobox(p, state="readonly", values=[
+                "Send first Invite", "Send update invite", "Send Gift Contribution Notice"]),
+            hint="'Update invite' adds a change notice and lets people vote again. 'Gift Contribution "
+                 "Notice' announces the gift from Event setup, without voting buttons.")
         self.combo_send_mode.current(0)  # default: first invite
-        self.combo_send_mode.pack(side="left", padx=4, pady=6)
         self.combo_send_mode.bind("<<ComboboxSelected>>", lambda e: (self._refresh_send_button_label(), self._refresh_compose_preview()))
-        self._make_wrapping_label(send_mode_bar,
-                  text="  ↳ 'Update invite' adds a change-notice banner + different subject prefix, but\n"
-                       "still lets people re-vote. 'Gift Contribution Notice' sends a Guest-of-Honor/\n"
-                       "Organizer/Budget notice from Tab 1 — NO voting buttons (see 'Event mode' on Tab 1).",
-                  font=("Arial", 8, "italic")).pack(side="left", padx=4, pady=6)
-
-        # ── language selector ──
-        ttk.Label(f, text="Email language:", font=("Arial", 10, "bold"))\
-            .grid(row=1, column=0, sticky="w", **pad)
-        self.combo_email_lang = ttk.Combobox(
-            f, width=32, state="readonly",
-            values=[LANG_LABELS["en"], LANG_LABELS["ja"], LANG_LABELS["vi"], LANG_LABELS["bilingual"]],
-        )
+        self.combo_email_lang = field(
+            g, 0, 1, "Email language",
+            lambda p: ttk.Combobox(p, state="readonly", values=[
+                LANG_LABELS["en"], LANG_LABELS["ja"], LANG_LABELS["vi"], LANG_LABELS["bilingual"]]))
         self.combo_email_lang.current(0)  # default: English
-        self.combo_email_lang.grid(row=1, column=1, sticky="w", **pad)
         self.combo_email_lang.bind("<<ComboboxSelected>>", lambda e: self._refresh_compose_preview())
-
         self.var_subject_preview = tk.StringVar(value="")
-        ttk.Label(f, textvariable=self.var_subject_preview, font=("Arial", 9, "italic"))\
-            .grid(row=2, column=0, columnspan=2, sticky="w", padx=10)
-
         self.var_greeting_preview = tk.StringVar(value="")
-        ttk.Label(f, textvariable=self.var_greeting_preview, font=("Arial", 9, "italic"))\
-            .grid(row=3, column=0, columnspan=2, sticky="w", padx=10, pady=(2, 8))
+        preview = bordered(g, bg=COLORS["muted"], color=COLORS["border"])
+        preview.grid(row=1, column=0, columnspan=2, sticky="we")
+        inner = tk.Frame(preview, bg=COLORS["muted"], padx=12, pady=8)
+        inner.pack(fill="x")
+        for var in (self.var_subject_preview, self.var_greeting_preview):
+            tk.Label(inner, textvariable=var, bg=COLORS["muted"], fg=COLORS["foreground"],
+                     font=self.fonts.body, anchor="w", justify="left").pack(fill="x")
 
-        # Email is assembled in THIS order: Greeting (above) → EDITABLE → FIXED.
-        # ── editable block preview (organizer's free-text background note, shown FIRST) ──
-        ttk.Label(f, text="🟩 EDITABLE part — YOUR background notes for this specific event, shown\n"
-                          "right after the greeting (write in any language; translate below if needed):",
-                  font=("Arial", 10, "bold"), foreground="#00703C").grid(row=4, column=0, columnspan=2, sticky="w", **pad)
-        editable_container, self.txt_editable_preview = make_scrollable_text(f, width=100, height=5, bg="#e8f5e9")
-        editable_container.grid(row=5, column=0, columnspan=2, sticky="w", padx=10)
+        # Email is assembled in THIS order: Greeting → EDITABLE → FIXED.
+        content = Card(f, "Email content",
+                       "Greeting, then your note, then the fixed part. Both boxes can be edited before "
+                       "sending; they are rebuilt from Event setup when you come back here, unless you "
+                       "edited them.")
+        content.pack(**gap)
+        ttk.Label(content.body, text="Your note — editable, any language", style="Field.TLabel")\
+            .pack(anchor="w", pady=(0, 4))
+        editable_container, self.txt_editable_preview = make_scrollable_text(
+            content.body, width=40, height=5, bg=COLORS["success_wash"])
+        editable_container.pack(fill="x")
+        ttk.Label(content.body, text="Fixed part — event details and voting instructions", style="Field.TLabel")\
+            .pack(anchor="w", pady=(14, 4))
+        fixed_container, self.txt_fixed_preview = make_scrollable_text(
+            content.body, width=40, height=9, bg=COLORS["warning_wash"])
+        fixed_container.pack(fill="x")
+        WrapLabel(content.body, style="Hint.TLabel",
+                  text="You can edit the fixed part too, and keep your wording for future events with "
+                       "'Save FIXED wording as default'.").pack(fill="x", pady=(6, 0))
+        button_row(content.body,
+                   ("🔄 Refresh preview from Tab 1 / Tab 2", self._refresh_compose_preview),
+                   ("💾 Save FIXED wording as default for this language", self._save_fixed_default),
+                   ("↺ Reset FIXED wording", self._reset_fixed_default))
 
-        # ── fixed block preview (event details from Tab 1 + voting instructions, shown AFTER editable) ──
-        ttk.Label(f, text="🟧 FIXED part — auto-filled from Tab 1 (event name/date/location/deadline/budget)\n"
-                          "plus the standard voting wording, shown AFTER your note. You CAN edit this box —\n"
-                          "click 'Save as default' below to reuse your edited wording for future events too:",
-                  font=("Arial", 10, "bold"), foreground="#8a4b00").grid(row=6, column=0, columnspan=2, sticky="w", **pad)
-        fixed_container, self.txt_fixed_preview = make_scrollable_text(f, width=100, height=9, bg="#fff3e0")
-        fixed_container.grid(row=7, column=0, columnspan=2, sticky="w", padx=10)
-
-        fixed_btns = ttk.Frame(f)
-        fixed_btns.grid(row=8, column=0, columnspan=2, sticky="w", padx=10, pady=4)
-        ttk.Button(fixed_btns, text="🔄 Refresh preview from Tab 1 / Tab 2", command=self._refresh_compose_preview)\
-            .pack(side="left", padx=(0, 6))
-        ttk.Button(fixed_btns, text="💾 Save FIXED wording as default for this language", command=self._save_fixed_default)\
-            .pack(side="left", padx=6)
-        ttk.Button(fixed_btns, text="↺ Reset FIXED wording to system default", command=self._reset_fixed_default)\
-            .pack(side="left", padx=6)
-
-        # ── prompt customization (NEW) ──
-        ttk.Separator(f).grid(row=9, column=0, columnspan=2, sticky="ew", pady=8)
         # Set once and rarely touched, so it starts collapsed: the send
         # controls below are a long scroll away already.
-        prompt_header = ttk.Frame(f)
-        prompt_header.grid(row=10, column=0, columnspan=2, sticky="w", **pad)
-        ttk.Label(prompt_header, text="🎨 Copilot prompt (for single-language targets — icons already built in)",
-                  font=("Arial", 10, "bold")).pack(side="left")
+        prompt = Card(f, "Copilot prompt",
+                      "The instructions sent to Copilot with the email, for single-language targets. "
+                      "Icons are already built in.")
+        prompt.pack(**gap)
         self.var_prompt_toggle = tk.StringVar(value="▸ Show / edit")
-        ttk.Button(prompt_header, textvariable=self.var_prompt_toggle,
-                   command=self._toggle_prompt_editor).pack(side="left", padx=8)
-
-        self.prompt_editor = ttk.Frame(f)
-        self.prompt_editor.grid(row=11, column=0, columnspan=2, sticky="w")
-        self._make_wrapping_label(self.prompt_editor, text="This box shows the exact prompt that will be sent to Copilot (system default,\n"
-                          "already includes emoji-icon instructions ⏰📍💰📋👥). Edit it freely and click\n"
-                          "'Save' to keep your version — it persists until you Reset. The bilingual target\n"
-                          "uses its own built-in default (see 'Show system default prompt' below).",
-                  font=("Arial", 9, "italic")).pack(anchor="w", padx=10, pady=(2, 4))
-
+        ttk.Button(prompt.actions, textvariable=self.var_prompt_toggle, style="Small.TButton",
+                   command=self._toggle_prompt_editor).pack()
+        self.prompt_editor = ttk.Frame(prompt.body)
+        WrapLabel(self.prompt_editor, style="Hint.TLabel",
+                  text="This is exactly what will be sent to Copilot (the system default, with emoji "
+                       "instructions ⏰📍💰📋👥). Edit it and Save to keep your version until you Reset. "
+                       "The bilingual target uses its own built-in prompt.").pack(fill="x", pady=(0, 6))
         prompt_container, self.txt_custom_prompt = make_scrollable_text(
-            self.prompt_editor, width=100, height=11, bg="#fffce0")
+            self.prompt_editor, width=40, height=11, bg=COLORS["muted"])
         # Always show SOMETHING — the saved override if present, otherwise the
         # system default (with icon instructions) — so the user can see exactly
         # what will be sent, and edit it directly instead of starting from blank.
         current_prompt = self.prompt_overrides.get("single", "").strip() or DEFAULT_PROMPT_SINGLE
         self.txt_custom_prompt.insert("1.0", current_prompt)
-        prompt_container.pack(anchor="w", padx=10, pady=4)
-
-        prompt_btns = ttk.Frame(self.prompt_editor)
-        prompt_btns.pack(anchor="w", padx=10, pady=4)
-        ttk.Button(prompt_btns, text="💾 Save custom prompt as default", command=self._save_custom_prompt)\
-            .pack(side="left", padx=(0, 6))
-        ttk.Button(prompt_btns, text="↺ Reset prompt to system default", command=self._reset_custom_prompt)\
-            .pack(side="left", padx=6)
-        ttk.Button(prompt_btns, text="📘 Show system default prompt (single + bilingual)", command=self._show_system_prompt)\
-            .pack(side="left", padx=6)
-        self.prompt_editor.grid_remove()  # remembers its grid options for _toggle_prompt_editor()
+        prompt_container.pack(fill="x")
+        button_row(self.prompt_editor,
+                   ("💾 Save custom prompt as default", self._save_custom_prompt),
+                   ("↺ Reset prompt to system default", self._reset_custom_prompt),
+                   ("📘 Show system default prompt", self._show_system_prompt))
 
         # ── translation helper (Copilot bridge) ──
-        ttk.Separator(f).grid(row=14, column=0, columnspan=2, sticky="ew", pady=8)
-        ttk.Label(f, text="Translate the FULL email (greeting + note + event details) via Copilot copy/paste bridge:",
-                  font=("Arial", 10, "bold")).grid(row=15, column=0, columnspan=2, sticky="w", **pad)
-        ttk.Label(f, text="(Source is the language currently shown above — switch off Bilingual to pick a source)",
-                  font=("Arial", 9, "italic")).grid(row=16, column=0, columnspan=2, sticky="w", padx=10)
-
-        helper = ttk.Frame(f)
-        helper.grid(row=17, column=0, columnspan=2, sticky="w", padx=10)
-
-        ttk.Label(helper, text="Translate into:").grid(row=0, column=0, sticky="w", padx=4, pady=4)
-        self.combo_translate_target = ttk.Combobox(helper, width=26, state="readonly", values=TRANSLATE_TARGETS)
+        translate = Card(f, "Translate with Copilot",
+                         "Copies the full email and the instructions to the clipboard; paste Copilot's "
+                         "answer back here. The source is the Email language above, so pick a single "
+                         "language there.")
+        translate.pack(**gap)
+        row = ttk.Frame(translate.body)
+        row.pack(fill="x")
+        ttk.Label(row, text="Translate into", style="Field.TLabel").pack(side="left", padx=(0, 8))
+        self.combo_translate_target = ttk.Combobox(row, width=28, state="readonly", values=TRANSLATE_TARGETS)
         self.combo_translate_target.current(1)  # default Japanese
-        self.combo_translate_target.grid(row=0, column=1, sticky="w", padx=4, pady=4)
-        ttk.Button(helper, text="📋 Copy full email + prompt to clipboard (for Copilot)",
-                   command=self._copy_email_for_translation).grid(row=0, column=2, sticky="w", padx=8, pady=4)
-
-        ttk.Label(helper, text="Paste the translated result from Copilot here — this will be used\n"
-                              "as the complete, ready-to-send email (no section labels).\n"
-                              "⚠️ Pasting a NEW result? Click '🗑 Clear' FIRST — pasting into a\n"
-                              "non-empty box appends instead of replacing, combining old + new text.")\
-            .grid(row=1, column=0, columnspan=3, sticky="w", padx=4, pady=(8, 2))
-        paste_container, self.txt_translation_paste = make_scrollable_text(helper, width=90, height=6)
-        paste_container.grid(row=2, column=0, columnspan=3, sticky="w", padx=4)
-        self._make_wrapping_label(helper, text="⚠️ If words look glued together with no spaces (a known Copilot-copy quirk,\n"
-                              "outside this tool's control), click 'Clean up' below, then click 'Save' again\n"
-                              "to apply the cleaned-up version — Clean up alone does not change what is sent.",
-                  font=("Arial", 8, "italic"), foreground="#8a4b00")\
-            .grid(row=3, column=0, columnspan=3, sticky="w", padx=4, pady=(0, 2))
-        ttk.Button(helper, text="💾 Save as translated version for this language", command=self._save_translated_email)\
-            .grid(row=4, column=0, sticky="w", padx=4, pady=6)
-        ttk.Button(helper, text="🗑 Clear saved translation for this language", command=self._clear_translated_email)\
-            .grid(row=4, column=1, sticky="w", padx=4, pady=6)
-        ttk.Button(helper, text="🧹 Clean up (fix lost spaces/line breaks)", command=self._cleanup_pasted_text)\
-            .grid(row=4, column=2, sticky="w", padx=4, pady=6)
-
+        self.combo_translate_target.pack(side="left")
+        ttk.Button(row, text="📋 Copy full email + prompt", style="Primary.TButton",
+                   command=self._copy_email_for_translation).pack(side="left", padx=(8, 0))
+        ttk.Label(translate.body, text="Translated email from Copilot", style="Field.TLabel")\
+            .pack(anchor="w", pady=(14, 4))
+        paste_container, self.txt_translation_paste = make_scrollable_text(translate.body, width=40, height=6)
+        paste_container.pack(fill="x")
+        WrapLabel(translate.body, style="Hint.TLabel",
+                  text="Used as the complete email, exactly as pasted. Pasting into a box that is not "
+                       "empty appends — click '🗑 Clear' first. If words come out glued together (a "
+                       "Copilot copy quirk), click 'Clean up', then 'Save' again.").pack(fill="x", pady=(6, 0))
+        button_row(translate.body,
+                   ("💾 Save as translated version for this language", self._save_translated_email),
+                   ("🗑 Clear saved translation", self._clear_translated_email),
+                   ("🧹 Clean up spacing", self._cleanup_pasted_text))
         self.lbl_translation_status = ttk.Label(
-            helper, text="Full translated email ready: EN ❌  |  JA ❌  |  VI ❌  |  Bilingual ❌")
-        self.lbl_translation_status.grid(row=5, column=0, columnspan=3, sticky="w", padx=4, pady=2)
+            translate.body, style="Muted.TLabel",
+            text="Full translated email ready: EN ❌  |  JA ❌  |  VI ❌  |  Bilingual ❌")
+        self.lbl_translation_status.pack(anchor="w", pady=(10, 0))
 
         # ── send controls ──
-        ttk.Separator(f).grid(row=18, column=0, columnspan=2, sticky="ew", pady=8)
-
-        self._make_wrapping_label(f, text='Send to (optional override — e.g. a department group email).\n'
-                          "Leave blank to send individually to everyone on Tab 2.\n"
-                          "Tab 2's roster is always used for vote tracking either way.",
-                  font=("Arial", 9, "italic")).grid(row=19, column=0, columnspan=2, sticky="w", **pad)
+        send = Card(f, "Send", "Opens the email in Outlook for you to check and send, unless you tick "
+                               "'Send immediately'.")
+        send.pack(fill="x")
+        g = send.body
+        g.columnconfigure(0, weight=1)
         self.var_send_to_override = tk.StringVar(value="")
-        ttk.Entry(f, textvariable=self.var_send_to_override, width=50).grid(row=20, column=0, columnspan=2, sticky="w", padx=10)
-
+        field(g, 0, 0, "Send to (optional)", lambda p: ttk.Entry(p, textvariable=self.var_send_to_override),
+              hint="A group address to send to instead of each person on Recipients. Votes are "
+                   "tracked against the Recipients list either way.")
         self.var_auto_send = tk.BooleanVar(value=False)
-        ttk.Checkbutton(f, text="Send immediately without review (unchecked = open Outlook for you to click Send)",
-                         variable=self.var_auto_send).grid(row=22, column=0, columnspan=2, sticky="w", **pad)
-
+        ttk.Checkbutton(g, text="Send immediately without review (unchecked = open Outlook for you to click Send)",
+                        variable=self.var_auto_send).grid(row=1, column=0, sticky="w", pady=(0, 12))
         self.var_send_btn_label = tk.StringVar(value="✉ Send Invite via Outlook (Voting Buttons)")
-        ttk.Button(f, textvariable=self.var_send_btn_label, command=self._send_invite)\
-            .grid(row=23, column=0, sticky="w", **pad)
+        ttk.Button(g, textvariable=self.var_send_btn_label, style="Primary.TButton",
+                   command=self._send_invite).grid(row=2, column=0, sticky="w")
 
         self._refresh_send_button_label()
         self._refresh_compose_preview()
@@ -1612,11 +1550,11 @@ class RSVPApp(tk.Tk):
             self.var_send_btn_label.set("✉ Send Invite via Outlook (Voting Buttons)")
 
     def _toggle_prompt_editor(self):
-        if self.prompt_editor.grid_info():
-            self.prompt_editor.grid_remove()
+        if self.prompt_editor.winfo_manager():
+            self.prompt_editor.pack_forget()
             self.var_prompt_toggle.set("▸ Show / edit")
         else:
-            self.prompt_editor.grid()
+            self.prompt_editor.pack(fill="x")
             self.var_prompt_toggle.set("▾ Hide")
 
     def _active_full_translations(self):
@@ -2281,119 +2219,99 @@ class RSVPApp(tk.Tk):
     # ══════════════════════════════════════════════════════════════════
     def _build_tab_collect(self):
         f = self.tab_collect.body
+        gap = {"fill": "x", "pady": (0, 16)}
 
-        info_frame = ttk.LabelFrame(f, text="🔍 How 'Scan Inbox' works — read before using")
-        info_frame.pack(fill="x", padx=10, pady=(8, 4))
-        self._make_wrapping_label(
-            info_frame, justify="left",
-            text=(
-                "• Scans EVERY folder of your mailbox (Inbox, its subfolders, and folders your rules "
-                "move mail into) for emails whose Subject contains the EXACT current Event ID from Tab 1 — it doesn't matter whether "
-                "the email is the original invite, an update invite, or a reminder, as long as the "
-                "Subject contains the Event ID it counts.\n"
-                "• For each sender, only the MOST RECENT vote is kept if they clicked more than once "
-                "(votes are not added up).\n"
-                "• Does NOT re-run automatically when you change the Event ID on Tab 1 — the table "
-                "below only updates when you click '📨 Scan Inbox for Vote results'. If you switch to "
-                "a different event and forget to click it again, the table will still show the results "
-                "of the OLD Event ID (check the status line right below to be sure).\n"
-                "• Results, manual corrections and the Yes/No/Maybe counts in History are saved "
-                "automatically after every scan or edit — there is no separate Save button."
-            ),
-            font=("Arial", 8)).pack(anchor="w", padx=8, pady=(4, 2))
-        self.lbl_scan_status = ttk.Label(info_frame, text="", font=("Arial", 9, "bold"))
-        self.lbl_scan_status.pack(anchor="w", padx=8, pady=(2, 6))
+        scan = Card(f, "Scan Inbox",
+                    "Finds every vote reply whose subject contains this Event ID — invite, update or "
+                    "reminder alike — in every folder of your mailbox. Each person's latest vote counts.")
+        scan.pack(**gap)
+        ttk.Button(scan.actions, text="📨 Scan Inbox for Vote results", style="Primary.TButton",
+                   command=self._collect_responses).pack()
+        self.banner_scan = Banner(scan.body, self.fonts)
+        self.banner_scan.pack(fill="x")
+        WrapLabel(scan.body, style="Hint.TLabel",
+                  text="The table only changes when you scan: after switching events, scan again (the line "
+                       "above says which event the table shows). Results, manual corrections and the "
+                       "Yes / No / Maybe counts in History are saved automatically.").pack(fill="x", pady=(8, 0))
 
-        top = ttk.Frame(f)
-        top.pack(fill="x", padx=10, pady=8)
-        ttk.Button(top, text="📨 Scan Inbox for Vote results", command=self._collect_responses)\
-            .pack(side="left", padx=4)
+        self.var_kpi_total = tk.StringVar(value="0")
+        self.var_kpi_yes = tk.StringVar(value="0")
+        self.var_kpi_no = tk.StringVar(value="0")
+        self.var_kpi_maybe = tk.StringVar(value="0")
+        self.var_kpi_pending = tk.StringVar(value="0")
+        kpi_row(f, [
+            ("Tracked", self.var_kpi_total, {}),
+            ("Yes", self.var_kpi_yes, {"dot": COLORS["success_fill"]}),
+            ("No", self.var_kpi_no, {"dot": COLORS["destructive"]}),
+            ("Maybe", self.var_kpi_maybe, {"dot": COLORS["warning"]}),
+            ("No response", self.var_kpi_pending, {"dot": COLORS["muted_foreground"]}),
+        ]).pack(**gap)
 
-        ttk.Label(f, text="✅ Responded / not yet responded (based on Tab 2 + scanned votes):",
-                  font=("Arial", 9, "bold")).pack(anchor="w", padx=10, pady=(4, 0))
-        # MỚI: double-click ô "Vote" để sửa tay — dùng cho những người chỉ
-        # đổi ý/báo miệng thay vì bấm lại nút Vote trong email (xem
-        # _on_response_tree_double_click()/_commit_response_vote_edit()).
-        # MỚI: thêm hẳn 1 cột checkbox "Manual edit" (✅/⬜) bên trái cột
-        # "Name" — tick vào đó để mở dropdown Yes/No/Maybe sửa ngay (giống
-        # double-click ô Vote); bỏ tick lại (với dòng ĐANG sửa tay) để trả
-        # phiếu vote đó về cho lần Scan Inbox sau tự do cập nhật (xem
-        # _on_response_manual_check_click()).
-        self._make_wrapping_label(
-            f, text="💡 Tick the \"Manual edit\" checkbox (or double-click the \"Vote\" cell) to correct "
-                    "someone's vote by hand (Yes/No/Maybe) — useful when they just told you verbally or "
-                    "changed their mind instead of clicking the button in the email. Manually-edited rows "
-                    "are shown with a light blue background and stay checked. Un-ticking the checkbox for "
-                    "an already manually-edited row lets the NEXT \"📨 Scan Inbox for Vote results\" freely "
-                    "update it again from real emails; leaving it ticked KEEPS your manual value even after "
-                    "re-scanning, unless a NEWER email vote is found for that same person.",
-            font=("Arial", 8, "italic")).pack(anchor="w", padx=10)
+        responses = Card(f, "Responses",
+                         "Everyone on Recipients (group addresses expanded) and their latest vote.")
+        responses.pack(**gap)
+        # Tick "Manual edit" (or double-click "Vote") to correct a vote by hand
+        # — see _on_response_manual_check_click()/_commit_response_vote_edit().
+        WrapLabel(responses.body, style="Hint.TLabel",
+                  text="Tick ✏️ (or double-click a Vote) to correct a vote by hand, e.g. someone told you "
+                       "in person. Corrected rows are tinted blue and survive later scans, unless that "
+                       "person votes again by email; untick to let the next scan update them. Yellow rows "
+                       "voted but are not on the list.").pack(fill="x", pady=(0, 10))
         cols = ("manual_edit", "name", "email", "vote", "received")
-        tree_container, self.tree_responses = make_scrollable_treeview(f, columns=cols, height=10)
+        tree_container, self.tree_responses = make_scrollable_treeview(responses.body, columns=cols, height=10)
         headers = ["✏️", "Name", "Email", "Vote", "Received At"]
-        widths = [70, 220, 260, 120, 160]
+        widths = [56, 220, 260, 110, 150]
         for c, label, w in zip(cols, headers, widths):
-            self.tree_responses.heading(c, text=label)
             anchor = "center" if c == "manual_edit" else "w"
-            self.tree_responses.column(c, width=w, anchor=anchor)
+            self.tree_responses.heading(c, text=label, anchor=anchor)
+            self.tree_responses.column(c, width=w, anchor=anchor, stretch=c != "manual_edit")
         self.tree_responses.bind("<Double-1>", self._on_response_tree_double_click)
         self.tree_responses.bind("<Button-1>", self._on_response_manual_check_click)
-        tree_container.pack(fill="both", expand=True, padx=10, pady=6)
-
-        self.lbl_summary = ttk.Label(f, text="No responses scanned yet.", font=("Arial", 10, "bold"))
-        self.lbl_summary.pack(anchor="w", padx=10, pady=4)
+        tree_container.pack(fill="both", expand=True)
+        self.lbl_summary = WrapLabel(responses.body, text="No responses scanned yet.", style="Muted.TLabel")
+        self.lbl_summary.pack(fill="x", pady=(10, 0))
 
         # ══════════════════════════════════════════════════════════════
-        # KHUNG PHÍA DƯỚI — CHƯA PHẢN HỒI (pending), + soạn/gửi email nhắc nhở
+        # CHƯA PHẢN HỒI (pending), + soạn/gửi email nhắc nhở
         # ══════════════════════════════════════════════════════════════
-        ttk.Separator(f).pack(fill="x", padx=10, pady=8)
-        self.lbl_deadline_banner = ttk.Label(f, text="", font=("Arial", 10, "bold"))
-        self.lbl_deadline_banner.pack(anchor="w", padx=10, pady=(0, 4))
-
-        ttk.Label(f, text="🕓 NOT yet responded (no vote) — auto-updates every time you Scan Inbox:",
-                  font=("Arial", 9, "bold"), foreground="#8a4b00").pack(anchor="w", padx=10, pady=(2, 0))
+        pending = Card(f, "Not yet responded",
+                       "Updated by every scan. Remind them with an email that keeps the voting buttons.")
+        pending.pack(fill="x")
+        self.banner_deadline = Banner(pending.body, self.fonts)
+        self.banner_deadline.pack(fill="x", pady=(0, 10))
         pending_cols = ("name", "email")
-        pending_container, self.tree_pending = make_scrollable_treeview(f, columns=pending_cols, height=6)
+        pending_container, self.tree_pending = make_scrollable_treeview(pending.body, columns=pending_cols, height=6)
         for c, label, w in zip(pending_cols, ["Name", "Email"], [280, 320]):
-            self.tree_pending.heading(c, text=label)
+            self.tree_pending.heading(c, text=label, anchor="w")
             self.tree_pending.column(c, width=w)
-        pending_container.pack(fill="both", expand=False, padx=10, pady=6)
+        pending_container.pack(fill="x")
 
-        reminder_frame = ttk.LabelFrame(f, text="📨 Compose & send a reminder email to people who haven't responded")
-        reminder_frame.pack(fill="x", padx=10, pady=6)
-
-        rbtn = ttk.Frame(reminder_frame)
-        rbtn.pack(fill="x", padx=6, pady=4)
-        ttk.Label(rbtn, text="Language:").pack(side="left", padx=(0, 4))
+        ttk.Label(pending.body, text="Reminder email", style="CardTitle.TLabel").pack(anchor="w", pady=(18, 8))
+        rbtn = ttk.Frame(pending.body)
+        rbtn.pack(fill="x")
+        ttk.Label(rbtn, text="Language", style="Field.TLabel").pack(side="left", padx=(0, 8))
         self.combo_reminder_lang = ttk.Combobox(
             rbtn, width=26, state="readonly",
             values=[LANG_LABELS["en"], LANG_LABELS["ja"], LANG_LABELS["vi"], LANG_LABELS["bilingual"]],
         )
         self.combo_reminder_lang.current(0)  # default: English
-        self.combo_reminder_lang.pack(side="left", padx=(0, 6))
-        # Changing the language auto-regenerates the draft right away (same
-        # behavior as combo_email_lang on Tab 3), so the user sees the new
-        # language's content immediately instead of needing an extra click
-        # on "Regenerate".
+        self.combo_reminder_lang.pack(side="left")
+        # Changing the language regenerates the draft right away, like Tab 3.
         self.combo_reminder_lang.bind("<<ComboboxSelected>>", lambda e: self._generate_reminder_draft())
-        ttk.Button(rbtn, text="🔄 Regenerate reminder text (from Tab 1)",
-                   command=self._generate_reminder_draft).pack(side="left", padx=(0, 6))
+        ttk.Button(rbtn, text="🔄 Regenerate text", command=self._generate_reminder_draft)\
+            .pack(side="left", padx=(8, 0))
         self.var_reminder_attach = tk.BooleanVar(value=True)
-        ttk.Checkbutton(rbtn, text="📎 Attach original invite email (looked up in Sent Items)",
-                        variable=self.var_reminder_attach).pack(side="left", padx=6)
+        ttk.Checkbutton(pending.body, text="📎 Attach original invite email (looked up in Sent Items)",
+                        variable=self.var_reminder_attach).pack(anchor="w", pady=(10, 8))
         # Every reminder (RSVP here, Gift on Tab 6) only opens Outlook for
         # review; there is deliberately no auto-send option.
-
-        ttk.Label(reminder_frame, text="Reminder email content (review/edit before sending):",
-                  font=("Arial", 9, "italic")).pack(anchor="w", padx=6, pady=(4, 0))
         reminder_text_container, self.txt_reminder_body = make_scrollable_text(
-            reminder_frame, width=100, height=7)
-        reminder_text_container.pack(fill="x", padx=6, pady=4)
-
+            pending.body, width=40, height=7)
+        reminder_text_container.pack(fill="x")
         self.lbl_reminder_send = ttk.Button(
-            reminder_frame, text="📨 Send reminder email to 0 people who haven't responded",
-            command=self._send_reminder)
-        self.lbl_reminder_send.pack(anchor="w", padx=6, pady=(2, 8))
+            pending.body, text="📨 Send reminder email to 0 people who haven't responded",
+            style="Primary.TButton", command=self._send_reminder)
+        self.lbl_reminder_send.pack(anchor="w", pady=(12, 0))
 
         self._update_scan_status_banner()
 
@@ -2496,25 +2414,25 @@ class RSVPApp(tk.Tk):
 
         if not current_id:
             text = "🔍 Current Event ID: (not entered on Tab 1 yet)"
-            color = "#8a4b00"
+            tone = "warning"
         elif last_id is None:
             text = (f"🔍 Current Event ID: '{current_id}' — NOT scanned yet this session. "
                     f"Click '📨 Scan Inbox for Vote results' to fetch results.")
-            color = "#8a4b00"
+            tone = "warning"
         elif last_id != current_id:
             text = (f"⚠️ The table below is showing results for the OLD Event ID ('{last_id}', scanned at "
                     f"{last_time_str}) — NOT the current Event ID ('{current_id}'). Click Scan Inbox "
                     f"again to refresh!")
-            color = "#c42b1c"
+            tone = "danger"
         elif not getattr(self, "_scan_in_history", True):
             text = (f"✅ Showing results for Event ID '{current_id}' — scanned at {last_time_str}. "
                     f"⚠️ This event is not in History yet, so its Yes/No/Maybe counts are not recorded "
-                    f"there: save it on Tab 1 ('💾 Update this event in History').")
-            color = "#8a4b00"
+                    f"there: save it on Tab 1 ('💾 Save event details').")
+            tone = "warning"
         else:
             text = f"✅ Showing results for Event ID '{current_id}' — scanned at {last_time_str}."
-            color = "#0e700e"
-        self.lbl_scan_status.config(text=text, foreground=color)
+            tone = "success"
+        self.banner_scan.set(text, tone)
 
     def _table_belongs_to_tab1_event(self, what):
         """True when Tab 4's table was scanned for the Event ID on Tab 1.
@@ -2567,11 +2485,11 @@ class RSVPApp(tk.Tk):
         # email, không nên chạy lại chỉ vì sửa 1 ô).
         self._last_responses_roster = roster
         self.tree_responses.delete(*self.tree_responses.get_children())
-        self.tree_responses.tag_configure("extra", background="#fff3cd")
+        self.tree_responses.tag_configure("extra", background=COLORS["warning_soft"])
         # MỚI: tô nền xanh nhạt cho các dòng có phiếu vote đã được SỬA TAY
         # (double-click ô Vote — xem _commit_response_vote_edit()), để phân
         # biệt trực quan với phiếu quét được thật sự từ email.
-        self.tree_responses.tag_configure("manual", background="#dceeff")
+        self.tree_responses.tag_configure("manual", background=COLORS["info_soft"])
         counts = {"Yes": 0, "No": 0, "Maybe": 0, "No response": 0}
         matched_emails = set()
         pending = []  # list[(name, email)] — người trong roster mà CHƯA vote gì
@@ -2627,6 +2545,11 @@ class RSVPApp(tk.Tk):
                                         tags=tags)
 
         self._vote_counts = dict(counts)
+        self.var_kpi_total.set(str(len(roster)))
+        self.var_kpi_yes.set(str(counts.get("Yes", 0)))
+        self.var_kpi_no.set(str(counts.get("No", 0)))
+        self.var_kpi_maybe.set(str(counts.get("Maybe", 0)))
+        self.var_kpi_pending.set(str(counts.get("No response", 0)))
         extra_note = (f"  |  ➕ {len(extra_rows)} people outside the list/group also responded "
                       f"(added to the counts below)") if extra_rows else ""
         group_note = "" if len(roster) == len(self.recipients) else \
@@ -2766,17 +2689,18 @@ class RSVPApp(tk.Tk):
             deadline_date = None
 
         if not pending:
-            banner = f"✅ Response deadline: {deadline_str}  —  everyone in Tab 2 has responded."
+            banner, tone = f"Response deadline {deadline_str} — everyone on Recipients has responded.", "success"
         elif deadline_date is None:
-            banner = f"🕓 {len(pending)} people still haven't responded. (Couldn't read deadline date: '{deadline_str}')"
+            banner, tone = (f"{len(pending)} people still haven't responded. (Couldn't read the deadline "
+                            f"'{deadline_str}'.)"), "warning"
         elif overdue:
-            banner = (f"🔴 Response deadline REACHED/PASSED ({deadline_str}) — {len(pending)} people still haven't "
-                       f"replied. Review the reminder content below, then click send.")
+            banner, tone = (f"Response deadline reached ({deadline_str}) — {len(pending)} people still haven't "
+                            f"replied. Review the reminder below, then send it."), "danger"
         else:
             days_left = (deadline_date - datetime.now().date()).days
-            banner = (f"🕓 Response deadline: {deadline_str} ({days_left} days left) — "
-                      f"{len(pending)} people still haven't replied.")
-        self.lbl_deadline_banner.config(text=banner)
+            banner, tone = (f"Response deadline {deadline_str} ({days_left} days left) — "
+                            f"{len(pending)} people still haven't replied."), "warning"
+        self.banner_deadline.set(banner, tone)
 
         self.lbl_reminder_send.config(
             text=f"📨 Send reminder email to {len(pending)} people who haven't responded")
@@ -2919,187 +2843,121 @@ class RSVPApp(tk.Tk):
     # ══════════════════════════════════════════════════════════════════
     def _build_tab_gift(self):
         f = self.tab_gift.body
-        pad = {"padx": 10, "pady": 6}
+        gap = {"fill": "x", "pady": (0, 16)}
 
-        ttk.Label(f, text="Gift Contribution tracking", font=("Arial", 11, "bold"))\
-            .grid(row=0, column=0, columnspan=3, sticky="w", **pad)
-        self._make_wrapping_label(f, text="Recipient list pulled from Tab 2 (Recipients). Check off everyone who has\n"
-                          "ALREADY contributed money for the gift — the checked state is saved to the\n"
-                          "database automatically as soon as you click, and reloaded automatically if\n"
-                          "there's saved data (nothing is lost when you close and reopen the app).",
-                  font=("Arial", 9, "italic")).grid(row=1, column=0, columnspan=3, sticky="w", padx=10)
+        self.var_gift_contributed_count = tk.StringVar(value="0 / 0")
+        self.var_gift_total_amount = tk.StringVar(value="0")
+        kpi_row(f, [
+            ("Contributors", self.var_gift_contributed_count, {"dot": COLORS["success_fill"]}),
+            ("Total collected", self.var_gift_total_amount, {}),
+        ]).pack(**gap)
 
-        btns = ttk.Frame(f)
-        btns.grid(row=2, column=0, columnspan=3, sticky="w", **pad)
-        # The list follows Tab 2 every time this tab opens. Importing a file
-        # (e.g. one a colleague edited in Excel) instead OVERWRITES the
-        # checked state and amount of EVERYONE found in it.
-        ttk.Button(btns, text="📂 Load contribution list from file", command=self._load_gift_list_from_file)\
-            .pack(side="left")
-        # MỚI: đã BỎ 2 nút "☑ Check all"/"☐ Uncheck all" — thay bằng 1 dấu
-        # ✅/⬜ NGAY TRÊN ĐẦU CỘT "Send email" và cột "Contributed" (bấm
-        # trực tiếp vào tiêu đề cột, xem tree.heading(..., command=...) bên
-        # dưới và _toggle_all_gift_column()) — mỗi cột tự chọn/bỏ chọn tất
-        # cả ĐỘC LẬP với nhau, và vẫn chỉ áp dụng cho các dòng ĐANG HIỂN THỊ
-        # (tôn trọng ô tìm kiếm, giống hành vi 2 nút cũ).
+        tracking = Card(f, "Contributions",
+                        "Everyone on Recipients. Tick who has contributed; it is saved as you click, and "
+                        "comes back when you reopen the event.")
+        tracking.pack(**gap)
+        ttk.Button(tracking.actions, text="📊 Export to Excel", command=self._export_gift_contribution_list)\
+            .pack(side="right")
+        # Importing a file (e.g. one a colleague edited in Excel) OVERWRITES
+        # the checked state and amount of EVERYONE found in it.
+        ttk.Button(tracking.actions, text="📂 Load from file", command=self._load_gift_list_from_file)\
+            .pack(side="right", padx=(0, 8))
 
-        # Quick Name/Email search box — filters the table below directly as you
-        # type, case-insensitive. The checked state stays stored in
-        # self._gift_roster (the source of truth), so filtering/searching
-        # never loses anyone's checked state, even while they're hidden.
-        search_bar = ttk.Frame(f)
-        search_bar.grid(row=3, column=0, columnspan=3, sticky="w", **pad)
-        ttk.Label(search_bar, text="🔎 Search (name or email):").pack(side="left")
+        # Lọc TRỰC TIẾP bảng khi gõ; trạng thái tick vẫn nằm trong
+        # self._gift_roster nên lọc không làm mất tick của người bị ẩn.
+        toolbar = ttk.Frame(tracking.body)
+        toolbar.pack(fill="x", pady=(0, 12))
         self.var_gift_search = tk.StringVar(value="")
-        ttk.Entry(search_bar, textvariable=self.var_gift_search, width=40).pack(side="left", padx=6)
+        ttk.Label(toolbar, text="🔎", style="Muted.TLabel").pack(side="left", padx=(0, 6))
+        ttk.Entry(toolbar, textvariable=self.var_gift_search, width=36).pack(side="left")
         self.var_gift_search.trace_add("write", lambda *a: self._apply_gift_filter())
-        ttk.Button(search_bar, text="✕ Clear", command=lambda: self.var_gift_search.set(""))\
-            .pack(side="left", padx=4)
+        ttk.Button(toolbar, text="✕ Clear", style="Ghost.TButton",
+                   command=lambda: self.var_gift_search.set("")).pack(side="left", padx=(6, 0))
 
-        # Column order: send_email, check, No. (sequence number), Name, Email, Amount.
-        # MỚI: "send_email" — cột checkbox THÊM MỚI, đặt bên trái "check"
-        # (Contributed) — người dùng tick chọn AI sẽ nhận email báo cáo
-        # quyên góp (xem khối "📧 Send contribution report" ở cuối tab, và
-        # _send_gift_report_email()) — HOÀN TOÀN ĐỘC LẬP với "Contributed"
-        # (1 người có thể được chọn nhận báo cáo dù họ CHƯA đóng góp, hoặc
-        # ngược lại).
+        # Column order: send_email, check, No., Name, Email, Amount. "Send
+        # email" (who gets the report) is independent of "Contributed". Click
+        # a cell to toggle it, or a column header to toggle every row shown
+        # (see _on_gift_tree_click() / _toggle_all_gift_column()).
         cols = ("send_email", "check", "no", "name", "email", "amount")
-        tree_container, self.tree_gift = make_scrollable_treeview(f, columns=cols, height=16)
-        # Tiêu đề 2 cột checkbox ("send_email"/"check") tự hiển thị ✅/⬜
-        # phản ánh "tất cả dòng ĐANG HIỂN THỊ có đang được tick hết không"
-        # — bấm vào TIÊU ĐỀ (không phải 1 ô cụ thể) để chọn/bỏ chọn tất cả
-        # cùng lúc cho đúng cột đó (xem _toggle_all_gift_column()).
+        tree_container, self.tree_gift = make_scrollable_treeview(tracking.body, columns=cols, height=14)
         self.tree_gift.heading("send_email", text="⬜ Send email",
                                 command=lambda: self._toggle_all_gift_column("send_email"))
         self.tree_gift.heading("check", text="⬜ Contributed",
                                 command=lambda: self._toggle_all_gift_column("check"))
         self.tree_gift.heading("no", text="No.")
-        self.tree_gift.heading("name", text="Name")
-        self.tree_gift.heading("email", text="Email")
-        self.tree_gift.heading("amount", text="Amount")
-        self.tree_gift.column("send_email", width=100, anchor="center")
-        self.tree_gift.column("check", width=100, anchor="center")
-        self.tree_gift.column("no", width=40, anchor="center")
-        self.tree_gift.column("name", width=240)
-        self.tree_gift.column("email", width=280)
-        self.tree_gift.column("amount", width=100, anchor="e")
-        tree_container.grid(row=4, column=0, columnspan=3, sticky="w", padx=10)
-        # Clicking the "send_email" or "check" (Contributed) column toggles
-        # that row's checked state (tkinter's Treeview has no real checkbox
-        # widget, so ✅/⬜ characters simulate one — a common, simple
-        # approach that avoids pulling in an extra third-party library).
+        self.tree_gift.heading("name", text="Name", anchor="w")
+        self.tree_gift.heading("email", text="Email", anchor="w")
+        self.tree_gift.heading("amount", text="Amount", anchor="e")
+        self.tree_gift.column("send_email", width=110, anchor="center", stretch=False)
+        self.tree_gift.column("check", width=110, anchor="center", stretch=False)
+        self.tree_gift.column("no", width=44, anchor="center", stretch=False)
+        self.tree_gift.column("name", width=220)
+        self.tree_gift.column("email", width=260)
+        self.tree_gift.column("amount", width=110, anchor="e", stretch=False)
+        tree_container.pack(fill="both", expand=True)
         self.tree_gift.bind("<Button-1>", self._on_gift_tree_click)
         # Double-click Amount to type what someone actually gave.
         self.tree_gift.bind("<Double-1>", self._on_gift_tree_double_click)
+        WrapLabel(tracking.body, style="Hint.TLabel",
+                  text="Ticking Contributed fills Amount from the expected gift budget; double-click an "
+                       "Amount to type what that person actually gave. Click a column header to tick or "
+                       "untick everyone shown.").pack(fill="x", pady=(8, 0))
 
-        ttk.Label(f, text="Total contributors:").grid(row=5, column=0, sticky="w", **pad)
-        self.var_gift_contributed_count = tk.StringVar(value="0 / 0")
-        ttk.Label(f, textvariable=self.var_gift_contributed_count, font=("Arial", 10, "bold"))\
-            .grid(row=5, column=1, sticky="w", **pad)
-
-        # Total amount collected so far — sum of "Amount" for everyone
-        # currently checked as "Contributed" (see _update_gift_contributed_count()).
-        ttk.Label(f, text="Total amount collected:").grid(row=6, column=0, sticky="w", **pad)
-        self.var_gift_total_amount = tk.StringVar(value="0")
-        ttk.Label(f, textvariable=self.var_gift_total_amount, font=("Arial", 10, "bold"))\
-            .grid(row=6, column=1, sticky="w", **pad)
-
-        ttk.Button(f, text="📊 Export to Excel", command=self._export_gift_contribution_list)\
-            .grid(row=7, column=0, columnspan=2, sticky="w", **pad)
-        self._make_wrapping_label(f, text="→ Ticking \"Contributed\" fills Amount from Tab 1's expected gift budget; "
-                          "double-click an Amount to type what that person actually gave. Every change is "
-                          "saved to the database automatically — this button only creates an Excel file "
-                          "when you need one to share or archive.",
-                  font=("Arial", 8, "italic")).grid(row=8, column=0, columnspan=3, sticky="w", padx=14)
-
-        # ── Compose & send a reminder email to people who haven't contributed yet ──
-        # Always ONLY opens Outlook for review (mail.Display()) — there is no
-        # "Send immediately without review" option here (unlike Tab 4's RSVP
-        # reminder), per the requirement that every reminder email (both RSVP
-        # and Gift) must be checked by the user and sent by hand from
-        # Outlook, never sent automatically from within the app. See
-        # _send_gift_reminder().
-        gift_reminder_frame = ttk.LabelFrame(
-            f, text="📨 Compose & send a reminder email to people who haven't contributed yet")
-        gift_reminder_frame.grid(row=9, column=0, columnspan=3, sticky="we", padx=10, pady=6)
-
-        grbtn = ttk.Frame(gift_reminder_frame)
-        grbtn.pack(fill="x", padx=6, pady=4)
-        ttk.Label(grbtn, text="Language:").pack(side="left", padx=(0, 4))
+        # ── reminder to people who haven't contributed — always opens Outlook
+        # for review (mail.Display()); there is no auto-send here. ──
+        reminder = Card(f, "Reminder", "To everyone not ticked as Contributed. Opens in Outlook for you to "
+                                       "check and send.")
+        reminder.pack(**gap)
+        grbtn = ttk.Frame(reminder.body)
+        grbtn.pack(fill="x")
+        ttk.Label(grbtn, text="Language", style="Field.TLabel").pack(side="left", padx=(0, 8))
         self.combo_gift_reminder_lang = ttk.Combobox(
             grbtn, width=26, state="readonly",
             values=[LANG_LABELS["en"], LANG_LABELS["ja"], LANG_LABELS["vi"], LANG_LABELS["bilingual"]],
         )
         self.combo_gift_reminder_lang.current(0)  # default: English
-        self.combo_gift_reminder_lang.pack(side="left", padx=(0, 6))
+        self.combo_gift_reminder_lang.pack(side="left")
         self.combo_gift_reminder_lang.bind(
             "<<ComboboxSelected>>", lambda e: self._generate_gift_reminder_draft())
-        ttk.Button(grbtn, text="🔄 Regenerate reminder text (from Tab 1)",
-                   command=self._generate_gift_reminder_draft).pack(side="left", padx=(0, 6))
+        ttk.Button(grbtn, text="🔄 Regenerate text", command=self._generate_gift_reminder_draft)\
+            .pack(side="left", padx=(8, 0))
         self.var_gift_reminder_attach = tk.BooleanVar(value=True)
-        ttk.Checkbutton(grbtn, text="📎 Attach original Gift email (looked up from Sent Items)",
-                        variable=self.var_gift_reminder_attach).pack(side="left", padx=6)
-
-        ttk.Label(gift_reminder_frame, text="Reminder email content (review/edit before sending):",
-                  font=("Arial", 9, "italic")).pack(anchor="w", padx=6, pady=(4, 0))
+        ttk.Checkbutton(reminder.body, text="📎 Attach original Gift email (looked up from Sent Items)",
+                        variable=self.var_gift_reminder_attach).pack(anchor="w", pady=(10, 8))
         gift_reminder_text_container, self.txt_gift_reminder_body = make_scrollable_text(
-            gift_reminder_frame, width=100, height=7)
-        gift_reminder_text_container.pack(fill="x", padx=6, pady=4)
-
+            reminder.body, width=40, height=7)
+        gift_reminder_text_container.pack(fill="x")
         self.lbl_gift_reminder_send = ttk.Button(
-            gift_reminder_frame, text="📨 Open reminder email for 0 people who haven't contributed",
-            command=self._send_gift_reminder)
-        self.lbl_gift_reminder_send.pack(anchor="w", padx=6, pady=(2, 8))
-        ttk.Label(gift_reminder_frame,
-                  text="→ Always opens the email compose window in Outlook so you can review it and "
-                       "click Send YOURSELF — there is no auto-send option here.",
-                  font=("Arial", 8, "italic")).pack(anchor="w", padx=6, pady=(0, 6))
+            reminder.body, text="📨 Open reminder email for 0 people who haven't contributed",
+            style="Primary.TButton", command=self._send_gift_reminder)
+        self.lbl_gift_reminder_send.pack(anchor="w", pady=(12, 0))
 
-        # ── MỚI: gửi email báo cáo số tiền đã thu được, tới NHỮNG NGƯỜI ĐÃ
-        # TICK CHỌN ở cột "Send email" (hoàn toàn tách biệt với người CHƯA
-        # đóng góp ở khối nhắc nhở phía trên) — nội dung email liệt kê danh
-        # sách những ai ĐÃ ĐÓNG GÓP (cột "Contributed" = Yes), đánh số lại
-        # từ 1, KHÔNG đưa 2 cột checkbox ("Send email"/"Contributed") vào
-        # danh sách đó — xem reports.gift_report_workbook()/build_gift_report_body().
-        # Nội dung mail CHỈ là 1 thông báo TỔNG QUAN (đã thu bao nhiêu
-        # người/bao nhiêu tiền), KHÔNG liệt kê từng người trong nội dung —
-        # danh sách chi tiết nằm trong file Excel TỰ ĐỘNG ĐÍNH KÈM.
-        report_frame = ttk.LabelFrame(f, text="📧 Send contribution report to selected people")
-        report_frame.grid(row=10, column=0, columnspan=3, sticky="we", padx=10, pady=6)
-        self._make_wrapping_label(
-            report_frame,
-            text="Sent to everyone ticked in the \"Send email\" column above. The message body is a "
-                 "short summary (how many people contributed, total amount) — the detailed list "
-                 "(everyone who has ALREADY contributed, renumbered, without the \"Send email\"/"
-                 "\"Contributed\" checkbox columns) is automatically attached as an Excel file.",
-            font=("Arial", 8, "italic")).pack(anchor="w", padx=6, pady=(4, 0))
-
-        rbtn = ttk.Frame(report_frame)
-        rbtn.pack(fill="x", padx=6, pady=4)
-        ttk.Label(rbtn, text="Language:").pack(side="left", padx=(0, 4))
+        # ── contribution report to the people ticked in "Send email": a short
+        # summary in the body, the list of contributors attached as Excel
+        # (see reports.gift_report_workbook()/build_gift_report_body()). ──
+        report = Card(f, "Contribution report",
+                      "To everyone ticked in Send email: a short summary (how many contributed, the total), "
+                      "with the list of contributors attached as an Excel file. Opens in Outlook first.")
+        report.pack(fill="x")
+        rbtn = ttk.Frame(report.body)
+        rbtn.pack(fill="x", pady=(0, 10))
+        ttk.Label(rbtn, text="Language", style="Field.TLabel").pack(side="left", padx=(0, 8))
         self.combo_gift_report_lang = ttk.Combobox(
             rbtn, width=26, state="readonly",
             values=[LANG_LABELS["en"], LANG_LABELS["ja"], LANG_LABELS["vi"], LANG_LABELS["bilingual"]],
         )
         self.combo_gift_report_lang.current(0)  # default: English
-        self.combo_gift_report_lang.pack(side="left", padx=(0, 6))
+        self.combo_gift_report_lang.pack(side="left")
         self.combo_gift_report_lang.bind("<<ComboboxSelected>>", lambda e: self._generate_gift_report_draft())
-        ttk.Button(rbtn, text="🔄 Regenerate report text", command=self._generate_gift_report_draft)\
-            .pack(side="left", padx=(0, 6))
-
-        ttk.Label(report_frame, text="Report email content (review/edit before sending):",
-                  font=("Arial", 9, "italic")).pack(anchor="w", padx=6, pady=(4, 0))
+        ttk.Button(rbtn, text="🔄 Regenerate text", command=self._generate_gift_report_draft)\
+            .pack(side="left", padx=(8, 0))
         report_text_container, self.txt_gift_report_body = make_scrollable_text(
-            report_frame, width=100, height=10)
-        report_text_container.pack(fill="x", padx=6, pady=4)
-
+            report.body, width=40, height=10)
+        report_text_container.pack(fill="x")
         self.lbl_gift_report_send = ttk.Button(
-            report_frame, text="📧 Send report to 0 selected people", command=self._send_gift_report_email)
-        self.lbl_gift_report_send.pack(anchor="w", padx=6, pady=(2, 8))
-        ttk.Label(report_frame,
-                  text="→ Always opens the email compose window in Outlook so you can review it and "
-                       "click Send YOURSELF — there is no auto-send option here.",
-                  font=("Arial", 8, "italic")).pack(anchor="w", padx=6, pady=(0, 6))
+            report.body, text="📧 Send report to 0 selected people", style="Primary.TButton",
+            command=self._send_gift_report_email)
+        self.lbl_gift_report_send.pack(anchor="w", pady=(12, 0))
 
     def _pending_gift_contributors(self):
         """Returns list[(name, email)] of everyone NOT yet checked as
@@ -3623,186 +3481,123 @@ class RSVPApp(tk.Tk):
 
     def _build_tab_calendar(self):
         f = self.tab_calendar.body
-        pad = {"padx": 10, "pady": 6}
+        gap = {"fill": "x", "pady": (0, 16)}
 
-        # MỚI: giờ lấy CẢ "Yes" LẪN "Maybe" (trước đây chỉ lấy "Yes") — vì
-        # người trả lời "Maybe" (chưa chắc chắn) vẫn nên được mời Calendar
-        # Invite chính thức, để họ có lịch trên Outlook phòng khi sau đó họ
-        # quyết định tham dự — không nên loại họ ra chỉ vì chưa chốt.
-        ttk.Label(f, text='People who voted "Yes" or "Maybe" (auto-pulled from Tab 4):',
-                  font=("Arial", 10, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", **pad)
-        self.list_yes = tk.Listbox(f, width=60, height=10)
-        yes_vscroll = ttk.Scrollbar(f, orient="vertical", command=self.list_yes.yview)
-        self.list_yes.configure(yscrollcommand=yes_vscroll.set)
-        self.list_yes.grid(row=1, column=0, sticky="w", padx=10)
-        yes_vscroll.grid(row=1, column=1, sticky="nsw")
+        # Yes AND Maybe get the Calendar Invite: a Maybe should still have
+        # the event in Outlook in case they decide to come.
+        calendar = Card(f, "Calendar invite",
+                        "For everyone who voted Yes or Maybe on Collect responses. Date, time and place "
+                        "come from Event setup; the original invite email is attached.")
+        calendar.pack(**gap)
+        ttk.Label(calendar.body, text="Invitees", style="Field.TLabel").pack(anchor="w", pady=(0, 4))
+        yes_box = bordered(calendar.body)
+        yes_box.pack(fill="x")
+        self.list_yes = tk.Listbox(yes_box, height=7)
+        yes_vscroll = ttk.Scrollbar(yes_box, orient="vertical", command=self.list_yes.yview)
+        self.list_yes.configure(yscrollcommand=autohide(yes_vscroll))
+        self.list_yes.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=6)
+        yes_vscroll.grid(row=0, column=1, sticky="ns")
+        yes_box.columnconfigure(0, weight=1)
         # Kept in step with Tab 4 by _refresh_response_tree(); no refresh needed.
 
-        # MỚI: đã BỎ dòng "Event date / time (from Tab 1)" ở đây theo yêu
-        # cầu — thông tin đó vẫn được dùng NGẦM khi gửi Calendar Invite
-        # (xem _send_calendar(), luôn lấy trực tiếp từ Tab 1), chỉ không
-        # còn hiển thị lặp lại thành 1 dòng riêng ở Tab 5 nữa. Muốn xem/đổi
-        # giờ, quay lại Tab 1.
-
-        # ── customizable appointment body ──
-        appt_header = ttk.Frame(f)
-        appt_header.grid(row=6, column=0, columnspan=2, sticky="w", **pad)
-        ttk.Label(appt_header, text="Appointment body (customize if needed):", font=("Arial", 9, "bold"))\
-            .pack(side="left")
-        ttk.Label(appt_header, text="   Language:").pack(side="left")
+        appt_header = ttk.Frame(calendar.body)
+        appt_header.pack(fill="x", pady=(14, 4))
+        ttk.Label(appt_header, text="Appointment text", style="Field.TLabel").pack(side="left")
         self.combo_calendar_lang = ttk.Combobox(
             appt_header, width=26, state="readonly",
             values=[LANG_LABELS["en"], LANG_LABELS["ja"], LANG_LABELS["vi"], LANG_LABELS["bilingual"]],
         )
         self.combo_calendar_lang.current(0)  # default: English
-        self.combo_calendar_lang.pack(side="left", padx=(4, 0))
-        # Đổi ngôn ngữ -> tự thay lại nội dung mặc định ngay (giống combo_reminder_lang
-        # ở Tab 4) — nếu bạn đã tự gõ tay nội dung riêng, đổi ngôn ngữ sẽ THAY THẾ
-        # bằng bản mặc định của ngôn ngữ mới (không cộng dồn/giữ lại bản cũ).
+        self.combo_calendar_lang.pack(side="right")
+        ttk.Label(appt_header, text="Language", style="Muted.TLabel").pack(side="right", padx=(0, 8))
+        # Đổi ngôn ngữ -> THAY THẾ nội dung bằng bản mặc định của ngôn ngữ mới.
         self.combo_calendar_lang.bind("<<ComboboxSelected>>", lambda e: self._apply_calendar_body_lang())
-
-        appt_container, self.txt_appt_body = make_scrollable_text(f, width=100, height=4)
+        appt_container, self.txt_appt_body = make_scrollable_text(calendar.body, width=40, height=4)
         default_body = build_calendar_body("en", *self._calendar_body_args())
         self.txt_appt_body.insert("1.0", default_body)
         self.var_appt_body_default = default_body  # Keep track of default for reset
-        appt_container.grid(row=7, column=0, columnspan=2, sticky="w", padx=10, pady=4)
+        appt_container.pack(fill="x")
+        ttk.Button(calendar.body, text="📅 Send Calendar Invite to the list above", style="Primary.TButton",
+                   command=self._send_calendar).pack(anchor="w", pady=(12, 0))
 
-        ttk.Button(f, text="📅 Send Calendar Invite to the list above", command=self._send_calendar)\
-            .grid(row=8, column=0, sticky="w", **pad)
+        # ── after the event: totals, the per-person table, the thank-you ──
+        self.var_total_actual_attend = tk.StringVar(value="0")
+        self.var_total_collected_amount = tk.StringVar(value="0")
+        self.var_remaining_amount = tk.StringVar(value="0")
+        # "Amount paid" — số tiền THỰC TẾ đã trả ra (đặt cọc nhà hàng...), nhập
+        # tay; "Remaining" = Total collected − Amount paid, tự tính. Lưu theo
+        # Event ID (cột AmountPaid), nạp lại khi Load setup.
+        self.var_amount_paid = tk.StringVar(value="0")
+        totals = kpi_row(f, [
+            ("Attended", self.var_total_actual_attend, {"dot": COLORS["success_fill"]}),
+            ("Collected", self.var_total_collected_amount, {}),
+            ("Amount paid",
+             lambda p: ttk.Entry(p, textvariable=self.var_amount_paid, font=self.fonts.title, width=12),
+             {"footnote": "Paid out so far"}),
+            ("Remaining", self.var_remaining_amount, {"footnote": "Collected − Amount paid"}),
+        ])
+        totals.pack(**gap)
+        self.var_amount_paid.trace_add("write", lambda *a: self._on_amount_paid_changed())
 
-        ttk.Separator(f).grid(row=9, column=0, columnspan=3, sticky="ew", padx=10, pady=10)
-
-        # ── Attendance & Payment tracking (post-event) ──
-        # Lists everyone who voted "Yes" or "Maybe" (same population as the
-        # Calendar Invite list above), so you can mark who ACTUALLY showed
-        # up, who's exempt from paying, and how much they paid, after the
-        # event happens. Double-click "Name"/"Vote"/"Amount" to type a new
-        # value; "Actual Attend" opens a Yes/No dropdown instead of free
-        # text; single-click the "Free" column to toggle it. Every edit is
-        # auto-saved straight to Attendance_Payment_{EventID}.xlsx in the
-        # Input folder — no manual export step needed (see
-        # _save_attendance_sheet_to_file()).
-        ttk.Label(f, text="Attendance & Payment tracking (fill in after the event):",
-                  font=("Arial", 10, "bold")).grid(row=10, column=0, columnspan=2, sticky="w", **pad)
-        self._make_wrapping_label(
-            f, text="Double-click \"Name\"/\"Vote\"/\"Amount\" to edit; \"Actual Attend\" opens a Yes/No "
-                    "dropdown; click a row's \"Free\" cell to toggle exemption. Setting \"Actual Attend\" to "
-                    "\"Yes\" auto-fills Amount from Tab 1's \"Expected event budget\" (0 if marked Free) — "
-                    "you can still overwrite Amount by hand afterward. Select rows and use Ctrl+C / Ctrl+V "
-                    "to copy/paste to or from Excel, or Delete to clear a row's tracking fields. Every "
-                    "change is saved to the database automatically; the list follows Tab 4's "
-                    "Yes/Maybe votes each time this tab opens.",
-            font=("Arial", 8, "italic")).grid(row=11, column=0, columnspan=3, sticky="w", padx=10)
-
-        attend_btns = ttk.Frame(f)
-        attend_btns.grid(row=12, column=0, columnspan=3, sticky="w", **pad)
+        attendance = Card(f, "Attendance & payment",
+                          "Fill in after the event. The list follows the Yes / Maybe votes each time this "
+                          "page opens, and every change is saved automatically.")
+        attendance.pack(**gap)
         # Every edit is saved to the database already; this only writes a
         # file to share or archive.
-        ttk.Button(attend_btns, text="📊 Export to Excel", command=self._export_attendance_to_excel)\
-            .pack(side="left")
-
+        ttk.Button(attendance.actions, text="📊 Export to Excel", command=self._export_attendance_to_excel)\
+            .pack()
+        WrapLabel(attendance.body, style="Hint.TLabel",
+                  text="Double-click Name, Vote or Amount to edit; Actual Attend opens a Yes / No list; click "
+                       "Free to exempt someone. Actual Attend = Yes fills Amount from the expected event "
+                       "budget (0 if Free). Ctrl+C / Ctrl+V copy to and from Excel; Delete clears a row's "
+                       "tracking.").pack(fill="x", pady=(0, 10))
         attend_cols = ("no", "name", "vote", "actual_attend", "free", "amount")
-        attend_container, self.tree_attendance = make_scrollable_treeview(f, columns=attend_cols, height=14)
+        attend_container, self.tree_attendance = make_scrollable_treeview(
+            attendance.body, columns=attend_cols, height=12)
         attend_headers = ["No.", "Name", "Vote", "Actual Attend", "Free", "Amount"]
-        attend_widths = [40, 240, 70, 110, 60, 100]
+        attend_widths = [44, 260, 80, 120, 64, 110]
         for c, h, w in zip(attend_cols, attend_headers, attend_widths):
-            self.tree_attendance.heading(c, text=h)
             anchor = "center" if c in ("no", "vote", "actual_attend", "free") else ("e" if c == "amount" else "w")
-            self.tree_attendance.column(c, width=w, anchor=anchor)
-        attend_container.grid(row=13, column=0, columnspan=3, sticky="w", padx=10, pady=6)
-        # "Actual Attend" opens a readonly Yes/No dropdown (see
-        # _begin_cell_edit_combobox()); Name/Vote/Amount get a normal
-        # type-in-place Entry; "No." and "Free" are not double-click
-        # editable ("Free" toggles on single-click instead — see
-        # _on_attendance_free_click(), bound separately below so the two
-        # bindings don't conflict).
+            self.tree_attendance.heading(c, text=h, anchor=anchor)
+            self.tree_attendance.column(c, width=w, anchor=anchor, stretch=c == "name")
+        attend_container.pack(fill="both", expand=True)
+        # "Actual Attend" opens a readonly Yes/No dropdown; Name/Vote/Amount a
+        # type-in-place Entry; "Free" toggles on single-click (bound
+        # separately so the two bindings don't conflict).
         self.tree_attendance.bind("<Double-1>", self._on_attendance_tree_double_click)
         self.tree_attendance.bind("<Button-1>", self._on_attendance_free_click)
         self._enable_treeview_copy_paste(
             self.tree_attendance, on_commit=self._commit_attendance_edit,
             editable_cols={"name", "vote", "actual_attend", "free", "amount"})
-        # Select rows and press Delete/Backspace to clear that row's
-        # tracking fields (Actual Attend/Free/Amount) back to blank — Name
-        # and Vote are left untouched since they're identity data pulled
-        # from Tab 4, not something you'd normally want to blank out by
-        # accident. See _on_attendance_delete_key().
+        # Delete/Backspace clears the row's tracking fields (Actual Attend/
+        # Free/Amount); Name and Vote come from Tab 4 and are left alone.
         self.tree_attendance.bind("<Delete>", self._on_attendance_delete_key)
         self.tree_attendance.bind("<BackSpace>", self._on_attendance_delete_key)
 
-        totals_frame = ttk.Frame(f)
-        totals_frame.grid(row=14, column=0, columnspan=3, sticky="w", **pad)
-        ttk.Label(totals_frame, text="Total actual attend:").pack(side="left")
-        self.var_total_actual_attend = tk.StringVar(value="0")
-        ttk.Label(totals_frame, textvariable=self.var_total_actual_attend, font=("Arial", 10, "bold"))\
-            .pack(side="left", padx=(4, 24))
-        ttk.Label(totals_frame, text="Total collected amount:").pack(side="left")
-        self.var_total_collected_amount = tk.StringVar(value="0")
-        ttk.Label(totals_frame, textvariable=self.var_total_collected_amount, font=("Arial", 10, "bold"))\
-            .pack(side="left", padx=(4, 0))
-
-        # MỚI: "Amount paid" — số tiền THỰC TẾ đã trả (vd đặt cọc/thanh
-        # toán trước cho nhà hàng, chuyển khoản cho Guest of Honor...),
-        # nhập tay vì con số này KHÔNG thể tự suy ra được từ bảng
-        # Attendance. "Remaining amount" tự tính = Total collected amount −
-        # Amount paid, cập nhật ngay khi gõ (self.var_amount_paid.trace_add
-        # bên dưới) hoặc khi bảng Attendance đổi (_update_attendance_totals
-        # gọi lại cùng công thức). Giá trị Amount paid được lưu theo từng
-        # Event ID trong database (cột "AmountPaid" ở bảng events, xem
-        # db.py) — nạp lại tự động bởi "Load setup from selected event".
-        paid_frame = ttk.Frame(f)
-        paid_frame.grid(row=15, column=0, columnspan=3, sticky="w", **pad)
-        ttk.Label(paid_frame, text="Amount paid:").pack(side="left")
-        self.var_amount_paid = tk.StringVar(value="0")
-        ttk.Entry(paid_frame, textvariable=self.var_amount_paid, width=14)\
-            .pack(side="left", padx=(4, 24))
-        ttk.Label(paid_frame, text="Remaining amount:").pack(side="left")
-        self.var_remaining_amount = tk.StringVar(value="0")
-        ttk.Label(paid_frame, textvariable=self.var_remaining_amount, font=("Arial", 10, "bold"))\
-            .pack(side="left", padx=(4, 0))
-        # Ghi chú nhỏ để không ai nhầm đây là số tự tính từ bảng.
-        ttk.Label(paid_frame, text="  (type the amount actually paid out; "
-                                    "remaining = Total collected − Amount paid)",
-                  font=("Arial", 8, "italic")).pack(side="left")
-        self.var_amount_paid.trace_add("write", lambda *a: self._on_amount_paid_changed())
-
-        # ── Thank You email (post-event, MỚI) ──
-        # Soạn sẵn nội dung email cảm ơn mọi người đã tham gia, cùng cách
-        # làm với Appointment body ở trên: đa ngôn ngữ (English/Japanese/
-        # Vietnamese/Bilingual), có thể sửa tay trước khi gửi, tự refresh
-        # theo Tab 1 khi CHƯA hand-edit (xem _refresh_thankyou_body_display()
-        # / _apply_thankyou_body_lang(), cùng cơ chế với
-        # _refresh_calendar_datetime_display()). Người nhận = những ai
-        # "Actual Attend" = Yes trong bảng ở trên (xem _send_thank_you_email()).
-        ttk.Separator(f).grid(row=16, column=0, columnspan=3, sticky="ew", padx=10, pady=10)
-
-        ttk.Label(f, text="Thank You email (send after the event):",
-                  font=("Arial", 10, "bold")).grid(row=17, column=0, columnspan=2, sticky="w", **pad)
-        self._make_wrapping_label(
-            f, text="Sent to everyone marked \"Actual Attend\" = Yes above. Automatically attaches "
-                    "the Attendance & Payment Excel report (with everyone's attendance/cost info), "
-                    "and the Calendar Invite for this event if it can be found in your Calendar "
-                    "(best-effort — see the confirmation message after sending).",
-            font=("Arial", 8, "italic")).grid(row=18, column=0, columnspan=3, sticky="w", padx=10)
-
-        thankyou_header = ttk.Frame(f)
-        thankyou_header.grid(row=19, column=0, columnspan=2, sticky="w", **pad)
-        ttk.Label(thankyou_header, text="   Language:").pack(side="left")
+        # ── Thank You email: to everyone with "Actual Attend" = Yes; refreshes
+        # from Tab 1 until hand-edited (see _refresh_thankyou_body_display()). ──
+        thankyou = Card(f, "Thank-you email",
+                        "To everyone marked Actual Attend = Yes. Attaches the attendance & payment report, "
+                        "and the Calendar Invite if it can be found in your Calendar.")
+        thankyou.pack(fill="x")
+        thankyou_header = ttk.Frame(thankyou.body)
+        thankyou_header.pack(fill="x", pady=(0, 8))
+        ttk.Label(thankyou_header, text="Language", style="Field.TLabel").pack(side="left", padx=(0, 8))
         self.combo_thankyou_lang = ttk.Combobox(
             thankyou_header, width=26, state="readonly",
             values=[LANG_LABELS["en"], LANG_LABELS["ja"], LANG_LABELS["vi"], LANG_LABELS["bilingual"]],
         )
         self.combo_thankyou_lang.current(0)  # default: English
-        self.combo_thankyou_lang.pack(side="left", padx=(4, 0))
+        self.combo_thankyou_lang.pack(side="left")
         self.combo_thankyou_lang.bind("<<ComboboxSelected>>", lambda e: self._apply_thankyou_body_lang())
-
-        thankyou_container, self.txt_thankyou_body = make_scrollable_text(f, width=100, height=6)
+        thankyou_container, self.txt_thankyou_body = make_scrollable_text(thankyou.body, width=40, height=6)
         default_thankyou_body = build_thankyou_body("en", *self._thankyou_body_args())
         self.txt_thankyou_body.insert("1.0", default_thankyou_body)
         self.var_thankyou_body_default = default_thankyou_body  # Keep track of default for reset
-        thankyou_container.grid(row=20, column=0, columnspan=2, sticky="w", padx=10, pady=4)
-
-        ttk.Button(f, text="📧 Send Thank You email to confirmed attendees",
-                   command=self._send_thank_you_email).grid(row=21, column=0, sticky="w", **pad)
+        thankyou_container.pack(fill="x")
+        ttk.Button(thankyou.body, text="📧 Send Thank You email to confirmed attendees", style="Primary.TButton",
+                   command=self._send_thank_you_email).pack(anchor="w", pady=(12, 0))
 
     def _refresh_attendance_list(self):
         """Rebuilds self._attendance_roster (the source of truth for the
@@ -4030,7 +3825,7 @@ class RSVPApp(tk.Tk):
                                     f"in another program, then re-enter it.")
         else:
             reason = (f"Event ID '{event_id}' is not in History yet. Save it on Tab 1 "
-                      f"('💾 Update this event in History'), then re-enter Amount paid.")
+                      f"('💾 Save event details'), then re-enter Amount paid.")
         if saved:
             self._amount_paid_save_failed = False
         elif not self._amount_paid_save_failed:
@@ -4440,36 +4235,35 @@ class RSVPApp(tk.Tk):
 
     def _build_tab_history(self):
         f = self.tab_history.body
-        top = ttk.Frame(f)
-        top.pack(fill="x", padx=10, pady=8)
-        ttk.Label(top, text="Database file:").pack(side="left")
-        ttk.Entry(top, textvariable=self.history_path, width=40).pack(side="left", padx=6)
-        ttk.Button(top, text="📂 Browse...", command=self._browse_history_file).pack(side="left", padx=4)
-        ttk.Button(top, text="🔄 Reload", command=self._refresh_history_tree).pack(side="left", padx=4)
-        # Double-click any cell below to edit it directly, then click this
-        # button to write your changes back to the database (see
-        # _save_history_edits()). Nothing is written until you click Save —
-        # double-clicking only edits what's shown on screen.
-        ttk.Button(top, text="💾 Save changes", command=self._save_history_edits)\
-            .pack(side="left", padx=4)
-        # The database is the working copy; this writes a snapshot file.
-        ttk.Button(top, text="📊 Export to Excel", command=self._export_history_to_excel)\
-            .pack(side="left", padx=4)
 
-        self._make_wrapping_label(f, text="💡 Double-click any cell below to edit it in place (or select rows and use "
-                          "Ctrl+C / Ctrl+V to copy/paste to or from Excel), then click "
-                          "'💾 Save changes' to write the cells you edited back to the database. "
-                          "(Renaming an Event ID moves the whole event — its recipients, votes, attendance "
-                          "and gift list — to the new ID.) Use '📊 Export to Excel' any time you need a "
-                          "report file to share or archive; it includes every stored column.",
-                  font=("Arial", 8, "italic")).pack(anchor="w", padx=10, pady=(0, 4))
+        source = Card(f, "Database", "Every page reads and writes this file. Back it up now and then.")
+        source.pack(fill="x", pady=(0, 16))
+        row = ttk.Frame(source.body)
+        row.pack(fill="x")
+        ttk.Entry(row, textvariable=self.history_path).pack(side="left", fill="x", expand=True)
+        ttk.Button(row, text="📂 Browse...", command=self._browse_history_file).pack(side="left", padx=(8, 0))
+
+        events = Card(f, "Saved events",
+                      "Double-click a cell to edit it (Ctrl+C / Ctrl+V work with Excel too), then save: "
+                      "only the cells you edited are written. Renaming an Event ID moves the whole "
+                      "event — recipients, votes, attendance and gift list — to the new ID.")
+        events.pack(fill="both", expand=True)
+        # The database is the working copy; Export writes a snapshot file with
+        # every stored column. Nothing is written until "Save changes".
+        ttk.Button(events.actions, text="📊 Export to Excel", command=self._export_history_to_excel)\
+            .pack(side="right")
+        ttk.Button(events.actions, text="🔄 Reload", command=self._refresh_history_tree)\
+            .pack(side="right", padx=(0, 8))
+        ttk.Button(events.actions, text="💾 Save changes", style="Primary.TButton",
+                   command=self._save_history_edits).pack(side="right", padx=(0, 8))
 
         cols = tuple(c for c, _h, _w in HISTORY_TABLE_COLUMNS)
-        tree_container, self.tree_history = make_scrollable_treeview(f, columns=cols, height=18)
+        tree_container, self.tree_history = make_scrollable_treeview(
+            events.body, columns=cols, height=16, horizontal=True)
         for c, h, w in HISTORY_TABLE_COLUMNS:
-            self.tree_history.heading(c, text=h)
-            self.tree_history.column(c, width=w)
-        tree_container.pack(fill="both", expand=True, padx=10, pady=6)
+            self.tree_history.heading(c, text=h, anchor="w")
+            self.tree_history.column(c, width=w, stretch=False)
+        tree_container.pack(fill="both", expand=True)
         # Every column is editable via double-click (editable_cols=None ->
         # no restriction) — see _commit_history_edit(). This only updates
         # what's shown in the table; nothing is saved to disk until

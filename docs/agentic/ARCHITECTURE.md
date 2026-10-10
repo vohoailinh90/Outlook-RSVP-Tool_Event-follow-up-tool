@@ -38,7 +38,7 @@ rsvp/
   ports/     OutlookPort (Protocol)                           deps: none
   adapters/  outlook COM implementation of OutlookPort        deps: pywin32  [Windows]
   export/    openpyxl workbook building                       deps: openpyxl
-  ui/        tkinter, one module per tab                      deps: tkinter
+  ui/        tkinter, one module per tab                      deps: tkinter, tkcalendar
 app.py
 ```
 
@@ -175,6 +175,15 @@ calendar invite refuse a table scanned for another one. Storage gained two primi
 `db.rename_event` (moves an event's row and its per-event tables in one transaction).
 `tests/test_app_event_state.py` is the first test that constructs `RSVPApp`, against the
 fake Outlook; it needs a display, so it runs on the Windows CI and skips elsewhere.
+
+**UI design system (done).** `rsvp/ui/` holds the look, taken from the Automation UI Kit:
+`tokens.py` converts the kit's oklch colours to hex (plain data; `tests/test_ui_tokens.py`
+pins them to Tailwind's values and checks text contrast), `theme.py` styles every ttk class
+on the `clam` theme, and `widgets.py` rebuilds the kit's Card, KPI tile, banner, sidebar and
+page header. The notebook keeps its seven pages but hides its tab strip; the sidebar selects
+them, so `nb.select` and `<<NotebookTabChanged>>` behave as before. The tab builders are still
+in `rsvp_app.py` — moving one per module is Phase 4's job. `check_layering.py` lets `rsvp/ui/`
+use Tk and nothing heavier, and keeps `tokens.py` free even of Tk.
 
 **Phase 4 — split `ui/`.** Seven tabs, seven modules, out of the 4,673-line class. Largest
 and last, because it is worth least until the layers beneath it are real.

@@ -58,7 +58,10 @@ share a report — it's no longer where "live" data is stored, unlike the older 
 python rsvp_app.py
 ```
 
-The window opens with 7 tabs. For each new event, work through them left to right.
+The window opens with a sidebar listing the 7 steps of the workflow (the "tabs" below);
+for each new event, work through them top to bottom. The current Event ID is shown at the
+top right of every page. The look follows the Automation UI Kit (white cards, black primary
+buttons, colour only for status); its tokens live in `rsvp/ui/`.
 
 ---
 
@@ -66,7 +69,9 @@ The window opens with 7 tabs. For each new event, work through them left to righ
 
 ### Tab 1 — Event Setup
 Enter event details: Event ID (unique identifier used to match emails), event name,
-date/time (Start/End Time), location, deadline, budget. Choose an **Event Mode**:
+date/time (Start/End Time), location, deadline, budget. **💾 Save event details** writes them
+to History (no email is sent); **🆕 Save & start a new event** saves and then clears every
+page for the next event. Choose an **Event Mode**:
 - `Event` — a normal event
 - `Gift` — gift-contribution collection only (adds Organizer / Guest of Honor /
   Expected Gift Budget / Gift Contribution Deadline)
