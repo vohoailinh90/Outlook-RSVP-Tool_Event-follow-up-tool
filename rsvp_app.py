@@ -46,16 +46,61 @@ except ImportError:
     HAS_TKCALENDAR = False
 
 import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
 from rsvp.adapters import outlook_com
-from rsvp.export import history, legacy_excel
-from rsvp.storage import db
+from rsvp.export import legacy_excel, reports
+from rsvp.export.reports import read_gift_contribution_rows
+from rsvp.storage import db, settings
 from rsvp.ports import OutlookPort
 from rsvp.services.invite import InviteRequest, send_invite
+from rsvp.ui import theme
+from rsvp.ui.tokens import COLORS
+from rsvp.ui.widgets import Banner, Card, PageHeader, Sidebar, WrapLabel, autohide, bordered, kpi_row
 
 APP_TITLE = "Outlook RSVP Tool"
+
+# The sidebar and page header: (attribute of the page, sidebar label, page title, description).
+PAGES = [
+    ("tab_config", "Event Setup", "Event setup",
+     "The details every email is built from. Save the event here, or reload a past one."),
+    ("tab_recipients", "Recipients", "Recipients",
+     "Who is invited. The list is saved for the current Event ID after every change."),
+    ("tab_compose", "Compose & Send", "Compose & send",
+     "Write the invitation, translate it if needed, and open it in Outlook."),
+    ("tab_collect", "Collect Responses", "Collect responses",
+     "Read the Yes / No / Maybe votes from your mailbox, and remind whoever has not answered."),
+    ("tab_calendar", "Attendance & Payment", "Attendance & payment",
+     "Calendar invite for Yes / Maybe, who actually came, what they paid, and the thank-you email."),
+    ("tab_gift", "Gift Contribution", "Gift contribution",
+     "Who has contributed to the gift, reminders, and a report for the people you choose."),
+    ("tab_history", "Event History", "Event history",
+     "Every saved event. Double-click a cell to edit it, then save."),
+]
+
+# Tab 7 (Event History): (column, header, width), in db.EVENT_COLUMNS order.
+# Not shown, because nothing writes them any more: the cost columns of the
+# removed "Actual cost tracking" (ActualAttendees, CostPerPerson,
+# TotalIncome, TotalExpense, Balance), ReminderSent (only ever set for a
+# scheduled-reminder script that does not exist) and ReportFile (only set by
+# a report export that had no button). Their stored values are kept, and
+# "Export to Excel" still writes them. AmountPaid is edited on Tab 5.
+HISTORY_TABLE_COLUMNS = [
+    ("EventID", "Event ID", 110), ("EventName", "Event Name", 170),
+    ("EventDate", "Date", 96), ("Deadline", "Deadline", 96),
+    ("Location", "Location", 110), ("Budget", "Budget", 90),
+    ("EmailLanguage", "Language", 140), ("OrganizerNote", "Organizer Note", 220),
+    ("RecipientFile", "Recipient File", 220), ("SentDate", "Sent Date", 120),
+    ("UpdateInviteDate", "Update Invite Date", 130),
+    ("TotalInvited", "Invited", 65), ("Yes", "Yes", 45), ("No", "No", 45),
+    ("Maybe", "Maybe", 55), ("NoResponse", "No Resp.", 70),
+    ("CalendarSent", "Calendar Invite", 140),
+    ("LastReminderSentDate", "Last Reminder Sent", 140),
+    ("EventMode", "Event Mode", 90), ("Organizer", "Organizer", 140),
+    ("GuestOfHonor", "Guest of Honor", 140), ("GiftBudget", "Gift Budget", 100),
+    ("GiftDeadline", "Gift Deadline", 90), ("StartTime", "Start", 65), ("EndTime", "End", 65),
+]
 
 # ══════════════════════════════════════════════════════════════════════════
 # Language, message and paste-cleanup helpers
@@ -124,9 +169,22 @@ from rsvp.i18n import (  # noqa: F401
 # ══════════════════════════════════════════════════════════════════════════
 # Date-picker helper widget
 # ══════════════════════════════════════════════════════════════════════════
+# The drop-down calendar in the kit's colours instead of tkcalendar's blue.
+CALENDAR_COLORS = dict(
+    background=COLORS["primary"], foreground=COLORS["primary_foreground"],
+    headersbackground=COLORS["muted"], headersforeground=COLORS["muted_foreground"],
+    normalbackground=COLORS["card"], normalforeground=COLORS["foreground"],
+    weekendbackground=COLORS["card"], weekendforeground=COLORS["foreground"],
+    othermonthbackground=COLORS["muted"], othermonthforeground=COLORS["muted_foreground"],
+    othermonthwebackground=COLORS["muted"], othermonthweforeground=COLORS["muted_foreground"],
+    selectbackground=COLORS["primary"], selectforeground=COLORS["primary_foreground"],
+    bordercolor=COLORS["border"], borderwidth=0,
+)
+
+
 def make_date_picker(parent, initial=None):
     if HAS_TKCALENDAR:
-        w = DateEntry(parent, date_pattern="dd/mm/yyyy", width=14)
+        w = DateEntry(parent, date_pattern="dd/mm/yyyy", width=14, **CALENDAR_COLORS)
         if initial:
             try:
                 w.set_date(initial)
@@ -175,100 +233,35 @@ def set_date_str(widget, date_str):
         pass  # không parse được (định dạng lạ) — giữ nguyên giá trị đang có trên ô
 
 
-def read_gift_contribution_rows(path):
-    """Reads a Gift_Contribution_List_*.xlsx file and returns
-    list[dict(name, email, checked, amount)], matching columns by their
-    HEADER text (row 1) instead of a fixed position — so both older files
-    (Name/Email/Contributed only) and newer files (No./Name/Email/Amount/
-    Contributed) can be read back correctly."""
-    wb = openpyxl.load_workbook(path, data_only=True)
-    ws = wb.active
-    header_row = next(ws.iter_rows(min_row=1, max_row=1), ())
-    header = {(str(c.value).strip() if c.value else ""): i for i, c in enumerate(header_row)}
-    i_name = header.get("Name")
-    i_email = header.get("Email")
-    i_amount = header.get("Amount")
-    i_contrib = header.get("Contributed")
-    rows = []
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        if not row:
-            continue
-        email = row[i_email] if i_email is not None and i_email < len(row) else None
-        if not email:
-            continue  # skips blank rows and the "TOTAL COLLECTED" summary row
-        name = row[i_name] if i_name is not None and i_name < len(row) else None
-        contributed = row[i_contrib] if i_contrib is not None and i_contrib < len(row) else None
-        amount = row[i_amount] if i_amount is not None and i_amount < len(row) else None
-        rows.append({
-            "name": str(name).strip() if name else str(email).strip(),
-            "email": str(email).strip(),
-            "checked": (str(contributed).strip().lower() == "yes") if contributed is not None else False,
-            "amount": parse_amount_from_text(amount) if amount is not None else 0.0,
-        })
-    return rows
-
-
 # ══════════════════════════════════════════════════════════════════════════
-# Scrollable tab container — every tab's real content goes inside `.body`,
-# so long tabs get a vertical (and horizontal, if needed) scrollbar instead
-# of being cut off on smaller screens / windows.
+# Scrollable page container — every page's real content goes inside `.body`,
+# so long pages get a vertical scrollbar instead of being cut off on smaller
+# screens / windows.
 # ══════════════════════════════════════════════════════════════════════════
 class ScrollableFrame(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
-        # BUG ĐÃ SỬA: tk.Canvas KHÔNG tự lấy màu nền theo theme ttk ("clam")
-        # — mặc định nó dùng màu trắng thuần của hệ thống, khác hẳn màu nền
-        # xám/xanh nhạt mà mọi ttk.Frame/ttk.Label khác trong app đang dùng.
-        # Kết quả: bất cứ khoảng trống nào trong vùng cuộn (canvas rộng hơn
-        # nội dung thật bên trong self.body) đều lộ ra 1 mảng trắng lệch
-        # tông so với phần nền chứa nút bấm/nhãn thông báo xung quanh. Lấy
-        # đúng màu nền mà style ttk "TFrame" đang dùng (fallback về màu xám
-        # nhạt tiêu chuẩn của theme "clam" nếu vì lý do gì đó chưa tra được)
-        # rồi gán thẳng cho canvas để 2 vùng luôn cùng 1 màu.
-        style = ttk.Style(self)
-        bg_color = style.lookup("TFrame", "background") or "#dcdad5"
-        canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0, background=bg_color)
+        # tk.Canvas does not follow the ttk theme, so it gets the page colour explicitly.
+        canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0, background=COLORS["background"])
         vscroll = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
-        hscroll = ttk.Scrollbar(self, orient="horizontal", command=canvas.xview)
-        self.body = ttk.Frame(canvas)
+        # Page margins of the kit's main area (p-6), minus what the header has.
+        self.body = ttk.Frame(canvas, padding=(28, 20, 28, 28))
 
         self.body.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas_window = canvas.create_window((0, 0), window=self.body, anchor="nw")
 
-        # BUG ĐÃ SỬA: self.body trước đây được đặt vào canvas với kích
-        # thước CỐ ĐỊNH bằng đúng nội dung của nó lúc tạo — khi cửa sổ app
-        # được kéo RỘNG hơn, canvas nới rộng ra theo nhưng self.body (và do
-        # đó mọi nhãn thông báo/nút bấm bên trong) KHÔNG nới theo, để lại 1
-        # dải trống bên phải/dưới, đúng như hiện tượng "phần thông báo
-        # không tự động fix theo" khi resize. Giờ mỗi khi canvas đổi kích
-        # thước, ép item cửa sổ bên trong (self.body) rộng bằng đúng canvas
-        # — nội dung sẽ luôn lấp đầy chiều ngang, và các nhãn word-wrap
-        # (_make_wrapping_label) tính lại đúng bề rộng thật để xuống dòng.
+        # Each time the canvas is resized, the body is forced to exactly its
+        # width, so cards fill the page and wrapping labels (WrapLabel) reflow.
         def _on_canvas_configure(event):
             canvas.itemconfig(canvas_window, width=event.width)
-            # MỚI: cũng tính lại wraplength cho MỌI label đã đăng ký vào
-            # ĐÚNG canvas này (xem RSVPApp._make_wrapping_label() bên dưới)
-            # — dùng TRỰC TIẾP chiều rộng THẬT của canvas, thay vì suy luận
-            # gián tiếp từ chiều rộng cửa sổ gốc (self.winfo_width()) như
-            # cách cũ. 2 con số đó lệch nhau khá nhiều (thanh cuộn dọc,
-            # padding của Notebook, indent riêng của từng frame con...),
-            # khiến 1 số label tính sai độ rộng cần xuống dòng và không co
-            # lại đúng khi cửa sổ bị thu nhỏ — đây là NGUYÊN NHÂN gốc của
-            # lỗi "nội dung hướng dẫn chưa fit theo khi resize". Giờ mỗi
-            # canvas tự quản lý danh sách label của riêng nó, luôn khớp
-            # đúng chiều rộng thực tế đang hiển thị của ĐÚNG tab đó.
-            for lbl, margin in list(getattr(canvas, "wrap_labels", [])):
-                try:
-                    lbl.configure(wraplength=max(event.width - margin, 250))
-                except tk.TclError:
-                    pass  # label đã bị huỷ — bỏ qua an toàn
         canvas.bind("<Configure>", _on_canvas_configure)
 
-        canvas.configure(yscrollcommand=vscroll.set, xscrollcommand=hscroll.set)
+        canvas.configure(yscrollcommand=vscroll.set)
 
+        # The body is always exactly as wide as the canvas, so there is never
+        # anything to scroll sideways.
         canvas.grid(row=0, column=0, sticky="nsew")
         vscroll.grid(row=0, column=1, sticky="ns")
-        hscroll.grid(row=1, column=0, sticky="ew")
         self.rowconfigure(0, weight=1)
         self.columnconfigure(0, weight=1)
 
@@ -286,30 +279,70 @@ class ScrollableFrame(ttk.Frame):
         self.canvas = canvas
 
 
-def make_scrollable_treeview(parent, columns, height=10, show="headings"):
-    """Creates a Treeview WITH its scrollbar, both inside a small container frame.
+def make_scrollable_treeview(parent, columns, height=10, show="headings", horizontal=False):
+    """Creates a Treeview WITH its scrollbar(s), inside a bordered container.
+    `horizontal` adds a bottom scrollbar, for tables wider than the page.
     Returns (container, tree). Grid/pack the returned CONTAINER — never the tree itself —
     since the tree's actual parent is the container, not the outer `parent` passed in."""
-    container = ttk.Frame(parent)
+    container = bordered(parent)
     tree = ttk.Treeview(container, columns=columns, show=show, height=height)
     vscroll = ttk.Scrollbar(container, orient="vertical", command=tree.yview)
-    tree.configure(yscrollcommand=vscroll.set)
-    tree.pack(side="left", fill="both", expand=True)
-    vscroll.pack(side="right", fill="y")
+    tree.configure(yscrollcommand=autohide(vscroll))
+    tree.grid(row=0, column=0, sticky="nsew")
+    vscroll.grid(row=0, column=1, sticky="ns")
+    if horizontal:
+        hscroll = ttk.Scrollbar(container, orient="horizontal", command=tree.xview)
+        tree.configure(xscrollcommand=autohide(hscroll))
+        hscroll.grid(row=1, column=0, sticky="ew")
+    container.rowconfigure(0, weight=1)
+    container.columnconfigure(0, weight=1)
     return container, tree
 
 
 def make_scrollable_text(parent, **text_kwargs):
-    """Creates a Text widget WITH its scrollbar, both inside a small container frame.
+    """Creates a Text widget WITH its scrollbar, both inside a bordered container
+    whose border turns to the focus colour while the text has focus.
     Returns (container, text_widget). Grid/pack the returned CONTAINER — never the text
     widget itself — since the text widget's actual parent is the container."""
-    container = ttk.Frame(parent)
+    background = text_kwargs.get("bg", COLORS["card"])
+    container = bordered(parent, bg=background)
     text_widget = tk.Text(container, **text_kwargs)
     vscroll = ttk.Scrollbar(container, orient="vertical", command=text_widget.yview)
     text_widget.configure(yscrollcommand=vscroll.set, wrap="word")
     text_widget.pack(side="left", fill="both", expand=True)
     vscroll.pack(side="right", fill="y")
+    text_widget.bind("<FocusIn>", lambda e: container.configure(highlightbackground=COLORS["ring"],
+                                                                highlightcolor=COLORS["ring"]), add="+")
+    text_widget.bind("<FocusOut>", lambda e: container.configure(highlightbackground=COLORS["border"],
+                                                                 highlightcolor=COLORS["border"]), add="+")
     return container, text_widget
+
+
+def button_row(parent, *buttons, pady=(12, 0)):
+    """A row of buttons, left-aligned: (text, command[, style])."""
+    row = ttk.Frame(parent)
+    row.pack(fill="x", pady=pady)
+    made = []
+    for i, spec in enumerate(buttons):
+        text, command = spec[0], spec[1]
+        style = spec[2] if len(spec) > 2 else "TButton"
+        b = ttk.Button(row, text=text, command=command, style=style)
+        b.pack(side="left", padx=(0 if i == 0 else 8, 0))
+        made.append(b)
+    return row, made
+
+
+def field(parent, row, column, label, widget_factory, columnspan=1, hint=None):
+    """A form field the kit's way: a small label above its input. Returns the input."""
+    cell = ttk.Frame(parent)
+    cell.grid(row=row, column=column, columnspan=columnspan, sticky="nwe",
+              padx=(0 if column == 0 else 8, 0), pady=(0, 12))
+    ttk.Label(cell, text=label, style="Field.TLabel").pack(anchor="w", pady=(0, 4))
+    widget = widget_factory(cell)
+    widget.pack(anchor="w", fill="x")
+    if hint:
+        WrapLabel(cell, text=hint, style="Hint.TLabel").pack(anchor="w", fill="x", pady=(3, 0))
+    return widget
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -322,15 +355,34 @@ class RSVPApp(tk.Tk):
         # outlook_com - scripts/check_layering.py fails any other use.
         self.outlook: OutlookPort = outlook if outlook is not None else outlook_com
         self.title(APP_TITLE)
-        self.geometry("1020x720")
+        self.geometry("1240x800")
+        self.minsize(980, 640)
+        # Before any widget exists: every style, font and default comes from here.
+        self.fonts = theme.apply(self)
 
         # ── shared state across tabs ──
         self.recipients = []
-        self.recipient_file = tk.StringVar(value="Danh_sach_nguoi_tham_gia_TEMPLATE.xlsx")
+        self.recipient_file = tk.StringVar(value="")  # the Excel file the list was last imported from
         self.responses = {}
         self._pending_recipients = []  # cập nhật mỗi lần Scan Inbox (Tab 4) — người trong Tab 2 chưa vote
-        self._last_scanned_event_id = None  # Event ID của lần Scan Inbox gần nhất — dùng để cảnh báo dữ liệu cũ
+        # Event ID của lần Scan Inbox gần nhất: the event Tab 4's table — and
+        # everything derived from it — belongs to, which can differ from Tab 1's.
+        self._last_scanned_event_id = None
         self._last_scan_time = None
+        self._last_responses_roster = None
+        self._vote_counts = {}
+        # The event each auto-saved roster belongs to. Auto-saves write there,
+        # never to whatever Event ID Tab 1 happens to show, and a roster owned
+        # by another event is replaced when its tab opens.
+        self._attendance_event = None
+        self._attendance_roster = {}
+        self._gift_event = None
+        self._gift_roster = {}
+        self._amount_paid_event = None
+        self._amount_paid_quiet = False
+        self._amount_paid_save_failed = False
+        self._yes_emails = []
+        self._group_expansion_cache = {}
         # MỚI: đổi kiến trúc lưu trữ — history_path giờ trỏ tới 1 file SQLite
         # DUY NHẤT (rsvp_data.db, xem db.py) thay vì RSVP_History.xlsx. Toàn
         # bộ Events/Recipients/Gift Contribution/Attendance & Payment/
@@ -345,8 +397,11 @@ class RSVPApp(tk.Tk):
         # để tránh 2 loại nội dung email hoàn toàn khác nhau ghi đè lẫn nhau
         # khi chỉ đổi qua lại Send mode trên CÙNG 1 ngôn ngữ.
         self.gift_full_translations = {"en": "", "ja": "", "vi": "", "bilingual": ""}
-        self.fixed_overrides = history.load_fixed_overrides()  # user-customized default FIXED wording, persisted to disk
-        self.prompt_overrides = history.load_prompt_overrides()  # user-customized Copilot prompt templates, persisted to disk
+        # The text each draft generator last put in its box, so a box that
+        # differs from it holds hand edits (see _hand_edited_drafts).
+        self._generated_drafts = {}
+        self.fixed_overrides = settings.load_fixed_overrides()  # user-customized default FIXED wording, persisted to disk
+        self.prompt_overrides = settings.load_prompt_overrides()  # user-customized Copilot prompt templates, persisted to disk
 
         # MỚI: nhập 1 LẦN DUY NHẤT dữ liệu từ bộ file Excel CŨ (nếu có, từ
         # trước khi chuyển sang kiến trúc SQLite này) vào rsvp_data.db — an
@@ -356,7 +411,7 @@ class RSVPApp(tk.Tk):
         # tránh popup chặn trước khi app kịp vẽ xong.
         try:
             migrated, event_count, migrate_notes = legacy_excel.migrate_from_excel_if_needed(
-                db_path=self.history_path.get(), history_xlsx=history.HISTORY_FILE_DEFAULT)
+                db_path=self.history_path.get())
         except Exception:
             migrated, event_count, migrate_notes = False, 0, []
         if migrated and event_count:
@@ -379,41 +434,27 @@ class RSVPApp(tk.Tk):
                 "pip install tkcalendar"
             )
 
-        # ── Notebook tab styling ──
-        # By default, ttk uses the OS theme's tab colors — on Windows this
-        # is usually "vista"/"xpnative", which draws the Notebook tab
-        # background NATIVELY and ignores our custom "background" color,
-        # while still respecting our custom "foreground" (text) color. That
-        # mismatch is exactly what caused the bug report: the selected
-        # tab's background stayed the native white/light color while its
-        # text was set to white, making the label invisible. Switching to
-        # the "clam" theme (a pure-Tk theme, not OS-native) makes ttk fully
-        # respect our style customization, so both background AND
-        # foreground actually render as configured below. This does change
-        # the look of other widgets slightly too (buttons, checkboxes,
-        # etc.) to the "clam" style, but keeps the app fully usable and
-        # fixes the readability bug for good, instead of just tweaking
-        # colors that the old theme might ignore again.
-        style = ttk.Style(self)
-        try:
-            style.theme_use("clam")
-        except Exception:
-            pass  # "clam" should always be available, but fall back safely if not
-        style.configure(
-            "TNotebook.Tab",
-            padding=(14, 8),
-            font=("Arial", 10, "bold"),
-            background="#D9E2F3",
-            foreground="#003366",
-        )
-        style.map(
-            "TNotebook.Tab",
-            background=[("selected", "#003366"), ("active", "#B7C9EB")],
-            foreground=[("selected", "#FFFFFF"), ("active", "#003366")],
-        )
+        # ── shell: the kit's sidebar + header + page area ──
+        shell = ttk.Frame(self)
+        shell.pack(fill="both", expand=True)
+        self.var_header_event = tk.StringVar(value="No event selected")
+        self.var_sidebar_footer = tk.StringVar()
+        self.sidebar = Sidebar(
+            shell, self.fonts, APP_TITLE, "Event follow-up",
+            [(i, i + 1, label) for i, (_attr, label, _t, _d) in enumerate(PAGES)],
+            self._show_page, footer_var=self.var_sidebar_footer)
+        self.sidebar.pack(side="left", fill="y")
+        main = ttk.Frame(shell)
+        main.pack(side="left", fill="both", expand=True)
+        self.page_header = PageHeader(main, self.fonts, badge_var=self.var_header_event)
+        self.page_header.pack(fill="x")
+        tk.Frame(main, bg=COLORS["border"], height=1).pack(fill="x")
 
-        nb = ttk.Notebook(self)
-        nb.pack(fill="both", expand=True, padx=8, pady=8)
+        # A notebook still holds the pages - selecting one fires
+        # <<NotebookTabChanged>> - but its tab strip is hidden; the sidebar
+        # is the navigation.
+        nb = ttk.Notebook(main, style="Pages.TNotebook")
+        nb.pack(fill="both", expand=True)
         self.nb = nb
 
         self.tab_config = ScrollableFrame(nb)
@@ -423,14 +464,9 @@ class RSVPApp(tk.Tk):
         self.tab_calendar = ScrollableFrame(nb)
         self.tab_gift = ScrollableFrame(nb)  # MỚI — theo dõi quyên góp quà tặng
         self.tab_history = ScrollableFrame(nb)
-
-        nb.add(self.tab_config, text="  1. Event Setup  ")
-        nb.add(self.tab_recipients, text="  2. Recipients  ")
-        nb.add(self.tab_compose, text="  3. Compose & Send  ")
-        nb.add(self.tab_collect, text="  4. Collect Responses  ")
-        nb.add(self.tab_calendar, text="  5. Attendance & Payment  ")
-        nb.add(self.tab_gift, text="  6. Gift Contribution  ")
-        nb.add(self.tab_history, text="  7. Event History  ")
+        self._pages = [getattr(self, attr) for attr, _l, _t, _d in PAGES]
+        for page in self._pages:
+            nb.add(page)
 
         self._build_tab_config()
         self._build_tab_recipients()
@@ -440,27 +476,51 @@ class RSVPApp(tk.Tk):
         self._build_tab_gift()
         self._build_tab_history()
 
-        # Event date/Start/End time giờ CHỈ nhập ở Tab 1 — Tab 5 chỉ hiển
-        # thị lại (chỉ đọc) để tham khảo khi tạo Calendar Invite, và tab Gift
-        # Contribution tự nạp lại danh sách người nhận mới nhất từ Tab 2 mỗi
-        # lần mở — cả 2 việc này cần làm mới mỗi khi CHUYỂN SANG đúng tab đó.
+        # Tab 3, 5 and 6 show content derived from Tab 1/2/4 (the email
+        # preview, the attendance table, the gift list), so each is brought
+        # up to date when the user SWITCHES TO it.
         nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
-        # Re-wraps long instructional labels (see _make_wrapping_label())
-        # whenever the main app window itself is resized, so guidance text
-        # stays fully readable instead of getting clipped / needing a
-        # horizontal scrollbar when the window is narrowed.
-        self._wrap_labels = []
-        self.bind("<Configure>", self._on_root_resize)
+        self.var_event_id.trace_add("write", lambda *a: self._refresh_header_event())
+        self.var_event_name.trace_add("write", lambda *a: self._refresh_header_event())
+        self.history_path.trace_add("write", lambda *a: self._refresh_sidebar_footer())
+        self._refresh_header_event()
+        self._refresh_sidebar_footer()
+        self._show_page(0)
+        self._mark_page(self.tab_config)
+
+    def _show_page(self, index):
+        self.nb.select(self._pages[index])
+
+    def _mark_page(self, page):
+        """Sidebar highlight and page header for the page now shown."""
+        index = self._pages.index(page)
+        _attr, _label, title, description = PAGES[index]
+        self.sidebar.set_active(index)
+        self.page_header.set(title, description)
+
+    def _refresh_header_event(self):
+        event_id = self.var_event_id.get().strip()
+        name = self.var_event_name.get().strip()
+        self.var_header_event.set(f"● {event_id}" + (f" · {name}" if name else "") if event_id
+                                  else "No event selected")
+
+    def _refresh_sidebar_footer(self):
+        self.var_sidebar_footer.set(f"Database: {os.path.basename(self.history_path.get()) or '—'}")
 
     def _on_tab_changed(self, event):
         try:
             selected = event.widget.nametowidget(event.widget.select())
         except Exception:
             return
-        if selected is self.tab_calendar:
+        if selected in self._pages:
+            self._mark_page(selected)
+        if selected is self.tab_compose:
+            self._refresh_compose_preview_unless_edited()
+        elif selected is self.tab_calendar:
             self._refresh_calendar_datetime_display()
             self._refresh_attendance_list()
+            self._refresh_amount_paid_for_current_event()
             self._refresh_thankyou_body_display()
         elif selected is self.tab_gift:
             self._refresh_gift_contribution_list()
@@ -571,77 +631,6 @@ class RSVPApp(tk.Tk):
             return
         self._begin_cell_edit(tree, row_id, col_name, on_commit)
 
-    def _make_wrapping_label(self, parent, margin=60, **kwargs):
-        """Creates a ttk.Label that automatically re-wraps its text (via
-        wraplength) whenever ITS OWN TAB is resized — used for long
-        instructional/help text that would otherwise get clipped, or
-        trigger the horizontal scrollbar, when the window is narrowed.
-        `margin` is roughly how much horizontal space (in pixels) to
-        reserve for padding/indentation around the label — bump it up a
-        bit for labels nested further to the right. Usage is a drop-in
-        replacement for ttk.Label(...) — chain .grid(...)/.pack(...) on
-        the result exactly the same way:
-            self._make_wrapping_label(f, text="...", font=(...)).grid(row=r, ...)
-
-        BUG ĐÃ SỬA: bản trước tính wraplength dựa theo self.winfo_width()
-        (chiều rộng của CỬA SỔ GỐC toàn app) — con số này luôn RỘNG HƠN
-        vùng nội dung THẬT SỰ nhìn thấy được bên trong 1 tab cụ thể (mất đi
-        vì thanh cuộn dọc, padding của Notebook, indent riêng của từng
-        frame con lồng nhau...), nên nhiều label không co lại đúng khi cửa
-        sổ bị thu nhỏ. Giờ dò ngược lên cây widget cha để tìm đúng
-        tk.Canvas của ScrollableFrame đang bọc tab chứa label này, và đăng
-        ký vào DANH SÁCH RIÊNG của canvas đó (canvas.wrap_labels, xem
-        ScrollableFrame.__init__) — mỗi khi CHÍNH canvas đó đổi kích thước
-        (khớp chính xác vùng hiển thị thật), wraplength được tính lại theo
-        đúng con số đó, không qua trung gian nào khác."""
-        lbl = ttk.Label(parent, **kwargs)
-        w = parent
-        canvas = None
-        while w is not None:
-            if isinstance(w, tk.Canvas):
-                canvas = w
-                break
-            w = w.master
-        if canvas is not None:
-            if not hasattr(canvas, "wrap_labels"):
-                canvas.wrap_labels = []
-            canvas.wrap_labels.append((lbl, margin))
-            try:
-                current_width = canvas.winfo_width()
-                if current_width > 1:
-                    lbl.configure(wraplength=max(current_width - margin, 250))
-            except Exception:
-                pass
-        else:
-            # Trường hợp hiếm: label không nằm trong ScrollableFrame nào
-            # (không tìm thấy Canvas tổ tiên) — giữ lại cơ chế CŨ dựa theo
-            # cửa sổ gốc làm phương án dự phòng, để label luôn có ít nhất
-            # 1 cơ chế wraplength thay vì hoàn toàn không có.
-            if not hasattr(self, "_wrap_labels"):
-                self._wrap_labels = []
-            self._wrap_labels.append((lbl, margin))
-            try:
-                current_width = self.winfo_width()
-                if current_width > 1:
-                    lbl.configure(wraplength=max(current_width - margin, 250))
-            except Exception:
-                pass
-        return lbl
-
-    def _on_root_resize(self, event):
-        """Bound to the main window's <Configure> — CHỈ còn dùng làm
-        phương án dự phòng cho các label hiếm gặp không nằm trong
-        ScrollableFrame nào (xem nhánh else của _make_wrapping_label() ở
-        trên) — số lượng label trong self._wrap_labels giờ thường RỖNG, vì
-        phần lớn đã chuyển sang cơ chế theo canvas riêng của từng tab."""
-        if event.widget is not self:
-            return  # ignore <Configure> events bubbling up from child widgets — only the root window resizing matters here
-        for lbl, margin in list(getattr(self, "_wrap_labels", [])):
-            try:
-                lbl.configure(wraplength=max(event.width - margin, 250))
-            except tk.TclError:
-                pass  # widget was destroyed — safe to ignore
-
     def _enable_treeview_copy_paste(self, tree, on_commit=None, editable_cols=None):
         """Adds Ctrl+C / Ctrl+V clipboard support to a Treeview:
         - Ctrl+C copies the selected rows (or all rows, if none selected)
@@ -710,184 +699,113 @@ class RSVPApp(tk.Tk):
     # ══════════════════════════════════════════════════════════════════
     def _build_tab_config(self):
         f = self.tab_config.body
-        pad = {"padx": 10, "pady": 6}
+        gap = {"fill": "x", "pady": (0, 16)}
 
-        header_bar = ttk.Frame(f)
-        header_bar.grid(row=0, column=0, columnspan=3, sticky="we", **pad)
-        ttk.Label(header_bar, text="Event details (these fields auto-fill into the invite email)",
-                  font=("Arial", 11, "bold")).pack(side="left")
-        # MỚI: "Event mode" — chọn sự kiện này thuộc dạng nào:
-        #  - "Event": chỉ RSVP bình thường (mặc định, hành vi y hệt trước giờ)
-        #  - "Gift": CHỈ thông báo kêu gọi đóng góp mua quà tặng (Tab 3 có
-        #    thêm mode "Send Gift Contribution Notice"), không cần RSVP
-        #  - "Event + Gift": vừa RSVP vừa có kêu gọi đóng góp quà — dùng khi
-        #    cùng lúc tổ chức tiệc (cần biết số người tham dự) VÀ muốn quyên
-        #    góp mua quà tặng (vd tiệc farewell tặng quà người sắp nghỉ việc)
-        # Bản thân "Event mode" chỉ là NHÃN LƯU Ý — không tự động khoá/ẩn
-        # tính năng nào cả, bạn vẫn luôn có thể dùng bất kỳ Send mode nào ở
-        # Tab 3 bất kể chọn gì ở đây; nó giúp bạn nhớ lại mục đích sự kiện
-        # khi xem lại History sau này (cột "EventMode").
-        ttk.Label(header_bar, text="   Event mode:", font=("Arial", 10, "bold")).pack(side="left")
+        # "Event mode" chỉ là NHÃN LƯU Ý (Event / Gift / Event + Gift) — không
+        # khoá/ẩn tính năng nào; nó giúp nhớ lại mục đích sự kiện ở History.
         self.var_event_mode = tk.StringVar(value="Event")
-        self.combo_event_mode = ttk.Combobox(
-            header_bar, width=16, state="readonly", textvariable=self.var_event_mode,
-            values=["Event", "Gift", "Event + Gift"],
-        )
-        self.combo_event_mode.pack(side="left", padx=(4, 0))
-
         self.var_event_name = tk.StringVar(value="Team Building Q3 2026")
         self.var_event_id = tk.StringVar(value="TB2026-Q3")
         # Mỗi khi Event ID đổi (gõ tay hoặc do Load setup/Register event...),
         # tự cập nhật banner trạng thái ở đầu Tab 4 — báo ngay nếu bảng kết
         # quả đang hiện là của 1 Event ID KHÁC (còn sót từ lần Scan trước).
         self.var_event_id.trace_add(
-            "write", lambda *a: self._update_scan_status_banner() if hasattr(self, "lbl_scan_status") else None)
+            "write", lambda *a: self._update_scan_status_banner() if hasattr(self, "banner_scan") else None)
         self.var_location = tk.StringVar(value="")
         self.var_budget = tk.StringVar(value="")
         self.var_gift_budget = tk.StringVar(value="")
         self.var_organizer = tk.StringVar(value="")
         self.var_guest_of_honor = tk.StringVar(value="")
-
-        r = 1
-        ttk.Label(f, text="Event Name:").grid(row=r, column=0, sticky="w", **pad)
-        ttk.Entry(f, textvariable=self.var_event_name, width=50).grid(row=r, column=1, sticky="w", **pad)
-        r += 1
-        ttk.Label(f, text="Event ID (no spaces/accents, must be unique):").grid(row=r, column=0, sticky="w", **pad)
-        ttk.Entry(f, textvariable=self.var_event_id, width=50).grid(row=r, column=1, sticky="w", **pad)
-        r += 1
-        ttk.Label(f, text="Location:").grid(row=r, column=0, sticky="w", **pad)
-        ttk.Entry(f, textvariable=self.var_location, width=50).grid(row=r, column=1, sticky="w", **pad)
-        r += 1
-        # Đổi tên "Expected Budget" -> "Expected EVENT Budget" để phân biệt rõ
-        # với "Expected GIFT Budget" mới thêm ngay bên dưới (2 khoản chi khác
-        # nhau: ngân sách tổ chức sự kiện vs ngân sách mua quà tặng).
-        ttk.Label(f, text="Expected event budget (e.g. \"5,000 JPY / person\"):").grid(row=r, column=0, sticky="w", **pad)
-        ttk.Entry(f, textvariable=self.var_budget, width=50).grid(row=r, column=1, sticky="w", **pad)
-        r += 1
-        ttk.Label(f, text="Expected gift budget (e.g. \"3,000 JPY / person\"):").grid(row=r, column=0, sticky="w", **pad)
-        ttk.Entry(f, textvariable=self.var_gift_budget, width=50).grid(row=r, column=1, sticky="w", **pad)
-        r += 1
-
-        ttk.Label(f, text="Event Date:").grid(row=r, column=0, sticky="w", **pad)
-        self.date_event = make_date_picker(f, datetime.now() + timedelta(days=21))
-        self.date_event.grid(row=r, column=1, sticky="w", **pad)
-        r += 1
-
-        # MỚI: Start time / End time CHUYỂN TỪ TAB 5 LÊN ĐÂY (ngay dưới Event
-        # Date) — trước đây 2 ô này chỉ tồn tại ở Tab 5 (Attendance & Payment) và
-        # KHÔNG được lưu vào History, nên "Load setup from selected event"
-        # không nạp lại được, mỗi lần mở Tab 5 lại phải gõ tay lại giờ. Giờ
-        # thuộc Tab 1 nên được lưu/nạp cùng các thông tin sự kiện khác, và
-        # Tab 5 dùng lại TRỰC TIẾP 2 biến này (self.var_start_time/
-        # self.var_end_time) khi tạo Calendar Invite — không còn ô riêng ở
-        # Tab 5 nữa.
-        ttk.Label(f, text="Start time (HH:MM):").grid(row=r, column=0, sticky="w", **pad)
         self.var_start_time = tk.StringVar(value="18:00")
-        ttk.Entry(f, textvariable=self.var_start_time, width=10).grid(row=r, column=1, sticky="w", **pad)
-        r += 1
-        ttk.Label(f, text="End time (HH:MM):").grid(row=r, column=0, sticky="w", **pad)
         self.var_end_time = tk.StringVar(value="21:00")
-        ttk.Entry(f, textvariable=self.var_end_time, width=10).grid(row=r, column=1, sticky="w", **pad)
-        r += 1
 
-        ttk.Label(f, text="Event response deadline:").grid(row=r, column=0, sticky="w", **pad)
-        self.date_deadline = make_date_picker(f, datetime.now() + timedelta(days=10))
-        self.date_deadline.grid(row=r, column=1, sticky="w", **pad)
-        r += 1
+        details = Card(f, "Event details",
+                       "Name, place and budget fill the subject and body of every email. The Event ID is "
+                       "how replies are matched to this event: unique, no spaces or accents.")
+        details.pack(**gap)
+        g = details.body
+        g.columnconfigure((0, 1), weight=1, uniform="form")
+        field(g, 0, 0, "Event name", lambda p: ttk.Entry(p, textvariable=self.var_event_name))
+        field(g, 0, 1, "Event ID", lambda p: ttk.Entry(p, textvariable=self.var_event_id))
+        field(g, 1, 0, "Location", lambda p: ttk.Entry(p, textvariable=self.var_location))
+        self.combo_event_mode = field(
+            g, 1, 1, "Event mode",
+            lambda p: ttk.Combobox(p, state="readonly", textvariable=self.var_event_mode,
+                                   values=["Event", "Gift", "Event + Gift"]),
+            hint="A reminder of what the event is for; every send mode stays available.")
+        field(g, 2, 0, "Expected event budget", lambda p: ttk.Entry(p, textvariable=self.var_budget),
+              hint='e.g. "5,000 JPY / person"')
 
-        # MỚI: "Gift contribution deadline" — hạn RIÊNG để mọi người đóng
-        # góp tiền mua quà, khác với "Event response deadline" (hạn RSVP có
-        # tham dự hay không) ở trên — 2 việc này thường không cùng ngày (vd
-        # cần chốt RSVP sớm hơn để chuẩn bị tiệc, nhưng có thể gia hạn thời
-        # gian đóng góp quà lâu hơn 1 chút). Dùng cho email "Send Gift
-        # Contribution Notice" ở Tab 3 (xem build_gift_fixed_block()).
-        ttk.Label(f, text="Gift contribution deadline:").grid(row=r, column=0, sticky="w", **pad)
-        self.date_gift_deadline = make_date_picker(f, datetime.now() + timedelta(days=10))
-        self.date_gift_deadline.grid(row=r, column=1, sticky="w", **pad)
-        r += 1
+        schedule = Card(f, "Date & deadlines",
+                        "Start and end time also set the Calendar Invite on Attendance & payment.")
+        schedule.pack(**gap)
+        g = schedule.body
+        g.columnconfigure((0, 1, 2), weight=1, uniform="form")
+        self.date_event = field(g, 0, 0, "Event date",
+                                lambda p: make_date_picker(p, datetime.now() + timedelta(days=21)))
+        field(g, 0, 1, "Start time (HH:MM)", lambda p: ttk.Entry(p, textvariable=self.var_start_time))
+        field(g, 0, 2, "End time (HH:MM)", lambda p: ttk.Entry(p, textvariable=self.var_end_time))
+        self.date_deadline = field(g, 1, 0, "Response deadline",
+                                   lambda p: make_date_picker(p, datetime.now() + timedelta(days=10)))
 
-        # MỚI: Organizer / Guest of Honor — dùng cho email "Send Gift
-        # Contribution Notice" ở Tab 3 (Organizer = người nhận đóng góp,
-        # Guest of Honor = người được tặng quà, vd người sắp nghỉ việc) —
-        # nhưng vẫn hiển thị luôn ở Event mode "Event" (không bị ẩn) vì đôi
-        # khi hữu ích để ghi chú ai là người tổ chức/nhân vật chính dù
-        # không quyên góp quà, không bắt buộc phải điền.
-        ttk.Label(f, text="Organizer (contact person for gift contributions):").grid(row=r, column=0, sticky="w", **pad)
-        ttk.Entry(f, textvariable=self.var_organizer, width=50).grid(row=r, column=1, sticky="w", **pad)
-        r += 1
-        ttk.Label(f, text="Guest of Honor (who the gift is for):").grid(row=r, column=0, sticky="w", **pad)
-        ttk.Entry(f, textvariable=self.var_guest_of_honor, width=50).grid(row=r, column=1, sticky="w", **pad)
-        r += 1
+        # Organizer = người nhận đóng góp, Guest of Honor = người được tặng
+        # quà — dùng cho email "Send Gift Contribution Notice" ở Tab 3.
+        gift = Card(f, "Gift contribution",
+                    "Only for events that collect money for a gift (Event mode Gift, or Event + Gift). "
+                    "The contribution deadline can be later than the response deadline.")
+        gift.pack(**gap)
+        g = gift.body
+        g.columnconfigure((0, 1), weight=1, uniform="form")
+        field(g, 0, 0, "Guest of honor (who the gift is for)",
+              lambda p: ttk.Entry(p, textvariable=self.var_guest_of_honor))
+        field(g, 0, 1, "Organizer (collects the contributions)",
+              lambda p: ttk.Entry(p, textvariable=self.var_organizer))
+        field(g, 1, 0, "Expected gift budget", lambda p: ttk.Entry(p, textvariable=self.var_gift_budget),
+              hint='e.g. "3,000 JPY / person"')
+        self.date_gift_deadline = field(g, 1, 1, "Gift contribution deadline",
+                                        lambda p: make_date_picker(p, datetime.now() + timedelta(days=10)))
 
-        ttk.Label(f, text="Organizer note (free text — you can write in any language;\n"
-                          "translate it per-language on the Compose tab):").grid(row=r, column=0, sticky="nw", **pad)
-        self.entry_note = tk.Text(f, width=55, height=3)
+        note = Card(f, "Organizer note",
+                    "Free text in any language, shown right after the greeting. Translate it per "
+                    "language on Compose & send.")
+        note.pack(**gap)
+        note_box, self.entry_note = make_scrollable_text(note.body, height=4)
         self.entry_note.insert("1.0", "Please respond before the deadline so we can prepare accurate numbers.")
-        self.entry_note.grid(row=r, column=1, sticky="w", **pad)
-        r += 1
+        note_box.pack(fill="x")
 
-        ttk.Button(f, text="📝 Register event (save to History + reset form for a NEW event)",
-                   command=self._register_event).grid(row=r, column=0, columnspan=2, sticky="w", **pad)
-        r += 1
-        ttk.Label(f, text="→ Saves as a NEW event in History, then clears this form for the next one.",
-                  font=("Arial", 8, "italic")).grid(row=r, column=0, columnspan=2, sticky="w", padx=4)
-        r += 1
+        bottom = ttk.Frame(f)
+        bottom.pack(fill="x")
+        bottom.columnconfigure((0, 1), weight=1, uniform="half")
+        save = Card(bottom, "Save this event",
+                    "Writes the details above to History. No email is sent: to tell people about a "
+                    "change, use 'Send update invite' on Compose & send.")
+        save.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        ttk.Button(save.body, text="💾 Save event details", style="Primary.TButton",
+                   command=self._update_history_from_tab1).pack(anchor="w")
+        ttk.Button(save.body, text="🆕 Save & start a new event", command=self._register_event)\
+            .pack(anchor="w", pady=(8, 0))
+        ttk.Label(save.body, text="Starting a new event clears every page; this one stays in History.",
+                  style="Hint.TLabel").pack(anchor="w", pady=(6, 0))
 
-        ttk.Separator(f).grid(row=r, column=0, columnspan=3, sticky="ew", pady=10)
-        r += 1
-
-        ttk.Label(f, text="Reload setup from a past event saved in history:",
-                  font=("Arial", 10, "italic")).grid(row=r, column=0, columnspan=2, sticky="w", **pad)
-        r += 1
-        self.combo_load_history = ttk.Combobox(f, width=50, state="readonly")
-        self.combo_load_history.grid(row=r, column=1, sticky="w", **pad)
-        ttk.Button(f, text="🔄 Refresh past-event list", command=self._refresh_history_combo)\
-            .grid(row=r, column=0, sticky="w", **pad)
-        r += 1
-        ttk.Button(f, text="⬅ Load setup from selected event", command=self._load_from_history)\
-            .grid(row=r, column=1, sticky="w", **pad)
-        r += 1
-
-        ttk.Separator(f).grid(row=r, column=0, columnspan=3, sticky="ew", pady=10)
-        r += 1
-        self._make_wrapping_label(f, text="Already sent invites for this Event ID, but the details above changed since "
-                          "(location/date/deadline/budget/note)? Push the update into History directly —\n"
-                          "no email needs to be sent for this. (To also NOTIFY people by email, use "
-                          "'Send update invite' mode on Tab 3 instead — that sends AND updates History.)",
-                  font=("Arial", 9, "italic")).grid(row=r, column=0, columnspan=3, sticky="w", **pad)
-        r += 1
-        ttk.Button(f, text="💾 Update this event in History (no email sent)", command=self._update_history_from_tab1)\
-            .grid(row=r, column=0, columnspan=2, sticky="w", **pad)
+        reload = Card(bottom, "Reload a past event",
+                      "Brings back its details, recipients, votes, attendance and gift list. "
+                      "Outlook is not scanned.")
+        reload.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        # postcommand re-reads the database each time the list opens, so an
+        # event saved from any tab shows up without a manual refresh.
+        self.combo_load_history = ttk.Combobox(reload.body, state="readonly",
+                                               postcommand=self._refresh_history_combo_values)
+        self.combo_load_history.pack(fill="x")
+        ttk.Button(reload.body, text="⬅ Load setup from selected event", command=self._load_from_history)\
+            .pack(anchor="w", pady=(8, 0))
 
         self._refresh_history_combo()
 
-    def _register_event(self):
-        """Đăng ký sự kiện ĐANG NHẬP (Tab 1) vào RSVP_History.xlsx như 1 sự
-        kiện — rồi RESET TOÀN BỘ form (Tab 1-5) về mặc định để bắt đầu nhập
-        1 sự kiện MỚI KHÁC, sạch sẽ, không còn dính tên/địa điểm/danh sách
-        người nhận/nội dung đã soạn của sự kiện vừa đăng ký. Sự kiện vừa
-        đăng ký vẫn còn nguyên trong History — nạp lại bất cứ lúc nào qua
-        '⬅ Load setup from selected event'."""
-        event_id = self.var_event_id.get().strip()
-        if not event_id:
-            messagebox.showwarning("Missing Event ID", "Enter an Event ID before registering the event.")
-            return
-
-        if not messagebox.askyesno(
-            "Register new event",
-            f"Register event '{event_id}' to the database?\n\n"
-            "After registering, the WHOLE form (Tab 1 → 5: event info, recipient list, "
-            "composed content, scanned results...) will be CLEARED so you can start entering "
-            "a NEW event. The event you just registered is still safely stored in History, "
-            "and can be reloaded any time via '⬅ Load setup from selected event'."
-        ):
-            return
-
-        if self.recipients:
-            self._save_recipients_to_db(silent=True)  # chuẩn hoá tên + lưu file người nhận trước khi đăng ký
-
-        record = {
-            "EventID": event_id,
+    def _event_details_record(self):
+        """Tab 1's event details as a History record — the part every save
+        of the event writes."""
+        return {
+            "EventID": self.var_event_id.get().strip(),
             "EventName": self.var_event_name.get(),
             "EventDate": get_date_str(self.date_event),
             "Deadline": get_date_str(self.date_deadline),
@@ -902,60 +820,76 @@ class RSVPApp(tk.Tk):
             "StartTime": self.var_start_time.get(),
             "EndTime": self.var_end_time.get(),
         }
+
+    def _save_event_from_tab1(self):
+        """Writes Tab 1 (plus RecipientFile, and Tab 4's Yes/No/Maybe counts
+        when the table was scanned for this event) to History. Returns the
+        Event ID, or None after telling the user why nothing was saved."""
+        record = self._event_details_record()
+        event_id = record["EventID"]
+        if not event_id:
+            messagebox.showwarning("Missing Event ID", "Enter an Event ID first.")
+            return None
+        if self.recipients:
+            self._save_recipients_to_db(silent=True)
         if self.recipient_file.get():
             record["RecipientFile"] = self.recipient_file.get()
-
+        if self._last_scanned_event_id == event_id and self._vote_counts:
+            record.update(self._vote_counts_record())
         try:
             db.save_event_record(record, self.history_path.get())
         except Exception as e:
-            messagebox.showerror("Error", f"Couldn't register the event:\n{e}")
-            return
-
+            messagebox.showerror("Error", f"Couldn't save the event:\n{e}")
+            return None
         self._refresh_history_tree()
         self._refresh_history_combo()
+        return event_id
+
+    def _register_event(self):
+        """Lưu sự kiện ĐANG NHẬP (Tab 1) vào History — rồi RESET TOÀN BỘ form
+        (Tab 1-6) về mặc định để bắt đầu nhập 1 sự kiện MỚI KHÁC. Sự kiện vừa
+        lưu vẫn còn nguyên trong History — nạp lại bất cứ lúc nào qua
+        '⬅ Load setup from selected event'."""
+        event_id = self.var_event_id.get().strip()
+        if not event_id:
+            messagebox.showwarning("Missing Event ID", "Enter an Event ID before saving the event.")
+            return
+
+        if not messagebox.askyesno(
+            "Save & start a new event",
+            f"Save event '{event_id}' to History and start a new one?\n\n"
+            "After saving, the WHOLE form (Tab 1 → 6: event info, recipient list, "
+            "composed content and translations, scanned results...) will be CLEARED so you can "
+            "start entering a NEW event. The event you just saved is still safely stored in "
+            "History, and can be reloaded any time via '⬅ Load setup from selected event'."
+        ):
+            return
+
+        if not self._save_event_from_tab1():
+            return
         self._reset_for_new_event()
         messagebox.showinfo(
-            "Registered",
-            f"Event '{event_id}' registered to History.\n\n"
+            "Saved",
+            f"Event '{event_id}' saved to History.\n\n"
             "The form has been reset to defaults — ready to enter a new event."
         )
 
-    def _reset_for_new_event(self):
-        """Đưa TOÀN BỘ form về trạng thái mặc định — như vừa mở app lần đầu
-        — để bắt đầu nhập 1 sự kiện HOÀN TOÀN MỚI. KHÔNG xoá các tuỳ chỉnh
-        mang tính CÁ NHÂN/lâu dài (vd self.fixed_overrides — 'câu văn mặc
-        định' bạn đã lưu để dùng cho MỌI sự kiện — và
-        fixed_wording_overrides.json/prompt_overrides.json nói chung), chỉ
-        xoá dữ liệu RIÊNG của sự kiện vừa đăng ký."""
-        # Tab 1
-        self.var_event_name.set("")
-        self.var_event_id.set("")
-        self.var_location.set("")
-        self.var_budget.set("")
-        self.var_gift_budget.set("")
-        self.var_organizer.set("")
-        self.var_guest_of_honor.set("")
-        if hasattr(self, "combo_event_mode"):
-            self.combo_event_mode.current(0)  # về lại "Event"
-        set_date_str(self.date_event, (datetime.now() + timedelta(days=21)).strftime("%d/%m/%Y"))
-        set_date_str(self.date_deadline, (datetime.now() + timedelta(days=10)).strftime("%d/%m/%Y"))
-        set_date_str(self.date_gift_deadline, (datetime.now() + timedelta(days=10)).strftime("%d/%m/%Y"))
-        # Start/End time nay thuộc Tab 1 (ngay dưới Event Date) — reset về mặc định ở đây.
-        self.var_start_time.set("18:00")
-        self.var_end_time.set("21:00")
-        self.entry_note.delete("1.0", "end")
-        self.entry_note.insert("1.0", "Please respond before the deadline so we can prepare accurate numbers.")
+    def _clear_event_state(self):
+        """Drops everything the app holds in memory for the current event,
+        Tab 2 to Tab 6, so the next event starts from its own saved data and
+        never inherits another event's recipients, translations, votes,
+        attendance, gift ticks or Amount paid. Tab 1's fields are left to
+        the caller. Long-lived preferences (saved FIXED wording, the Copilot
+        prompt) are not touched.
 
-        # Tab 2 — danh sách người nhận thuộc về sự kiện CŨ, không mang sang sự kiện mới
+        Nothing here writes to the database: Amount paid's trace is muted
+        while it is reset, and every roster loses its owner first."""
+        # Tab 2
         self.recipients = []
         self.recipient_file.set("")
         self._refresh_recipient_tree()
-        if hasattr(self, "_group_expansion_cache"):
-            self._group_expansion_cache = {}
 
-        # Tab 3 — bản dịch đầy đủ đã lưu (full_translations) là nội dung CỦA
-        # sự kiện cũ, không tái sử dụng cho sự kiện mới; fixed_overrides (câu
-        # văn mặc định cá nhân) KHÔNG bị đụng vì đó là tuỳ chọn lâu dài.
+        # Tab 3 — translations are content of the old event's email
         self.full_translations = {"en": "", "ja": "", "vi": "", "bilingual": ""}
         self.gift_full_translations = {"en": "", "ja": "", "vi": "", "bilingual": ""}
         self.combo_send_mode.current(0)  # về lại "Send first Invite"
@@ -969,101 +903,156 @@ class RSVPApp(tk.Tk):
         self._pending_recipients = []
         self._last_scanned_event_id = None
         self._last_scan_time = None
+        self._last_responses_roster = None
+        self._vote_counts = {}
         self.tree_responses.delete(*self.tree_responses.get_children())
         self.tree_pending.delete(*self.tree_pending.get_children())
         self.lbl_summary.config(text="No responses scanned yet.")
-        self.lbl_deadline_banner.config(text="")
+        for var in (self.var_kpi_total, self.var_kpi_yes, self.var_kpi_no, self.var_kpi_maybe,
+                    self.var_kpi_pending):
+            var.set("0")
+        self.banner_deadline.set("")
         self.txt_reminder_body.delete("1.0", "end")
 
-        # Tab 5
+        # Tab 5 — the two bodies are regenerated from Tab 1 when the tab opens
         self._yes_emails = []
         self.list_yes.delete(0, "end")
-        if hasattr(self, "combo_calendar_lang"):
-            self.combo_calendar_lang.current(0)  # về lại English
-        self.var_appt_body_default = build_calendar_body("en", *self._calendar_body_args())
+        self._attendance_event = None
+        self._attendance_roster = {}
+        self._render_attendance_tree()
+        self._amount_paid_event = None
+        self._set_amount_paid_quietly("0")
+        self.combo_calendar_lang.current(0)
+        self.var_appt_body_default = ""
         self.txt_appt_body.delete("1.0", "end")
-        self.txt_appt_body.insert("1.0", self.var_appt_body_default)
+        self.combo_thankyou_lang.current(0)
+        self.var_thankyou_body_default = ""
+        self.txt_thankyou_body.delete("1.0", "end")
 
-        # Tab 6 — Gift Contribution — thuộc về sự kiện CŨ, không mang sang sự kiện mới
+        # Tab 6
+        self._gift_event = None
         self._gift_roster = {}
-        if hasattr(self, "var_gift_search"):
-            self.var_gift_search.set("")
-        if hasattr(self, "tree_gift"):
-            self.tree_gift.delete(*self.tree_gift.get_children())
-            self._update_gift_contributed_count()
+        self.var_gift_search.set("")
+        self.tree_gift.delete(*self.tree_gift.get_children())
+        self._update_gift_contributed_count()
+        self.txt_gift_reminder_body.delete("1.0", "end")
+        self.txt_gift_report_body.delete("1.0", "end")
 
-        self._refresh_compose_preview()
         self._update_scan_status_banner()
 
+    def _reset_for_new_event(self):
+        """Đưa TOÀN BỘ form về trạng thái mặc định — như vừa mở app lần đầu
+        — để bắt đầu nhập 1 sự kiện HOÀN TOÀN MỚI."""
+        # Tab 1 — Event ID first, so nothing below can be saved under it
+        self.var_event_id.set("")
+        self.var_event_name.set("")
+        self.var_location.set("")
+        self.var_budget.set("")
+        self.var_gift_budget.set("")
+        self.var_organizer.set("")
+        self.var_guest_of_honor.set("")
+        self.combo_event_mode.current(0)  # về lại "Event"
+        set_date_str(self.date_event, (datetime.now() + timedelta(days=21)).strftime("%d/%m/%Y"))
+        set_date_str(self.date_deadline, (datetime.now() + timedelta(days=10)).strftime("%d/%m/%Y"))
+        set_date_str(self.date_gift_deadline, (datetime.now() + timedelta(days=10)).strftime("%d/%m/%Y"))
+        self.var_start_time.set("18:00")
+        self.var_end_time.set("21:00")
+        self.entry_note.delete("1.0", "end")
+        self.entry_note.insert("1.0", "Please respond before the deadline so we can prepare accurate numbers.")
+
+        self._group_expansion_cache = {}
+        self._clear_event_state()
+        self._refresh_compose_preview()
+
     def _update_history_from_tab1(self):
-        """Ghi các trường Tab 1 hiện tại (Location/EventDate/Deadline/Budget/
-        Note) — và cả RecipientFile nếu Tab 2 đang có danh sách — vào dòng
-        History khớp Event ID, mà KHÔNG cần gửi email gì cả. Dùng khi bạn chỉ
-        cần sửa lại thông tin đã lưu (vd sửa nhầm địa điểm) mà không cần báo
-        cho người nhận. Nếu Event ID chưa từng có trong History, sẽ tạo dòng
-        mới (giống hành vi bình thường của History)."""
-        event_id = self.var_event_id.get().strip()
+        """Ghi các trường Tab 1 hiện tại — và cả RecipientFile nếu có — vào
+        dòng History khớp Event ID, mà KHÔNG cần gửi email gì cả. Dùng khi bạn
+        chỉ cần sửa lại thông tin đã lưu (vd sửa nhầm địa điểm) mà không cần
+        báo cho người nhận. Nếu Event ID chưa từng có trong History, sẽ tạo
+        dòng mới."""
+        event_id = self._save_event_from_tab1()
         if not event_id:
-            messagebox.showwarning(
-                "Missing Event ID",
-                "Enter an Event ID first (used to identify which row in History to update).")
             return
-
-        # Chuẩn hoá + lưu lại file người nhận (nếu Tab 2 đang có danh sách)
-        # TRƯỚC khi ghi vào History — cùng cơ chế với Tab 3 Send / Tab 4 Save,
-        # đảm bảo cột RecipientFile trong History luôn trỏ đúng file mới nhất
-        # thay vì tên file gốc bạn Browse vào (vd file TEMPLATE dùng chung).
-        if self.recipients:
-            self._save_recipients_to_db(silent=True)
-
-        record = {
-            "EventID": event_id,
-            "EventName": self.var_event_name.get(),
-            "EventDate": get_date_str(self.date_event),
-            "Deadline": get_date_str(self.date_deadline),
-            "Location": self.var_location.get(),
-            "Budget": self.var_budget.get(),
-            "OrganizerNote": self._source_note_text(),
-            "EventMode": self.var_event_mode.get(),
-            "Organizer": self.var_organizer.get(),
-            "GuestOfHonor": self.var_guest_of_honor.get(),
-            "GiftBudget": self.var_gift_budget.get(),
-            "GiftDeadline": get_date_str(self.date_gift_deadline),
-            "StartTime": self.var_start_time.get(),
-            "EndTime": self.var_end_time.get(),
-        }
-        if self.recipient_file.get():
-            record["RecipientFile"] = self.recipient_file.get()
-
-        try:
-            db.save_event_record(record, self.history_path.get())
-        except Exception as e:
-            messagebox.showerror("Error", f"Couldn't update History:\n{e}")
-            return
-
-        self._refresh_history_tree()
-        self._refresh_history_combo()
-        extra = "\n(including the latest RecipientFile)" if self.recipient_file.get() else ""
         messagebox.showinfo(
             "History updated",
-            f"Updated Location / Event Date / Deadline / Budget / Note for Event ID "
-            f"'{event_id}' in History{extra}.\n\n"
-            "Other columns (SentDate, Yes/No/Maybe, CalendarSent, etc.) were KEPT AS-IS — "
+            f"Saved the Tab 1 details of Event ID '{event_id}' to History.\n\n"
+            "Other columns (Sent Date, Calendar Sent, etc.) were KEPT AS-IS — "
             "nothing was cleared or overwritten.\n\n"
             "⚠️ This does NOT send any email to recipients — if you want to notify them of the "
             "change, use 'Send update invite' mode on Tab 3 instead."
         )
 
-    def _refresh_history_combo(self):
+    def _refresh_history_combo_values(self):
+        """Re-reads the past-event list from the database, keeping the
+        current selection. Runs every time the dropdown opens."""
         try:
             records = db.load_history(self.history_path.get())
         except Exception:
             records = []
+        selected = self.combo_load_history.get()
         self._history_records = records
         labels = [f'{r["EventID"]} — {r["EventName"]}' for r in records]
         self.combo_load_history["values"] = labels
+        if selected in labels:
+            self.combo_load_history.current(labels.index(selected))
+        else:
+            self.combo_load_history.set("")
+        return labels
+
+    def _refresh_history_combo(self):
+        """Like _refresh_history_combo_values(), then selects the newest event."""
+        labels = self._refresh_history_combo_values()
         if labels:
             self.combo_load_history.current(len(labels) - 1)
+
+    def _unsaved_work_if_switching(self):
+        """What would be lost by replacing the current event in memory — work
+        that exists in no database table, or in one the past-event list can
+        never reach again."""
+        lost = self._hand_edited_drafts()
+        if any(t.strip() for t in self.full_translations.values()) or \
+                any(t.strip() for t in self.gift_full_translations.values()):
+            lost.append("the Copilot translations saved on Tab 3")
+        if self.txt_translation_paste.get("1.0", "end").strip():
+            lost.append("the text in Tab 3's translation paste box")
+        event_id = self.var_event_id.get().strip()
+        if self.recipients and event_id and not self._event_in_history(event_id):
+            lost.append(f"the Tab 2 recipient list of '{event_id}', which is not saved in History "
+                        f"(save it on Tab 1 to keep it reachable)")
+        return lost
+
+    def _hand_edited_drafts(self):
+        """The email texts edited by hand: each box that is not empty and no
+        longer holds what the app last generated for it. Loading another
+        event clears or rebuilds every one of them."""
+        def edited(box, generated):
+            text = box.get("1.0", "end").strip()
+            return bool(text) and text != (generated or "").strip()
+
+        found = []
+        generated = getattr(self, "_compose_generated", None)
+        if generated is not None and self._compose_box_texts() != generated:
+            found.append("your edits to the email on Compose & send")
+        for label, box, text in (
+                ("the reminder email on Collect responses", self.txt_reminder_body,
+                 self._generated_drafts.get("reminder")),
+                ("the calendar invite text on Attendance & payment", self.txt_appt_body,
+                 self.var_appt_body_default),
+                ("the thank-you email on Attendance & payment", self.txt_thankyou_body,
+                 self.var_thankyou_body_default),
+                ("the gift reminder email on Gift contribution", self.txt_gift_reminder_body,
+                 self._generated_drafts.get("gift_reminder")),
+                ("the contribution report email on Gift contribution", self.txt_gift_report_body,
+                 self._generated_drafts.get("gift_report"))):
+            if edited(box, text):
+                found.append(f"your edits to {label}")
+        return found
+
+    def _event_in_history(self, event_id):
+        try:
+            return any(r.get("EventID") == event_id for r in db.load_history(self.history_path.get()))
+        except Exception:
+            return False
 
     def _load_from_history(self):
         idx = self.combo_load_history.current()
@@ -1071,16 +1060,8 @@ class RSVPApp(tk.Tk):
             messagebox.showinfo("Nothing selected", "Please select a past event from the list first.")
             return
 
-        # BUG ĐÃ SỬA: trước đây dùng thẳng self._history_records[idx] — 1 bản
-        # CACHE chỉ được nạp lúc mở app / lúc bấm '🔄 Refresh past-event
-        # list'. Nếu History đã được cập nhật ở nơi khác trong CÙNG phiên
-        # làm việc (vd Tab 2 '📥 Load list' hoặc '🗂 Update RecipientFile in
-        # History' vừa ghi RecipientFile mới) mà bạn chưa bấm Refresh lại ở
-        # Tab 1, cache này KHÔNG tự biết — nên Load setup vẫn dùng dữ liệu
-        # CŨ (vd RecipientFile trỏ về file TEMPLATE gốc), dù bản thân file
-        # RSVP_History.xlsx trên đĩa đã đúng từ lâu — đúng như bạn gặp phải.
-        # Giờ đọc lại TRỰC TIẾP từ đĩa theo đúng Event ID vừa chọn, luôn đảm
-        # bảo dùng dữ liệu MỚI NHẤT bất kể có bấm Refresh trước đó hay không.
+        # Đọc lại TRỰC TIẾP từ database theo đúng Event ID vừa chọn — luôn
+        # dùng dữ liệu MỚI NHẤT, không dùng bản cache của danh sách.
         stale_rec = self._history_records[idx]
         event_id_to_load = stale_rec.get("EventID")
         try:
@@ -1089,14 +1070,19 @@ class RSVPApp(tk.Tk):
             fresh_records = self._history_records
         matches = [r for r in fresh_records if r.get("EventID") == event_id_to_load]
         rec = matches[0] if matches else stale_rec
-        self._history_records = fresh_records  # đồng bộ luôn cache, để lần Refresh sau nhất quán
 
-        # BUG ĐÃ SỬA: trước đây hàm này KHÔNG nạp EventID / EventDate / Deadline
-        # — 3 ô đó vẫn giữ nguyên giá trị cũ còn sót lại trên form (vd: giá trị
-        # mặc định "TB2026-Q3" lúc khởi động app), không hề khớp với sự kiện vừa
-        # chọn. Hậu quả: Event ID trên form bị lệch với Event ID thật đã dùng khi
-        # gửi mail, nên Tab 4 (Collect Responses) tìm theo Event ID sai và không
-        # ra kết quả nào. Giờ nạp đủ cả 3 ô này.
+        lost = self._unsaved_work_if_switching()
+        if lost and not messagebox.askyesno(
+                "Replace the current event?",
+                f"Loading '{event_id_to_load}' replaces everything the app holds for the current "
+                "event. This would be lost:\n\n• " + "\n• ".join(lost) + "\n\nContinue?"):
+            return
+
+        # Clear first, Event ID included, so no auto-save can write the old
+        # event's data under the new ID (or the reverse) while loading.
+        self.var_event_id.set("")
+        self._clear_event_state()
+
         self.var_event_id.set(rec.get("EventID") or "")
         self.var_event_name.set(rec.get("EventName") or "")
         self.var_location.set(rec.get("Location") or "")
@@ -1106,17 +1092,10 @@ class RSVPApp(tk.Tk):
         self.entry_note.delete("1.0", "end")
         self.entry_note.insert("1.0", rec.get("OrganizerNote") or "")
 
-        # MỚI: nạp thêm 7 trường của tính năng "Event mode" (Event/Gift/
-        # Event + Gift) — EventMode/Organizer/GuestOfHonor/GiftBudget/
-        # GiftDeadline đã thêm ở Tab 1, và StartTime/EndTime (chuyển từ
-        # Tab 5 lên Tab 1). Dùng .get(key) or "" / or default để an toàn
-        # với các dòng History CŨ được tạo TRƯỚC khi các cột này tồn tại
-        # (giá trị sẽ là None sau khi tự động migrate — xem
-        # history._migrate_history_columns()). GiftDeadline không có sẵn ở
-        # các dòng cũ -> mặc định về CÙNG giá trị với Deadline (RSVP), thay
-        # vì để trống khó hiểu.
+        # Dòng History CŨ (tạo trước khi các cột này tồn tại) có giá trị
+        # None — dùng mặc định. GiftDeadline thiếu -> dùng Deadline (RSVP).
         event_mode = rec.get("EventMode") or "Event"
-        if hasattr(self, "combo_event_mode") and event_mode in self.combo_event_mode["values"]:
+        if event_mode in self.combo_event_mode["values"]:
             self.var_event_mode.set(event_mode)
         self.var_organizer.set(rec.get("Organizer") or "")
         self.var_guest_of_honor.set(rec.get("GuestOfHonor") or "")
@@ -1125,33 +1104,20 @@ class RSVPApp(tk.Tk):
         self.var_end_time.set(rec.get("EndTime") or "21:00")
         set_date_str(self.date_gift_deadline, rec.get("GiftDeadline") or rec.get("Deadline"))
 
-        # MỚI: nạp lại "Amount paid" (Tab 5) đã lưu cho sự kiện này — cột
-        # "AmountPaid" có thể trống với các sự kiện CŨ tạo trước khi tính
-        # năng này tồn tại (giá trị None sau ALTER TABLE, xem db.py), mặc
-        # định về "0" cho an toàn thay vì hiện chữ "None".
-        if hasattr(self, "var_amount_paid"):
-            self.var_amount_paid.set(rec.get("AmountPaid") or "0")
-            self._refresh_remaining_amount()
+        # "Amount paid" (Tab 5) đã lưu cho sự kiện này.
+        self._amount_paid_event = event_id_to_load
+        self._set_amount_paid_quietly(rec.get("AmountPaid") or "0")
 
-        # MỚI: đổi từ đọc file Excel (Participant_List_{EventID}.xlsx) sang
-        # đọc TRỰC TIẾP từ database — Tab 2 giờ lưu trữ trong DB, file Excel
-        # chỉ còn được TẠO RA khi bấm "Export to Excel" trên Tab 2 (không
-        # còn là nguồn dữ liệu chính, xem db.load_recipients()).
-        recipient_note = ""
         loaded_people = db.load_recipients(event_id_to_load, self.history_path.get())
         if loaded_people:
             self.recipients = loaded_people
             self._refresh_recipient_tree()
             recipient_note = f"\n\n📋 Auto-loaded {len(self.recipients)} people into Tab 2 from the database."
         else:
-            recipient_note = "\n\n(This event has no recipient list saved in the database yet.)"
+            recipient_note = "\n\n(This event has no recipient list saved yet — Tab 2 is empty.)"
 
-        # MỚI: khôi phục kết quả Responded (Tab 4) và bảng Attendance &
-        # Payment (Tab 5) đã lưu trước đó cho sự kiện này, từ sheet
-        # "Responded result" / "Attendance & Payment" trong
-        # Attendance_Payment_{EventID}.xlsx — KHÔNG tự động quét lại
-        # Outlook. Chỉ khi bấm '📨 Scan Inbox for Vote results' ở Tab 4 mới
-        # thực sự quét lại và lấy kết quả MỚI NHẤT (xem _collect_responses()).
+        # Khôi phục kết quả đã lưu (Tab 4/5/6) — KHÔNG quét lại Outlook. Chỉ
+        # khi bấm '📨 Scan Inbox for Vote results' ở Tab 4 mới thực sự quét lại.
         responded_loaded = self._load_responded_result_from_file(event_id_to_load)
         attendance_loaded = self._load_attendance_sheet_from_file(event_id_to_load)
         gift_loaded = self._load_gift_roster_from_db(event_id_to_load)
@@ -1164,17 +1130,18 @@ class RSVPApp(tk.Tk):
             restore_note += "\n\n📊 Restored the Attendance & Payment tracking table into Tab 5."
         if gift_loaded:
             restore_note += "\n\n🎁 Restored the Gift Contribution tracking table into Tab 6."
+        self._refresh_compose_preview()
 
         messagebox.showinfo(
             "Loaded",
             "Event ID / Event Name / Location / Budget / Event Date / Deadline / Note "
             "have all been loaded from the past event."
             + recipient_note + restore_note +
-            "\n\n⚠️ If you're creating a NEW event (using this one as a template): remember to "
-            "CHANGE the Event ID (and dates) to new values before sending the invite, to avoid "
-            "clashing with the old event — and on Tab 2, click '💾 Save to Excel' again so the "
-            "recipient list is saved separately under the new Event ID (avoiding overwriting the "
-            "old event's file).\n\n"
+            "\n\n⚠️ If you're creating a NEW event (using this one as a template): CHANGE the "
+            "Event ID (and dates) before sending the invite, to avoid clashing with the old event. "
+            "The recipient list on Tab 2 is saved under the new Event ID as soon as you edit it, "
+            "save the event or send the invite. Votes, attendance, gift ticks and Amount paid stay "
+            "with the original event.\n\n"
             "If you're reloading THIS SAME event just to Collect Responses / Send Calendar "
             "Invite, you can leave the Event ID as loaded."
         )
@@ -1182,124 +1149,104 @@ class RSVPApp(tk.Tk):
     # ══════════════════════════════════════════════════════════════════
     # TAB 2 — RECIPIENTS
     # ══════════════════════════════════════════════════════════════════
-    def _standardized_recipient_path(self):
-        """Trả về đường dẫn CHUẨN HOÁ cho file danh sách người nhận của sự
-        kiện hiện tại: 'Participant_List_{EventID}.xlsx', nằm CÙNG THƯ MỤC
-        với file đang trỏ tới ở ô 'Recipient Excel file' (hoặc thư mục hiện
-        tại nếu ô đó đang trống). Trả về None nếu Event ID (Tab 1) đang
-        trống — không đủ thông tin để đặt tên chuẩn.
-
-        Việc chuẩn hoá tên file này (thay vì giữ nguyên tên bạn Browse vào,
-        vd 'Danh_sach_nguoi_tham_gia_TEMPLATE.xlsx') giúp Tab 1 '⬅ Load setup
-        from selected event' sau này tự tìm và nạp lại ĐÚNG file người nhận
-        cho sự kiện đó, vì tên file luôn suy ra được trực tiếp từ Event ID
-        (không phụ thuộc bạn đặt tên gốc là gì)."""
-        event_id = self.var_event_id.get().strip()
-        if not event_id:
-            return None
-        current = self.recipient_file.get().strip()
-        folder = os.path.dirname(os.path.abspath(current)) if current else os.getcwd()
-        return os.path.join(folder, f"Participant_List_{event_id}.xlsx")
-
     def _build_tab_recipients(self):
         f = self.tab_recipients.body
-        top = ttk.Frame(f)
-        top.pack(fill="x", padx=10, pady=8)
 
-        # MỚI: kiến trúc lưu trữ đã đổi sang DB — danh sách người nhận giờ
-        # tự động lưu vào database mỗi khi thay đổi (thêm/xoá dòng, Load
-        # list, Expand group...), KHÔNG còn tự ghi ra Excel liên tục nữa.
-        # "Recipient Excel file" ở đây giờ CHỈ dùng làm nguồn NHẬP (import)
-        # ban đầu — vd nạp từ file mẫu Danh_sach_nguoi_tham_gia_TEMPLATE —
-        # không phải nơi lưu trữ chính. Muốn có file Excel để gửi/báo cáo,
-        # dùng nút "📊 Export to Excel".
-        ttk.Label(top, text="Import from Excel file:").pack(side="left")
-        ttk.Entry(top, textvariable=self.recipient_file, width=45).pack(side="left", padx=6)
-        ttk.Button(top, text="📂 Browse...", command=self._browse_recipient_file).pack(side="left", padx=4)
-        ttk.Button(top, text="📥 Import list", command=self._load_recipients).pack(side="left", padx=4)
-        ttk.Button(top, text="📊 Export to Excel", command=self._export_recipients_to_excel).pack(side="left", padx=4)
+        people = Card(f, "Recipient list",
+                      "Import from Excel (Name in column A, Email in column B) or add people below. "
+                      "The list is saved for the current Event ID after every change.")
+        people.pack(fill="both", expand=True, pady=(0, 16))
+        ttk.Button(people.actions, text="📊 Export to Excel", command=self._export_recipients_to_excel)\
+            .pack(side="right")
+        ttk.Button(people.actions, text="📥 Import from Excel...", style="Primary.TButton",
+                   command=self._load_recipients).pack(side="right", padx=(0, 8))
 
-        expand_bar = ttk.Frame(f)
-        expand_bar.pack(fill="x", padx=10, pady=(0, 6))
-        ttk.Button(expand_bar, text="🔎 Expand group emails in list (incl. sub-groups)",
-                   command=self._expand_group_recipients).pack(side="left")
-        self._make_wrapping_label(expand_bar, text="  → Any row that is a company Distribution List (group email, "
-                                   "e.g. 'EET Employees All') gets replaced with its REAL individual "
-                                   "members, so Tab 4 can track exactly who hasn't responded yet.",
-                  font=("Arial", 8, "italic")).pack(side="left")
-
-        history_push_bar = ttk.Frame(f)
-        history_push_bar.pack(fill="x", padx=10, pady=(0, 6))
-        ttk.Button(history_push_bar, text="💾 Save recipients now",
-                   command=lambda: self._save_recipients_to_db(silent=False)).pack(side="left")
-        self._make_wrapping_label(history_push_bar, text="  → Manually save this list to the database for the current "
-                                          "Event ID (Tab 1) right away. This already happens automatically "
-                                          "after every change (Import/Add/Delete row/Expand group) — use "
-                                          "this button only if you want to be sure right now.",
-                  font=("Arial", 8, "italic")).pack(side="left")
-
-        # MỚI: ô tìm kiếm nhanh theo Name/Email — lọc TRỰC TIẾP bảng bên dưới
-        # khi gõ (không cần bấm nút), khớp theo dạng "chứa chuỗi" (không phân
-        # biệt hoa/thường), tìm trên CẢ Name lẫn Email cùng lúc.
-        search_bar = ttk.Frame(f)
-        search_bar.pack(fill="x", padx=10, pady=(0, 6))
-        ttk.Label(search_bar, text="🔎 Search (name or email):").pack(side="left")
+        # Lọc TRỰC TIẾP bảng bên dưới khi gõ, trên CẢ Name lẫn Email.
+        toolbar = ttk.Frame(people.body)
+        toolbar.pack(fill="x", pady=(0, 12))
         self.var_recipient_search = tk.StringVar(value="")
-        search_entry = ttk.Entry(search_bar, textvariable=self.var_recipient_search, width=40)
-        search_entry.pack(side="left", padx=6)
+        ttk.Label(toolbar, text="🔎", style="Muted.TLabel").pack(side="left", padx=(0, 6))
+        ttk.Entry(toolbar, textvariable=self.var_recipient_search, width=36).pack(side="left")
         self.var_recipient_search.trace_add("write", lambda *a: self._apply_recipient_filter())
-        ttk.Button(search_bar, text="✕ Clear", command=lambda: self.var_recipient_search.set(""))\
-            .pack(side="left", padx=4)
+        ttk.Button(toolbar, text="✕ Clear", style="Ghost.TButton",
+                   command=lambda: self.var_recipient_search.set("")).pack(side="left", padx=(6, 0))
+        ttk.Button(toolbar, text="🔎 Expand group emails", command=self._expand_group_recipients)\
+            .pack(side="right")
 
         cols = ("name", "email")
-        tree_container, self.tree_recipients = make_scrollable_treeview(f, columns=cols, height=18)
-        self.tree_recipients.heading("name", text="Name")
-        self.tree_recipients.heading("email", text="Email")
+        tree_container, self.tree_recipients = make_scrollable_treeview(people.body, columns=cols, height=16)
+        self.tree_recipients.heading("name", text="Name", anchor="w")
+        self.tree_recipients.heading("email", text="Email", anchor="w")
         self.tree_recipients.column("name", width=280)
         self.tree_recipients.column("email", width=320)
-        tree_container.pack(fill="both", expand=True, padx=10, pady=6)
+        tree_container.pack(fill="both", expand=True)
 
-        edit_bar = ttk.Frame(f)
-        edit_bar.pack(fill="x", padx=10, pady=6)
+        footer = ttk.Frame(people.body)
+        footer.pack(fill="x", pady=(10, 0))
+        self.lbl_recipient_count = ttk.Label(footer, text="No list loaded yet.", style="Muted.TLabel")
+        self.lbl_recipient_count.pack(side="left")
+        ttk.Label(footer, textvariable=self.recipient_file, style="Hint.TLabel").pack(side="right")
+        WrapLabel(people.body, style="Hint.TLabel",
+                  text="Expand group emails replaces a distribution list (e.g. 'EET Employees All') "
+                       "with its real members, sub-groups included, so Collect responses can tell "
+                       "exactly who has not answered.").pack(fill="x", pady=(8, 0))
+
+        add = Card(f, "Add a person")
+        add.pack(fill="x")
+        g = add.body
+        g.columnconfigure((0, 1), weight=1, uniform="form")
         self.var_new_name = tk.StringVar()
         self.var_new_email = tk.StringVar()
-        ttk.Entry(edit_bar, textvariable=self.var_new_name, width=28).pack(side="left", padx=3)
-        ttk.Entry(edit_bar, textvariable=self.var_new_email, width=28).pack(side="left", padx=3)
-        ttk.Button(edit_bar, text="➕ Add person", command=self._add_recipient_row).pack(side="left", padx=6)
-        ttk.Button(edit_bar, text="🗑 Delete selected row", command=self._delete_recipient_row).pack(side="left", padx=6)
+        field(g, 0, 0, "Name", lambda p: ttk.Entry(p, textvariable=self.var_new_name))
+        field(g, 0, 1, "Email", lambda p: ttk.Entry(p, textvariable=self.var_new_email))
+        buttons = ttk.Frame(g)
+        buttons.grid(row=1, column=0, columnspan=2, sticky="w")
+        ttk.Button(buttons, text="➕ Add person", style="Primary.TButton",
+                   command=self._add_recipient_row).pack(side="left")
+        ttk.Button(buttons, text="🗑 Delete selected row", command=self._delete_recipient_row)\
+            .pack(side="left", padx=(8, 0))
 
-        self.lbl_recipient_count = ttk.Label(f, text="No list loaded yet.")
-        self.lbl_recipient_count.pack(anchor="w", padx=10, pady=4)
-
-    def _browse_recipient_file(self):
-        path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx")])
-        if path:
-            self.recipient_file.set(path)
-
-    def _load_recipients(self, silent=False):
-        path = self.recipient_file.get()
-        if not os.path.exists(path):
-            if not silent:
-                messagebox.showerror("Error", f"File not found: {path}")
+    def _load_recipients(self):
+        """Asks for an Excel file and replaces Tab 2's list with it. Reads
+        the "DanhSach" sheet (or the first one): Name in column A, Email in
+        column B, on any row - title and header rows are skipped because
+        they have no address. Example rows and repeated addresses are
+        dropped."""
+        path = filedialog.askopenfilename(title="Import recipients from Excel",
+                                          filetypes=[("Excel files", "*.xlsx")])
+        if not path:
             return False
-        wb = openpyxl.load_workbook(path, data_only=True)
-        ws = wb["DanhSach"] if "DanhSach" in wb.sheetnames else wb.active
-        self.recipients = []
-        for row in ws.iter_rows(min_row=4, values_only=True):
-            name, email = (row + (None, None))[:2]
+        try:
+            wb = openpyxl.load_workbook(path, data_only=True)
+            ws = wb["DanhSach"] if "DanhSach" in wb.sheetnames else wb.active
+            rows = list(ws.iter_rows(min_row=1, values_only=True))
+        except Exception as e:
+            messagebox.showerror("Error", f"Couldn't read the file:\n{path}\n\n{e}")
+            return False
+        people, seen, duplicates = [], set(), 0
+        for row in rows:
+            name, email = (tuple(row) + (None, None))[:2]
             if not email or "@" not in str(email):
                 continue
             if "(ví dụ)" in str(name or "") or "(example)" in str(name or "").lower():
                 continue
-            self.recipients.append((str(name or "").strip(), str(email).strip()))
+            email = str(email).strip()
+            if email.lower() in seen:
+                duplicates += 1
+                continue
+            seen.add(email.lower())
+            people.append((str(name or "").strip(), email))
+        if not people:
+            messagebox.showwarning(
+                "No addresses found",
+                f"No email address was found in column B of:\n{path}\n\nThe list was not changed.")
+            return False
+        self.recipients = people
+        self.recipient_file.set(path)
         self._refresh_recipient_tree()
-
-        # BUG ĐÃ SỬA (kiến trúc CŨ): trước đây bước này chỉ CHUẨN HOÁ TÊN FILE
-        # trên đĩa rồi ghi đường dẫn đó vào RSVP_History.xlsx. GIỜ ĐÃ ĐỔI
-        # SANG DB: import xong là lưu THẲNG self.recipients vào database
-        # (bảng recipients, khớp theo Event ID) — không còn phụ thuộc vào
-        # việc ghi/đọc lại 1 file Excel trung gian nữa.
         self._save_recipients_to_db(silent=True)
+        note = f"\n\n{duplicates} repeated address(es) were skipped." if duplicates else ""
+        messagebox.showinfo("Imported", f"Imported {len(people)} people from:\n{path}{note}")
         return True
 
     def _save_recipients_to_db(self, silent=False):
@@ -1363,6 +1310,9 @@ class RSVPApp(tk.Tk):
         if not email or "@" not in email:
             messagebox.showwarning("Missing email", "Enter a valid email before adding.")
             return
+        if any(e.lower() == email.lower() for _, e in self.recipients):
+            messagebox.showinfo("Already in the list", f"{email} is already on the list.")
+            return
         self.recipients.append((name, email))
         self.var_new_name.set("")
         self.var_new_email.set("")
@@ -1379,36 +1329,39 @@ class RSVPApp(tk.Tk):
         self._refresh_recipient_tree()
         self._save_recipients_to_db(silent=True)
 
-    def _export_recipients_to_excel(self, silent=False):
-        """Xuất self.recipients (danh sách người nhận đang có, đang lưu
-        trong DB) ra 1 file Excel — CHỈ khi bấm nút "📊 Export to Excel",
-        KHÔNG còn tự động chạy mỗi khi đổi dữ liệu như kiến trúc cũ. Dùng
-        để gửi cho người khác hoặc lưu trữ ngoài app."""
+    def _export_recipients_to_excel(self):
+        """Exports Tab 2's list to an Excel file the user chooses, in the same
+        layout Import reads (sheet "DanhSach", header on row 3), so the file
+        can be edited and imported again."""
         if not self.recipients:
-            if not silent:
-                messagebox.showwarning("No data", "There is no recipient list to export yet.")
+            messagebox.showwarning("No data", "There is no recipient list to export yet.")
             return
-        std_path = self._standardized_recipient_path()
-        old_path = self.recipient_file.get().strip()
-        path = std_path or old_path
+        event_id = self.var_event_id.get().strip()
+        imported = self.recipient_file.get().strip()
+        path = filedialog.asksaveasfilename(
+            title="Export recipients to Excel",
+            defaultextension=".xlsx",
+            initialdir=os.path.dirname(imported) if imported else None,
+            initialfile=f"Participant_List_{event_id or 'event'}.xlsx",
+            filetypes=[("Excel files", "*.xlsx")])
         if not path:
-            path = filedialog.asksaveasfilename(defaultextension=".xlsx",
-                                                 filetypes=[("Excel files", "*.xlsx")])
-            if not path:
-                return
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = "DanhSach"
-        ws.cell(row=3, column=1, value="Họ tên").font = Font(bold=True)
-        ws.cell(row=3, column=2, value="Email").font = Font(bold=True)
-        for i, (name, email) in enumerate(self.recipients, start=4):
-            ws.cell(row=i, column=1, value=name)
-            ws.cell(row=i, column=2, value=email)
-        ws.column_dimensions["A"].width = 28
-        ws.column_dimensions["B"].width = 32
-        wb.save(path)
-        if not silent:
-            messagebox.showinfo("Exported", f"Exported {len(self.recipients)} people to:\n{path}")
+            return
+        try:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "DanhSach"
+            ws.cell(row=3, column=1, value="Họ tên").font = Font(bold=True)
+            ws.cell(row=3, column=2, value="Email").font = Font(bold=True)
+            for i, (name, email) in enumerate(self.recipients, start=4):
+                ws.cell(row=i, column=1, value=name)
+                ws.cell(row=i, column=2, value=email)
+            ws.column_dimensions["A"].width = 28
+            ws.column_dimensions["B"].width = 32
+            wb.save(path)
+        except Exception as e:
+            messagebox.showerror("Error", f"Couldn't export the file:\n{e}")
+            return
+        messagebox.showinfo("Exported", f"Exported {len(self.recipients)} people to:\n{path}")
 
     def _expand_group_recipients(self):
         """Với mỗi dòng trong danh sách hiện tại, kiểm tra xem đó có phải 1
@@ -1475,158 +1428,135 @@ class RSVPApp(tk.Tk):
     # ══════════════════════════════════════════════════════════════════
     def _build_tab_compose(self):
         f = self.tab_compose.body
-        pad = {"padx": 10, "pady": 5}
+        gap = {"fill": "x", "pady": (0, 16)}
 
-        # ── send mode selector (TOP-MOST — important choice, made first) ──
-        send_mode_bar = ttk.Frame(f, relief="ridge", borderwidth=1)
-        send_mode_bar.grid(row=0, column=0, columnspan=2, sticky="we", padx=10, pady=(8, 4))
-        ttk.Label(send_mode_bar, text="📤 Send mode:", font=("Arial", 11, "bold"))\
-            .pack(side="left", padx=(8, 6), pady=6)
-        self.combo_send_mode = ttk.Combobox(
-            send_mode_bar, width=28, state="readonly",
-            values=["Send first Invite", "Send update invite", "Send Gift Contribution Notice"],
-        )
+        # ── send mode + language (TOP-MOST — important choice, made first) ──
+        message = Card(f, "Message", "What kind of email this is, and in which language.")
+        message.pack(**gap)
+        g = message.body
+        g.columnconfigure((0, 1), weight=1, uniform="form")
+        self.combo_send_mode = field(
+            g, 0, 0, "Send mode",
+            lambda p: ttk.Combobox(p, state="readonly", values=[
+                "Send first Invite", "Send update invite", "Send Gift Contribution Notice"]),
+            hint="'Update invite' adds a change notice and lets people vote again. 'Gift Contribution "
+                 "Notice' announces the gift from Event setup, without voting buttons.")
         self.combo_send_mode.current(0)  # default: first invite
-        self.combo_send_mode.pack(side="left", padx=4, pady=6)
         self.combo_send_mode.bind("<<ComboboxSelected>>", lambda e: (self._refresh_send_button_label(), self._refresh_compose_preview()))
-        self._make_wrapping_label(send_mode_bar,
-                  text="  ↳ 'Update invite' adds a change-notice banner + different subject prefix, but\n"
-                       "still lets people re-vote. 'Gift Contribution Notice' sends a Guest-of-Honor/\n"
-                       "Organizer/Budget notice from Tab 1 — NO voting buttons (see 'Event mode' on Tab 1).",
-                  font=("Arial", 8, "italic")).pack(side="left", padx=4, pady=6)
-
-        # ── language selector ──
-        ttk.Label(f, text="Email language:", font=("Arial", 10, "bold"))\
-            .grid(row=1, column=0, sticky="w", **pad)
-        self.combo_email_lang = ttk.Combobox(
-            f, width=32, state="readonly",
-            values=[LANG_LABELS["en"], LANG_LABELS["ja"], LANG_LABELS["vi"], LANG_LABELS["bilingual"]],
-        )
+        self.combo_email_lang = field(
+            g, 0, 1, "Email language",
+            lambda p: ttk.Combobox(p, state="readonly", values=[
+                LANG_LABELS["en"], LANG_LABELS["ja"], LANG_LABELS["vi"], LANG_LABELS["bilingual"]]))
         self.combo_email_lang.current(0)  # default: English
-        self.combo_email_lang.grid(row=1, column=1, sticky="w", **pad)
         self.combo_email_lang.bind("<<ComboboxSelected>>", lambda e: self._refresh_compose_preview())
-
         self.var_subject_preview = tk.StringVar(value="")
-        ttk.Label(f, textvariable=self.var_subject_preview, font=("Arial", 9, "italic"))\
-            .grid(row=2, column=0, columnspan=2, sticky="w", padx=10)
-
         self.var_greeting_preview = tk.StringVar(value="")
-        ttk.Label(f, textvariable=self.var_greeting_preview, font=("Arial", 9, "italic"))\
-            .grid(row=3, column=0, columnspan=2, sticky="w", padx=10, pady=(2, 8))
+        preview = bordered(g, bg=COLORS["muted"], color=COLORS["border"])
+        preview.grid(row=1, column=0, columnspan=2, sticky="we")
+        inner = tk.Frame(preview, bg=COLORS["muted"], padx=12, pady=8)
+        inner.pack(fill="x")
+        for var in (self.var_subject_preview, self.var_greeting_preview):
+            tk.Label(inner, textvariable=var, bg=COLORS["muted"], fg=COLORS["foreground"],
+                     font=self.fonts.body, anchor="w", justify="left").pack(fill="x")
 
-        # Email is assembled in THIS order: Greeting (above) → EDITABLE → FIXED.
-        # ── editable block preview (organizer's free-text background note, shown FIRST) ──
-        ttk.Label(f, text="🟩 EDITABLE part — YOUR background notes for this specific event, shown\n"
-                          "right after the greeting (write in any language; translate below if needed):",
-                  font=("Arial", 10, "bold"), foreground="#00703C").grid(row=4, column=0, columnspan=2, sticky="w", **pad)
-        editable_container, self.txt_editable_preview = make_scrollable_text(f, width=100, height=5, bg="#e8f5e9")
-        editable_container.grid(row=5, column=0, columnspan=2, sticky="w", padx=10)
+        # Email is assembled in THIS order: Greeting → EDITABLE → FIXED.
+        content = Card(f, "Email content",
+                       "Greeting, then your note, then the fixed part. Both boxes can be edited before "
+                       "sending; they are rebuilt from Event setup when you come back here, unless you "
+                       "edited them.")
+        content.pack(**gap)
+        ttk.Label(content.body, text="Your note — editable, any language", style="Field.TLabel")\
+            .pack(anchor="w", pady=(0, 4))
+        editable_container, self.txt_editable_preview = make_scrollable_text(
+            content.body, width=40, height=5, bg=COLORS["success_wash"])
+        editable_container.pack(fill="x")
+        ttk.Label(content.body, text="Fixed part — event details and voting instructions", style="Field.TLabel")\
+            .pack(anchor="w", pady=(14, 4))
+        fixed_container, self.txt_fixed_preview = make_scrollable_text(
+            content.body, width=40, height=9, bg=COLORS["warning_wash"])
+        fixed_container.pack(fill="x")
+        WrapLabel(content.body, style="Hint.TLabel",
+                  text="You can edit the fixed part too, and keep your wording for future events with "
+                       "'Save FIXED wording as default'.").pack(fill="x", pady=(6, 0))
+        button_row(content.body,
+                   ("🔄 Refresh preview from Tab 1 / Tab 2", self._refresh_compose_preview),
+                   ("💾 Save FIXED wording as default for this language", self._save_fixed_default),
+                   ("↺ Reset FIXED wording", self._reset_fixed_default))
 
-        # ── fixed block preview (event details from Tab 1 + voting instructions, shown AFTER editable) ──
-        ttk.Label(f, text="🟧 FIXED part — auto-filled from Tab 1 (event name/date/location/deadline/budget)\n"
-                          "plus the standard voting wording, shown AFTER your note. You CAN edit this box —\n"
-                          "click 'Save as default' below to reuse your edited wording for future events too:",
-                  font=("Arial", 10, "bold"), foreground="#8a4b00").grid(row=6, column=0, columnspan=2, sticky="w", **pad)
-        fixed_container, self.txt_fixed_preview = make_scrollable_text(f, width=100, height=9, bg="#fff3e0")
-        fixed_container.grid(row=7, column=0, columnspan=2, sticky="w", padx=10)
-
-        fixed_btns = ttk.Frame(f)
-        fixed_btns.grid(row=8, column=0, columnspan=2, sticky="w", padx=10, pady=4)
-        ttk.Button(fixed_btns, text="🔄 Refresh preview from Tab 1 / Tab 2", command=self._refresh_compose_preview)\
-            .pack(side="left", padx=(0, 6))
-        ttk.Button(fixed_btns, text="💾 Save FIXED wording as default for this language", command=self._save_fixed_default)\
-            .pack(side="left", padx=6)
-        ttk.Button(fixed_btns, text="↺ Reset FIXED wording to system default", command=self._reset_fixed_default)\
-            .pack(side="left", padx=6)
-
-        # ── prompt customization (NEW) ──
-        ttk.Separator(f).grid(row=9, column=0, columnspan=2, sticky="ew", pady=8)
-        ttk.Label(f, text="🎨 Customize Copilot prompt (for single-language targets — icons already built in):",
-                  font=("Arial", 10, "bold")).grid(row=10, column=0, columnspan=2, sticky="w", **pad)
-        self._make_wrapping_label(f, text="This box shows the exact prompt that will be sent to Copilot (system default,\n"
-                          "already includes emoji-icon instructions ⏰📍💰📋👥). Edit it freely and click\n"
-                          "'Save' to keep your version — it persists until you Reset. The bilingual target\n"
-                          "uses its own built-in default (see 'Show system default prompt' below).",
-                  font=("Arial", 9, "italic")).grid(row=11, column=0, columnspan=2, sticky="w", padx=10, pady=(2, 4))
-        
-        prompt_container, self.txt_custom_prompt = make_scrollable_text(f, width=100, height=11, bg="#fffce0")
+        # Set once and rarely touched, so it starts collapsed: the send
+        # controls below are a long scroll away already.
+        prompt = Card(f, "Copilot prompt",
+                      "The instructions sent to Copilot with the email, for single-language targets. "
+                      "Icons are already built in.")
+        prompt.pack(**gap)
+        self.var_prompt_toggle = tk.StringVar(value="▸ Show / edit")
+        ttk.Button(prompt.actions, textvariable=self.var_prompt_toggle, style="Small.TButton",
+                   command=self._toggle_prompt_editor).pack()
+        self.prompt_editor = ttk.Frame(prompt.body)
+        WrapLabel(self.prompt_editor, style="Hint.TLabel",
+                  text="This is exactly what will be sent to Copilot (the system default, with emoji "
+                       "instructions ⏰📍💰📋👥). Edit it and Save to keep your version until you Reset. "
+                       "The bilingual target uses its own built-in prompt.").pack(fill="x", pady=(0, 6))
+        prompt_container, self.txt_custom_prompt = make_scrollable_text(
+            self.prompt_editor, width=40, height=11, bg=COLORS["muted"])
         # Always show SOMETHING — the saved override if present, otherwise the
         # system default (with icon instructions) — so the user can see exactly
         # what will be sent, and edit it directly instead of starting from blank.
         current_prompt = self.prompt_overrides.get("single", "").strip() or DEFAULT_PROMPT_SINGLE
         self.txt_custom_prompt.insert("1.0", current_prompt)
-        prompt_container.grid(row=12, column=0, columnspan=2, sticky="w", padx=10, pady=4)
-        
-        prompt_btns = ttk.Frame(f)
-        prompt_btns.grid(row=13, column=0, columnspan=2, sticky="w", padx=10, pady=4)
-        ttk.Button(prompt_btns, text="💾 Save custom prompt as default", command=self._save_custom_prompt)\
-            .pack(side="left", padx=(0, 6))
-        ttk.Button(prompt_btns, text="↺ Reset prompt to system default", command=self._reset_custom_prompt)\
-            .pack(side="left", padx=6)
-        ttk.Button(prompt_btns, text="📘 Show system default prompt (single + bilingual)", command=self._show_system_prompt)\
-            .pack(side="left", padx=6)
-        
+        prompt_container.pack(fill="x")
+        button_row(self.prompt_editor,
+                   ("💾 Save custom prompt as default", self._save_custom_prompt),
+                   ("↺ Reset prompt to system default", self._reset_custom_prompt),
+                   ("📘 Show system default prompt", self._show_system_prompt))
+
         # ── translation helper (Copilot bridge) ──
-        ttk.Separator(f).grid(row=14, column=0, columnspan=2, sticky="ew", pady=8)
-        ttk.Label(f, text="Translate the FULL email (greeting + note + event details) via Copilot copy/paste bridge:",
-                  font=("Arial", 10, "bold")).grid(row=15, column=0, columnspan=2, sticky="w", **pad)
-        ttk.Label(f, text="(Source is the language currently shown above — switch off Bilingual to pick a source)",
-                  font=("Arial", 9, "italic")).grid(row=16, column=0, columnspan=2, sticky="w", padx=10)
-
-        helper = ttk.Frame(f)
-        helper.grid(row=17, column=0, columnspan=2, sticky="w", padx=10)
-
-        ttk.Label(helper, text="Translate into:").grid(row=0, column=0, sticky="w", padx=4, pady=4)
-        self.combo_translate_target = ttk.Combobox(helper, width=26, state="readonly", values=TRANSLATE_TARGETS)
+        translate = Card(f, "Translate with Copilot",
+                         "Copies the full email and the instructions to the clipboard; paste Copilot's "
+                         "answer back here. The source is the Email language above, so pick a single "
+                         "language there.")
+        translate.pack(**gap)
+        row = ttk.Frame(translate.body)
+        row.pack(fill="x")
+        ttk.Label(row, text="Translate into", style="Field.TLabel").pack(side="left", padx=(0, 8))
+        self.combo_translate_target = ttk.Combobox(row, width=28, state="readonly", values=TRANSLATE_TARGETS)
         self.combo_translate_target.current(1)  # default Japanese
-        self.combo_translate_target.grid(row=0, column=1, sticky="w", padx=4, pady=4)
-        ttk.Button(helper, text="📋 Copy full email + prompt to clipboard (for Copilot)",
-                   command=self._copy_email_for_translation).grid(row=0, column=2, sticky="w", padx=8, pady=4)
-
-        ttk.Label(helper, text="Paste the translated result from Copilot here — this will be used\n"
-                              "as the complete, ready-to-send email (no section labels).\n"
-                              "⚠️ Pasting a NEW result? Click '🗑 Clear' FIRST — pasting into a\n"
-                              "non-empty box appends instead of replacing, combining old + new text.")\
-            .grid(row=1, column=0, columnspan=3, sticky="w", padx=4, pady=(8, 2))
-        paste_container, self.txt_translation_paste = make_scrollable_text(helper, width=90, height=6)
-        paste_container.grid(row=2, column=0, columnspan=3, sticky="w", padx=4)
-        self._make_wrapping_label(helper, text="⚠️ If words look glued together with no spaces (a known Copilot-copy quirk,\n"
-                              "outside this tool's control), click 'Clean up' below, then click 'Save' again\n"
-                              "to apply the cleaned-up version — Clean up alone does not change what is sent.",
-                  font=("Arial", 8, "italic"), foreground="#8a4b00")\
-            .grid(row=3, column=0, columnspan=3, sticky="w", padx=4, pady=(0, 2))
-        ttk.Button(helper, text="💾 Save as translated version for this language", command=self._save_translated_email)\
-            .grid(row=4, column=0, sticky="w", padx=4, pady=6)
-        ttk.Button(helper, text="🗑 Clear saved translation for this language", command=self._clear_translated_email)\
-            .grid(row=4, column=1, sticky="w", padx=4, pady=6)
-        ttk.Button(helper, text="🧹 Clean up (fix lost spaces/line breaks)", command=self._cleanup_pasted_text)\
-            .grid(row=4, column=2, sticky="w", padx=4, pady=6)
-
+        self.combo_translate_target.pack(side="left")
+        ttk.Button(row, text="📋 Copy full email + prompt", style="Primary.TButton",
+                   command=self._copy_email_for_translation).pack(side="left", padx=(8, 0))
+        ttk.Label(translate.body, text="Translated email from Copilot", style="Field.TLabel")\
+            .pack(anchor="w", pady=(14, 4))
+        paste_container, self.txt_translation_paste = make_scrollable_text(translate.body, width=40, height=6)
+        paste_container.pack(fill="x")
+        WrapLabel(translate.body, style="Hint.TLabel",
+                  text="Used as the complete email, exactly as pasted. Pasting into a box that is not "
+                       "empty appends — click '🗑 Clear' first. If words come out glued together (a "
+                       "Copilot copy quirk), click 'Clean up', then 'Save' again.").pack(fill="x", pady=(6, 0))
+        button_row(translate.body,
+                   ("💾 Save as translated version for this language", self._save_translated_email),
+                   ("🗑 Clear saved translation", self._clear_translated_email),
+                   ("🧹 Clean up spacing", self._cleanup_pasted_text))
         self.lbl_translation_status = ttk.Label(
-            helper, text="Full translated email ready: EN ❌  |  JA ❌  |  VI ❌  |  Bilingual ❌")
-        self.lbl_translation_status.grid(row=5, column=0, columnspan=3, sticky="w", padx=4, pady=2)
+            translate.body, style="Muted.TLabel",
+            text="Full translated email ready: EN ❌  |  JA ❌  |  VI ❌  |  Bilingual ❌")
+        self.lbl_translation_status.pack(anchor="w", pady=(10, 0))
 
         # ── send controls ──
-        ttk.Separator(f).grid(row=18, column=0, columnspan=2, sticky="ew", pady=8)
-
-        self._make_wrapping_label(f, text='Send to (optional override — e.g. a department group email).\n'
-                          "Leave blank to send individually to everyone on Tab 2.\n"
-                          "Tab 2's roster is always used for vote tracking either way.",
-                  font=("Arial", 9, "italic")).grid(row=19, column=0, columnspan=2, sticky="w", **pad)
+        send = Card(f, "Send", "Opens the email in Outlook for you to check and send, unless you tick "
+                               "'Send immediately'.")
+        send.pack(fill="x")
+        g = send.body
+        g.columnconfigure(0, weight=1)
         self.var_send_to_override = tk.StringVar(value="")
-        ttk.Entry(f, textvariable=self.var_send_to_override, width=50).grid(row=20, column=0, columnspan=2, sticky="w", padx=10)
-
-        ttk.Label(f, text="Voting options (leave as-is unless needed):").grid(row=21, column=0, sticky="w", **pad)
-        self.var_voting_options = tk.StringVar(value="Yes;No;Maybe")
-        ttk.Entry(f, textvariable=self.var_voting_options, width=30).grid(row=21, column=1, sticky="w", **pad)
-
+        field(g, 0, 0, "Send to (optional)", lambda p: ttk.Entry(p, textvariable=self.var_send_to_override),
+              hint="A group address to send to instead of each person on Recipients. Votes are "
+                   "tracked against the Recipients list either way.")
         self.var_auto_send = tk.BooleanVar(value=False)
-        ttk.Checkbutton(f, text="Send immediately without review (unchecked = open Outlook for you to click Send)",
-                         variable=self.var_auto_send).grid(row=22, column=0, columnspan=2, sticky="w", **pad)
-
+        ttk.Checkbutton(g, text="Send immediately without review (unchecked = open Outlook for you to click Send)",
+                        variable=self.var_auto_send).grid(row=1, column=0, sticky="w", pady=(0, 12))
         self.var_send_btn_label = tk.StringVar(value="✉ Send Invite via Outlook (Voting Buttons)")
-        ttk.Button(f, textvariable=self.var_send_btn_label, command=self._send_invite)\
-            .grid(row=23, column=0, sticky="w", **pad)
+        ttk.Button(g, textvariable=self.var_send_btn_label, style="Primary.TButton",
+                   command=self._send_invite).grid(row=2, column=0, sticky="w")
 
         self._refresh_send_button_label()
         self._refresh_compose_preview()
@@ -1649,6 +1579,14 @@ class RSVPApp(tk.Tk):
         else:
             self.var_send_btn_label.set("✉ Send Invite via Outlook (Voting Buttons)")
 
+    def _toggle_prompt_editor(self):
+        if self.prompt_editor.winfo_manager():
+            self.prompt_editor.pack_forget()
+            self.var_prompt_toggle.set("▸ Show / edit")
+        else:
+            self.prompt_editor.pack(fill="x")
+            self.var_prompt_toggle.set("▾ Hide")
+
     def _active_full_translations(self):
         """Dict lưu bản dịch Copilot đầy đủ ĐANG DÙNG — tách riêng cho mode
         Gift (self.gift_full_translations) và mode Invite/Update invite
@@ -1670,7 +1608,7 @@ class RSVPApp(tk.Tk):
         ngay trước khi gửi/copy — y hệt hiện tượng bạn gặp."""
         lang_code = self._current_lang_code()
         event_name = self.var_event_name.get()
-        event_id = self.var_event_id.get()
+        event_id = self.var_event_id.get().strip()
         if self._is_gift_mode():
             subject = build_gift_subject(lang_code, event_id, self.var_guest_of_honor.get())
         else:
@@ -1746,9 +1684,28 @@ class RSVPApp(tk.Tk):
         return f"{greeting}\n\n{editable}\n\n{fixed}".strip()
 
     def _refresh_compose_preview(self):
+        self._fill_compose_preview()
+        # What was generated, so a later refresh can tell hand edits apart.
+        self._compose_generated = self._compose_box_texts()
+
+    def _compose_box_texts(self):
+        return (self.txt_editable_preview.get("1.0", "end"), self.txt_fixed_preview.get("1.0", "end"))
+
+    def _refresh_compose_preview_unless_edited(self):
+        """Runs when Tab 3 opens: rebuilds the preview from Tab 1, so it never
+        sends details Tab 1 no longer holds - unless the EDITABLE or FIXED box
+        was edited by hand, which a rebuild would throw away. Then only the
+        subject is refreshed and the '🔄 Refresh preview' button stays the
+        way to rebuild."""
+        if self._compose_box_texts() == getattr(self, "_compose_generated", None):
+            self._refresh_compose_preview()
+        else:
+            self._refresh_subject_preview_only()
+
+    def _fill_compose_preview(self):
         lang_code = self._current_lang_code()
         event_name = self.var_event_name.get()
-        event_id = self.var_event_id.get()
+        event_id = self.var_event_id.get().strip()
         location = self.var_location.get()
         budget = self.var_budget.get()
         event_date = get_date_str(self.date_event)
@@ -1899,7 +1856,7 @@ class RSVPApp(tk.Tk):
             messagebox.showwarning("Empty", "The FIXED box is empty.")
             return
         self.fixed_overrides[lang_code] = text
-        history.save_fixed_overrides(self.fixed_overrides)
+        settings.save_fixed_overrides(self.fixed_overrides)
         messagebox.showinfo(
             "Saved",
             f"Saved your edited wording as the new default FIXED text for "
@@ -1923,7 +1880,7 @@ class RSVPApp(tk.Tk):
             )
             return
         self.fixed_overrides[lang_code] = ""
-        history.save_fixed_overrides(self.fixed_overrides)
+        settings.save_fixed_overrides(self.fixed_overrides)
         self._refresh_compose_preview()
         messagebox.showinfo("Reset", f"{self.combo_email_lang.get()} FIXED wording reset to the system default.")
 
@@ -1935,7 +1892,7 @@ class RSVPApp(tk.Tk):
                                              "'Reset prompt to system default' to restore the built-in one.")
             return
         self.prompt_overrides["single"] = custom_prompt
-        history.save_prompt_overrides(self.prompt_overrides)
+        settings.save_prompt_overrides(self.prompt_overrides)
         messagebox.showinfo(
             "Saved",
             "Custom prompt template saved.\n\n"
@@ -1947,7 +1904,7 @@ class RSVPApp(tk.Tk):
     def _reset_custom_prompt(self):
         """Reset prompt back to system default (with icon instructions) — NOT blank."""
         self.prompt_overrides["single"] = ""
-        history.save_prompt_overrides(self.prompt_overrides)
+        settings.save_prompt_overrides(self.prompt_overrides)
         self.txt_custom_prompt.config(state="normal")
         self.txt_custom_prompt.delete("1.0", "end")
         self.txt_custom_prompt.insert("1.0", DEFAULT_PROMPT_SINGLE)
@@ -2227,53 +2184,38 @@ class RSVPApp(tk.Tk):
         if not self.recipients:
             messagebox.showwarning("No recipients", "Go to Tab 2 and load the recipient list first.")
             return
-        # BUG ĐÃ SỬA: trước đây bước này bị THIẾU ở đây (dù đã có ở
-        # _save_to_history() và _update_history_from_tab1()) — nên nếu bạn
-        # gửi invite mà CHƯA từng tự bấm '💾 Save to Excel' ở Tab 2 sau khi
-        # đặt Event ID, cột RecipientFile ghi vào History lúc gửi vẫn là tên
-        # file GỐC bạn Browse vào (vd file TEMPLATE dùng chung nhiều sự kiện)
-        # thay vì file 'Participant_List_{EventID}.xlsx' đã chuẩn hoá — dù
-        # file chuẩn hoá đó CÓ THỂ đã tồn tại sẵn trên đĩa từ 1 bước khác.
+        event_id = self.var_event_id.get().strip()
+        if not event_id:
+            # Without it the subject carries no ID, so Scan Inbox could never
+            # match the replies and nothing could be recorded in History.
+            messagebox.showwarning("Missing Event ID", "Enter the Event ID on Tab 1 before sending.")
+            return
         self._save_recipients_to_db(silent=True)
         self._refresh_subject_preview_only()
         subject = self._compose_subject
         body = self._compose_full_body()
-        voting_options = self.var_voting_options.get().strip()
         auto_send = self.var_auto_send.get()
         send_to_override = self.var_send_to_override.get().strip() or None
         is_update = self._is_update_mode()
         is_gift = self._is_gift_mode()
         # Everything the send needs is read from the widgets here, on the Tk
-        # thread, before the worker starts. The History record used to be
-        # built inside the worker, which read Tk variables off the main
-        # thread.
+        # thread, before the worker starts.
+        record = self._event_details_record()
+        record["EmailLanguage"] = self.combo_email_lang.get()
+        record["TotalInvited"] = len(self.recipients)
+        if self.recipient_file.get():
+            record["RecipientFile"] = self.recipient_file.get()
         request = InviteRequest(
             recipients=list(self.recipients),
             subject=subject,
             body=body,
-            voting_options=voting_options,
+            # Fixed: Scan Inbox, the Yes/Maybe calendar list, attendance and
+            # reminders all read exactly these three answers.
+            voting_options="Yes;No;Maybe",
             auto_send=auto_send,
             send_to_override=send_to_override,
             mode="gift" if is_gift else ("update" if is_update else "invite"),
-            record={
-                "EventID": self.var_event_id.get(),
-                "EventName": self.var_event_name.get(),
-                "EventDate": get_date_str(self.date_event),
-                "Deadline": get_date_str(self.date_deadline),
-                "Location": self.var_location.get(),
-                "Budget": self.var_budget.get(),
-                "EmailLanguage": self.combo_email_lang.get(),
-                "OrganizerNote": self._source_note_text(),
-                "RecipientFile": self.recipient_file.get(),
-                "TotalInvited": len(self.recipients),
-                "EventMode": self.var_event_mode.get(),
-                "Organizer": self.var_organizer.get(),
-                "GuestOfHonor": self.var_guest_of_honor.get(),
-                "GiftBudget": self.var_gift_budget.get(),
-                "GiftDeadline": get_date_str(self.date_gift_deadline),
-                "StartTime": self.var_start_time.get(),
-                "EndTime": self.var_end_time.get(),
-            },
+            record=record,
         )
         history_path = self.history_path.get()
 
@@ -2283,18 +2225,12 @@ class RSVPApp(tk.Tk):
                 # rsvp/services/invite.py, where a test can check exactly
                 # what reaches Outlook. The History row is written at send
                 # time (SentDate or UpdateInviteDate by mode; neither for a
-                # gift notice) and Tab 4's later Save updates the same row.
+                # gift notice); later scans update its vote counts.
                 result = send_invite(
                     self.outlook,
                     lambda record: db.save_event_record(record, history_path),
                     request,
                 )
-                # Tab 5 uses both times to find and attach the original and
-                # the update email to the Calendar Invite.
-                if is_update:
-                    self._update_invite_sent_date = result.send_time
-                elif not is_gift:
-                    self._invite_sent_date = result.send_time
                 if result.history_written:
                     self.after(0, self._refresh_history_tree)
                 self.after(0, lambda: messagebox.showinfo("Done", result.message))
@@ -2313,194 +2249,124 @@ class RSVPApp(tk.Tk):
     # ══════════════════════════════════════════════════════════════════
     def _build_tab_collect(self):
         f = self.tab_collect.body
+        gap = {"fill": "x", "pady": (0, 16)}
 
-        info_frame = ttk.LabelFrame(f, text="🔍 How 'Scan Inbox' works — read before using")
-        info_frame.pack(fill="x", padx=10, pady=(8, 4))
-        self._make_wrapping_label(
-            info_frame, justify="left",
-            text=(
-                "• Scans the ENTIRE Inbox (every folder, including subfolders) for emails whose "
-                "Subject contains the EXACT current Event ID from Tab 1 — it doesn't matter whether "
-                "the email is the original invite, an update invite, or a reminder, as long as the "
-                "Subject contains the Event ID it counts.\n"
-                "• For each sender, only the MOST RECENT vote is kept if they clicked more than once "
-                "(votes are not added up).\n"
-                "• Does NOT re-run automatically when you change the Event ID on Tab 1 — the table "
-                "below only updates when you click '📨 Scan Inbox for Vote results'. If you switch to "
-                "a different event and forget to click it again, the table will still show the results "
-                "of the OLD Event ID (check the status line right below to be sure)."
-            ),
-            font=("Arial", 8)).pack(anchor="w", padx=8, pady=(4, 2))
-        self.lbl_scan_status = ttk.Label(info_frame, text="", font=("Arial", 9, "bold"))
-        self.lbl_scan_status.pack(anchor="w", padx=8, pady=(2, 6))
+        scan = Card(f, "Scan Inbox",
+                    "Finds every vote reply whose subject contains this Event ID — invite, update or "
+                    "reminder alike — in every folder of your mailbox. Each person's latest vote counts.")
+        scan.pack(**gap)
+        ttk.Button(scan.actions, text="📨 Scan Inbox for Vote results", style="Primary.TButton",
+                   command=self._collect_responses).pack()
+        self.banner_scan = Banner(scan.body, self.fonts)
+        self.banner_scan.pack(fill="x")
+        WrapLabel(scan.body, style="Hint.TLabel",
+                  text="The table only changes when you scan: after switching events, scan again (the line "
+                       "above says which event the table shows). Results, manual corrections and the "
+                       "Yes / No / Maybe counts in History are saved automatically.").pack(fill="x", pady=(8, 0))
 
-        top = ttk.Frame(f)
-        top.pack(fill="x", padx=10, pady=8)
-        ttk.Button(top, text="📨 Scan Inbox for Vote results", command=self._collect_responses)\
-            .pack(side="left", padx=4)
-        ttk.Button(top, text="🗂 Save event", command=self._save_to_history)\
-            .pack(side="left", padx=4)
+        self.var_kpi_total = tk.StringVar(value="0")
+        self.var_kpi_yes = tk.StringVar(value="0")
+        self.var_kpi_no = tk.StringVar(value="0")
+        self.var_kpi_maybe = tk.StringVar(value="0")
+        self.var_kpi_pending = tk.StringVar(value="0")
+        kpi_row(f, [
+            ("Tracked", self.var_kpi_total, {}),
+            ("Yes", self.var_kpi_yes, {"dot": COLORS["success_fill"]}),
+            ("No", self.var_kpi_no, {"dot": COLORS["destructive"]}),
+            ("Maybe", self.var_kpi_maybe, {"dot": COLORS["warning"]}),
+            ("No response", self.var_kpi_pending, {"dot": COLORS["muted_foreground"]}),
+        ]).pack(**gap)
 
-        # ── folder scanning note ──
-        # Automatic: tool scans ALL folders (AdvancedSearch) to find vote results
-        # No manual folder selection needed — kept simple for better UX
-        self.var_scan_all_folders = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            f,
-            text="✅ Tool automatically scans ALL folders for vote results (powered by AdvancedSearch)",
-            variable=self.var_scan_all_folders,
-        ).pack(anchor="w", padx=10, pady=6)
-
-        ttk.Label(f, text="✅ Responded / not yet responded (based on Tab 2 + scanned votes):",
-                  font=("Arial", 9, "bold")).pack(anchor="w", padx=10, pady=(4, 0))
-        # MỚI: double-click ô "Vote" để sửa tay — dùng cho những người chỉ
-        # đổi ý/báo miệng thay vì bấm lại nút Vote trong email (xem
-        # _on_response_tree_double_click()/_commit_response_vote_edit()).
-        # MỚI: thêm hẳn 1 cột checkbox "Manual edit" (✅/⬜) bên trái cột
-        # "Name" — tick vào đó để mở dropdown Yes/No/Maybe sửa ngay (giống
-        # double-click ô Vote); bỏ tick lại (với dòng ĐANG sửa tay) để trả
-        # phiếu vote đó về cho lần Scan Inbox sau tự do cập nhật (xem
-        # _on_response_manual_check_click()).
-        self._make_wrapping_label(
-            f, text="💡 Tick the \"Manual edit\" checkbox (or double-click the \"Vote\" cell) to correct "
-                    "someone's vote by hand (Yes/No/Maybe) — useful when they just told you verbally or "
-                    "changed their mind instead of clicking the button in the email. Manually-edited rows "
-                    "are shown with a light blue background and stay checked. Un-ticking the checkbox for "
-                    "an already manually-edited row lets the NEXT \"📨 Scan Inbox for Vote results\" freely "
-                    "update it again from real emails; leaving it ticked KEEPS your manual value even after "
-                    "re-scanning, unless a NEWER email vote is found for that same person.",
-            font=("Arial", 8, "italic")).pack(anchor="w", padx=10)
+        responses = Card(f, "Responses",
+                         "Everyone on Recipients (group addresses expanded) and their latest vote.")
+        responses.pack(**gap)
+        # Tick "Manual edit" (or double-click "Vote") to correct a vote by hand
+        # — see _on_response_manual_check_click()/_commit_response_vote_edit().
+        WrapLabel(responses.body, style="Hint.TLabel",
+                  text="Tick ✏️ (or double-click a Vote) to correct a vote by hand, e.g. someone told you "
+                       "in person. Corrected rows are tinted blue and survive later scans, unless that "
+                       "person votes again by email; untick to let the next scan update them. Yellow rows "
+                       "voted but are not on the list.").pack(fill="x", pady=(0, 10))
         cols = ("manual_edit", "name", "email", "vote", "received")
-        tree_container, self.tree_responses = make_scrollable_treeview(f, columns=cols, height=10)
+        tree_container, self.tree_responses = make_scrollable_treeview(responses.body, columns=cols, height=10)
         headers = ["✏️", "Name", "Email", "Vote", "Received At"]
-        widths = [70, 220, 260, 120, 160]
+        widths = [56, 220, 260, 110, 150]
         for c, label, w in zip(cols, headers, widths):
-            self.tree_responses.heading(c, text=label)
             anchor = "center" if c == "manual_edit" else "w"
-            self.tree_responses.column(c, width=w, anchor=anchor)
+            self.tree_responses.heading(c, text=label, anchor=anchor)
+            self.tree_responses.column(c, width=w, anchor=anchor, stretch=c != "manual_edit")
         self.tree_responses.bind("<Double-1>", self._on_response_tree_double_click)
         self.tree_responses.bind("<Button-1>", self._on_response_manual_check_click)
-        tree_container.pack(fill="both", expand=True, padx=10, pady=6)
-
-        self.lbl_summary = ttk.Label(f, text="No responses scanned yet.", font=("Arial", 10, "bold"))
-        self.lbl_summary.pack(anchor="w", padx=10, pady=4)
+        tree_container.pack(fill="both", expand=True)
+        self.lbl_summary = WrapLabel(responses.body, text="No responses scanned yet.", style="Muted.TLabel")
+        self.lbl_summary.pack(fill="x", pady=(10, 0))
 
         # ══════════════════════════════════════════════════════════════
-        # KHUNG PHÍA DƯỚI — CHƯA PHẢN HỒI (pending), + soạn/gửi email nhắc nhở
+        # CHƯA PHẢN HỒI (pending), + soạn/gửi email nhắc nhở
         # ══════════════════════════════════════════════════════════════
-        ttk.Separator(f).pack(fill="x", padx=10, pady=8)
-        self.lbl_deadline_banner = ttk.Label(f, text="", font=("Arial", 10, "bold"))
-        self.lbl_deadline_banner.pack(anchor="w", padx=10, pady=(0, 4))
-
-        ttk.Label(f, text="🕓 NOT yet responded (no vote) — auto-updates every time you Scan Inbox:",
-                  font=("Arial", 9, "bold"), foreground="#8a4b00").pack(anchor="w", padx=10, pady=(2, 0))
+        pending = Card(f, "Not yet responded",
+                       "Updated by every scan. Remind them with an email that keeps the voting buttons.")
+        pending.pack(fill="x")
+        self.banner_deadline = Banner(pending.body, self.fonts)
+        self.banner_deadline.pack(fill="x", pady=(0, 10))
         pending_cols = ("name", "email")
-        pending_container, self.tree_pending = make_scrollable_treeview(f, columns=pending_cols, height=6)
+        pending_container, self.tree_pending = make_scrollable_treeview(pending.body, columns=pending_cols, height=6)
         for c, label, w in zip(pending_cols, ["Name", "Email"], [280, 320]):
-            self.tree_pending.heading(c, text=label)
+            self.tree_pending.heading(c, text=label, anchor="w")
             self.tree_pending.column(c, width=w)
-        pending_container.pack(fill="both", expand=False, padx=10, pady=6)
+        pending_container.pack(fill="x")
 
-        reminder_frame = ttk.LabelFrame(f, text="📨 Compose & send a reminder email to people who haven't responded")
-        reminder_frame.pack(fill="x", padx=10, pady=6)
-
-        rbtn = ttk.Frame(reminder_frame)
-        rbtn.pack(fill="x", padx=6, pady=4)
-        ttk.Label(rbtn, text="Language:").pack(side="left", padx=(0, 4))
+        ttk.Label(pending.body, text="Reminder email", style="CardTitle.TLabel").pack(anchor="w", pady=(18, 8))
+        rbtn = ttk.Frame(pending.body)
+        rbtn.pack(fill="x")
+        ttk.Label(rbtn, text="Language", style="Field.TLabel").pack(side="left", padx=(0, 8))
         self.combo_reminder_lang = ttk.Combobox(
             rbtn, width=26, state="readonly",
             values=[LANG_LABELS["en"], LANG_LABELS["ja"], LANG_LABELS["vi"], LANG_LABELS["bilingual"]],
         )
         self.combo_reminder_lang.current(0)  # default: English
-        self.combo_reminder_lang.pack(side="left", padx=(0, 6))
-        # Changing the language auto-regenerates the draft right away (same
-        # behavior as combo_email_lang on Tab 3), so the user sees the new
-        # language's content immediately instead of needing an extra click
-        # on "Regenerate".
+        self.combo_reminder_lang.pack(side="left")
+        # Changing the language regenerates the draft right away, like Tab 3.
         self.combo_reminder_lang.bind("<<ComboboxSelected>>", lambda e: self._generate_reminder_draft())
-        ttk.Button(rbtn, text="🔄 Regenerate reminder text (from Tab 1)",
-                   command=self._generate_reminder_draft).pack(side="left", padx=(0, 6))
+        ttk.Button(rbtn, text="🔄 Regenerate text", command=self._generate_reminder_draft)\
+            .pack(side="left", padx=(8, 0))
         self.var_reminder_attach = tk.BooleanVar(value=True)
-        ttk.Checkbutton(rbtn, text="📎 Attach original invite email (looked up from RSVP_History)",
-                        variable=self.var_reminder_attach).pack(side="left", padx=6)
-        # The "Send now without review" checkbox has been REMOVED — per the
-        # requirement, EVERY reminder email (both RSVP and Gift, see Tab 6)
-        # now ALWAYS only opens Outlook so the user can review it and click
-        # Send themselves; there is no longer an auto-send option from
-        # within the app (see _send_reminder() below — now always called
-        # with auto_send=False). The BACKGROUND script run via Task
-        # Scheduler (send_scheduled_reminders.py) is a SEPARATE case — it
-        # still sends directly as before, since that scenario has no one
-        # sitting at the machine.
-
-        ttk.Label(reminder_frame, text="Reminder email content (review/edit before sending):",
-                  font=("Arial", 9, "italic")).pack(anchor="w", padx=6, pady=(4, 0))
+        ttk.Checkbutton(pending.body, text="📎 Attach original invite email (looked up in Sent Items)",
+                        variable=self.var_reminder_attach).pack(anchor="w", pady=(10, 8))
+        # Every reminder (RSVP here, Gift on Tab 6) only opens Outlook for
+        # review; there is deliberately no auto-send option.
         reminder_text_container, self.txt_reminder_body = make_scrollable_text(
-            reminder_frame, width=100, height=7)
-        reminder_text_container.pack(fill="x", padx=6, pady=4)
-
+            pending.body, width=40, height=7)
+        reminder_text_container.pack(fill="x")
         self.lbl_reminder_send = ttk.Button(
-            reminder_frame, text="📨 Send reminder email to 0 people who haven't responded",
-            command=self._send_reminder)
-        self.lbl_reminder_send.pack(anchor="w", padx=6, pady=(2, 8))
+            pending.body, text="📨 Send reminder email to 0 people who haven't responded",
+            style="Primary.TButton", command=self._send_reminder)
+        self.lbl_reminder_send.pack(anchor="w", pady=(12, 0))
 
-        # MỚI: đã BỎ khối "Actual cost tracking (Actual attendees/Cost per
-        # person/Total income/Total expense/Calculate balance)" khỏi UI
-        # theo yêu cầu — tính năng theo dõi tổng quát này đã được thay thế
-        # hoàn toàn bởi Tab 5 "Attendance & Payment" (theo dõi CHI TIẾT
-        # theo TỪNG NGƯỜI — actual attend/free/amount — thay vì chỉ vài con
-        # số tổng gộp gõ tay). Các cột "ActualAttendees"/"CostPerPerson"/
-        # "TotalIncome"/"TotalExpense"/"Balance" vẫn còn trong database
-        # (không xoá schema, để KHÔNG mất dữ liệu các sự kiện CŨ đã từng
-        # điền — xem Tab 7 Event History nếu cần xem lại) — chỉ không còn
-        # ai ghi/đọc chúng nữa từ giờ (xem _save_to_history(), đã bỏ 5 key
-        # này khỏi record để merge-preserve giữ nguyên giá trị cũ, không ghi
-        # đè thành rỗng).
         self._update_scan_status_banner()
-
-    def _load_folder_list(self):
-        def worker():
-            try:
-                paths = self.outlook.list_folder_paths()
-            except Exception as e:
-                err_msg = str(e)
-                self.after(0, lambda: messagebox.showerror(
-                    "Error", f"Could not load folder list from Outlook:\n{err_msg}"))
-                return
-            self.after(0, lambda: self._fill_folder_listbox(paths))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _fill_folder_listbox(self, paths):
-        self.list_folders.delete(0, "end")
-        for p in paths:
-            self.list_folders.insert("end", p)
-        # Pre-select "Inbox" if present
-        for i in range(self.list_folders.size()):
-            if self.list_folders.get(i).strip().lower() == "inbox":
-                self.list_folders.selection_set(i)
-
-    def _selected_scan_folders(self):
-        sel = self.list_folders.curselection()
-        paths = [self.list_folders.get(i) for i in sel]
-        if not paths:
-            paths = ["Inbox"]  # default if nothing loaded/selected yet
-        elif "inbox" not in [p.lower() for p in paths]:
-            paths = ["Inbox"] + paths  # Inbox is always included
-        return paths
 
     def _collect_responses(self):
         if not self.recipients:
             messagebox.showwarning("No list", "Go to Tab 2 and load the recipient list first.")
             return
-        event_id = self.var_event_id.get()
-        scan_all = self.var_scan_all_folders.get()
-        folder_paths = None if scan_all else self._selected_scan_folders()
+        event_id = self.var_event_id.get().strip()
+        if not event_id:
+            # An empty ID is contained in every subject, so the scan would
+            # count the votes of every voting email in the mailbox.
+            messagebox.showwarning("Missing Event ID",
+                                   "Enter the Event ID on Tab 1 first — Scan Inbox looks for it "
+                                   "in the Subject of the vote replies.")
+            return
+        recipients = list(self.recipients)
 
         def worker():
+            # Only the Outlook calls run on this thread; the results are
+            # merged and shown on the Tk thread by _apply_scan_results().
             try:
-                responses, skipped = self.outlook.scan_voting_responses(
-                    event_id, folder_paths=folder_paths, scan_all=scan_all)
+                # Every folder of the mailbox, not just the Inbox.
+                responses, skipped = self.outlook.scan_voting_responses(event_id, scan_all=True)
+                # Group rows on Tab 2 are tracked as their real members.
+                roster = self._build_effective_roster(recipients)
             except Exception as e:
                 err_msg = str(e)
                 self.after(0, lambda: messagebox.showerror(
@@ -2508,50 +2374,63 @@ class RSVPApp(tk.Tk):
                              "Check that Outlook is open & signed in, and pywin32 is installed."
                 ))
                 return
-            # MỚI: các phiếu vote đã SỬA TAY trước đó (self.responses[...]
-            # ["manual"] == True, xem _commit_response_vote_edit()) KHÔNG
-            # được để lần Scan Inbox này ghi đè mất — GIỮ LẠI phiếu sửa tay,
-            # TRỪ KHI vừa quét được 1 email vote MỚI HƠN đúng người đó (so
-            # theo "received" — nghĩa là họ đã thực sự bấm Vote lại sau thời
-            # điểm bạn sửa tay, nên coi email mới đó là quyết định mới nhất,
-            # đáng tin hơn). Không có mốc thời gian nào để so (thiếu
-            # "received" ở 1 trong 2 phía) thì ưu tiên GIỮ bản sửa tay, an
-            # toàn hơn là để mất 1 sửa đổi thủ công một cách âm thầm.
-            merged = dict(responses)
-            for email_key, prev in self.responses.items():
-                if not prev.get("manual"):
-                    continue
-                new_scan = merged.get(email_key)
-                prev_time = prev.get("received")
-                new_time = new_scan.get("received") if new_scan else None
-                keep_manual = (
-                    new_scan is None or prev_time is None or new_time is None or new_time <= prev_time
-                )
-                if keep_manual:
-                    merged[email_key] = prev
-            self.responses = merged
-            # Ghi lại ĐÚNG Event ID vừa quét + thời điểm quét, để banner trạng
-            # thái ở đầu Tab 4 báo được chính xác dữ liệu bên dưới thuộc về sự
-            # kiện nào — tránh hiểu nhầm "dữ liệu event mới" trong khi thực ra
-            # đó là kết quả CŨ còn sót lại từ lần Scan của 1 Event ID khác.
-            self._last_scanned_event_id = event_id
-            self._last_scan_time = datetime.now()
-            # Tự động mở rộng bất kỳ dòng nào trong Tab 2 là group email (Exchange
-            # Distribution List, kể cả sub-group lồng bên trong) thành từng thành
-            # viên thật, để khung 'Đã/Chưa phản hồi' liệt kê đúng từng người —
-            # NGAY CẢ với sự kiện đã gửi mời từ trước, không cần quay lại Tab 2 bấm
-            # '🔎 Expand group emails' rồi gửi lại (xem _build_effective_roster()).
-            roster = self._build_effective_roster()
-            self.after(0, lambda: self._refresh_response_tree(skipped, roster))
-            self.after(0, self._update_scan_status_banner)
-            # MỚI: tự động lưu kết quả vừa quét được vào sheet "Responded
-            # result" của Attendance_Payment_{EventID}.xlsx ngay sau khi
-            # Scan Inbox xong (best-effort, không thông báo lỗi nếu có) —
-            # để "Load setup from selected event" ở Tab 1 sau này khôi phục
-            # lại được kết quả quét gần nhất mà KHÔNG cần quét lại Outlook.
-            self.after(0, lambda: self._save_responded_result_to_file(silent=True))
+            self.after(0, lambda: self._apply_scan_results(event_id, responses, skipped, roster))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_scan_results(self, event_id, scanned, skipped, roster):
+        """Merges a finished Scan Inbox into self.responses, redraws Tab 4 and
+        saves it. A vote corrected by hand (see _commit_response_vote_edit())
+        is kept unless a NEWER email vote from that person was found; without
+        a time on either side the manual vote wins, rather than silently
+        losing a manual correction."""
+        # Outlook returns timezone-aware datetimes, while manual edits and
+        # rows loaded from the database are naive local times; comparing the
+        # two raises TypeError. The wall-clock value is already local time.
+        for info in scanned.values():
+            received = info.get("received")
+            if received is not None and getattr(received, "tzinfo", None) is not None:
+                info["received"] = received.replace(tzinfo=None)
+        # The baseline is what is known for THIS event: the table in memory if
+        # it was scanned for it, else what was saved for it (e.g. after a
+        # restart). Never another event's votes; never nothing when votes are
+        # saved, or the first scan after a restart would discard saved manual
+        # corrections, and an empty one would wipe every saved vote.
+        if self._last_scanned_event_id == event_id:
+            previous = self.responses
+        else:
+            try:
+                previous = db.load_responses(event_id, self.history_path.get())[0]
+            except Exception:
+                previous = {}
+        found_before = sum(1 for info in previous.values() if not info.get("manual"))
+        if not scanned and found_before:
+            # Far more likely a lagging search index than every vote email
+            # vanishing at once - and saving would wipe the stored votes.
+            messagebox.showwarning(
+                "No votes found",
+                f"Scan Inbox found no vote replies for '{event_id}' this time, but {found_before} "
+                "were found before. The previous results were kept and nothing was saved.\n\n"
+                "Outlook's search index may still be updating — try again in a minute.")
+            return
+        merged = dict(scanned)
+        for email_key, prev in previous.items():
+            if not prev.get("manual"):
+                continue
+            new_scan = merged.get(email_key)
+            prev_time = prev.get("received")
+            new_time = new_scan.get("received") if new_scan else None
+            if new_scan is None or prev_time is None or new_time is None or new_time <= prev_time:
+                merged[email_key] = prev
+        self.responses = merged
+        # The banner at the top of Tab 4 reports which Event ID the table
+        # belongs to, so stale results of another event are never mistaken
+        # for the current one.
+        self._last_scanned_event_id = event_id
+        self._last_scan_time = datetime.now()
+        self._refresh_response_tree(skipped, roster)
+        self._autosave_scan_results()
+        self._update_scan_status_banner()
 
     def _update_scan_status_banner(self):
         """Cập nhật dòng trạng thái ở đầu Tab 4 — cho biết bảng bên dưới
@@ -2565,44 +2444,65 @@ class RSVPApp(tk.Tk):
 
         if not current_id:
             text = "🔍 Current Event ID: (not entered on Tab 1 yet)"
-            color = "#8a4b00"
+            tone = "warning"
         elif last_id is None:
             text = (f"🔍 Current Event ID: '{current_id}' — NOT scanned yet this session. "
                     f"Click '📨 Scan Inbox for Vote results' to fetch results.")
-            color = "#8a4b00"
+            tone = "warning"
         elif last_id != current_id:
             text = (f"⚠️ The table below is showing results for the OLD Event ID ('{last_id}', scanned at "
                     f"{last_time_str}) — NOT the current Event ID ('{current_id}'). Click Scan Inbox "
                     f"again to refresh!")
-            color = "#c42b1c"
+            tone = "danger"
+        elif not getattr(self, "_scan_in_history", True):
+            text = (f"✅ Showing results for Event ID '{current_id}' — scanned at {last_time_str}. "
+                    f"⚠️ This event is not in History yet, so its Yes/No/Maybe counts are not recorded "
+                    f"there: save it on Tab 1 ('💾 Save event details').")
+            tone = "warning"
         else:
             text = f"✅ Showing results for Event ID '{current_id}' — scanned at {last_time_str}."
-            color = "#0e700e"
-        self.lbl_scan_status.config(text=text, foreground=color)
+            tone = "success"
+        self.banner_scan.set(text, tone)
 
-    def _build_effective_roster(self):
+    def _table_belongs_to_tab1_event(self, what):
+        """True when Tab 4's table was scanned for the Event ID on Tab 1.
+        Everything derived from it - the not-yet-responded list, the
+        Yes/Maybe list - names people of THAT event, so a {what} built from a
+        stale table would reach the wrong audience. Warns and returns False
+        otherwise."""
+        current_id = self.var_event_id.get().strip()
+        if current_id and current_id == self._last_scanned_event_id:
+            return True
+        scanned = self._last_scanned_event_id or "(nothing scanned yet)"
+        messagebox.showwarning(
+            "Scan this event first",
+            f"The vote table on Tab 4 belongs to Event ID '{scanned}', not '{current_id}' on Tab 1, "
+            f"so the {what} would go to the wrong people.\n\n"
+            "Click '📨 Scan Inbox for Vote results' on Tab 4 first.")
+        return False
+
+    def _build_effective_roster(self, recipients=None):
         """Trả về roster THỰC TẾ để đối chiếu vote ở Tab 4 — mỗi dòng trong
         Tab 2 là group email (Exchange Distribution List) được TỰ ĐỘNG thay
         bằng các thành viên thật (đệ quy qua sub-group, xem
         self.outlook.expand_group_members()), để khung 'Đã/Chưa phản hồi'
         liệt kê đúng TỪNG NGƯỜI thay vì 1 dòng group email mơ hồ.
+        `recipients` defaults to Tab 2's list; the scan passes a copy taken
+        on the Tk thread.
 
         KHÔNG sửa self.recipients (Tab 2 vẫn giữ nguyên như đã lưu) — chỉ áp
         dụng cho việc THEO DÕI/HIỂN THỊ ở Tab 4. Muốn áp dụng vĩnh viễn vào
         chính Tab 2 (vd để lần gửi mời SAU tự đúng luôn từ đầu), dùng nút
-        '🔎 Expand group emails in list' + 'Save to Excel' ở Tab 2.
+        '🔎 Expand group emails' ở Tab 2.
 
         Kết quả mỗi group được CACHE lại (self._group_expansion_cache) để
         không phải hỏi lại Exchange GAL mỗi lần bấm Scan Inbox trong cùng
         phiên làm việc — chỉ query lần đầu tiên gặp mỗi group email."""
-        if not hasattr(self, "_group_expansion_cache"):
-            self._group_expansion_cache = {}  # email.lower() -> list[(name,email)] hoặc None
-
         # The merge and de-duplication rules live in rsvp/domain/roster.py,
         # which is testable without Outlook. Expansion itself needs the
         # address book, so it is passed in rather than imported there.
         return merge_expanded_roster(
-            self.recipients,
+            self.recipients if recipients is None else recipients,
             self.outlook.expand_group_members,
             cache=self._group_expansion_cache,
         )
@@ -2615,11 +2515,11 @@ class RSVPApp(tk.Tk):
         # email, không nên chạy lại chỉ vì sửa 1 ô).
         self._last_responses_roster = roster
         self.tree_responses.delete(*self.tree_responses.get_children())
-        self.tree_responses.tag_configure("extra", background="#fff3cd")
+        self.tree_responses.tag_configure("extra", background=COLORS["warning_soft"])
         # MỚI: tô nền xanh nhạt cho các dòng có phiếu vote đã được SỬA TAY
         # (double-click ô Vote — xem _commit_response_vote_edit()), để phân
         # biệt trực quan với phiếu quét được thật sự từ email.
-        self.tree_responses.tag_configure("manual", background="#dceeff")
+        self.tree_responses.tag_configure("manual", background=COLORS["info_soft"])
         counts = {"Yes": 0, "No": 0, "Maybe": 0, "No response": 0}
         matched_emails = set()
         pending = []  # list[(name, email)] — người trong roster mà CHƯA vote gì
@@ -2674,6 +2574,12 @@ class RSVPApp(tk.Tk):
             self.tree_responses.insert("", "end", values=(manual_display, display_name, email, vote, received),
                                         tags=tags)
 
+        self._vote_counts = dict(counts)
+        self.var_kpi_total.set(str(len(roster)))
+        self.var_kpi_yes.set(str(counts.get("Yes", 0)))
+        self.var_kpi_no.set(str(counts.get("No", 0)))
+        self.var_kpi_maybe.set(str(counts.get("Maybe", 0)))
+        self.var_kpi_pending.set(str(counts.get("No response", 0)))
         extra_note = (f"  |  ➕ {len(extra_rows)} people outside the list/group also responded "
                       f"(added to the counts below)") if extra_rows else ""
         group_note = "" if len(roster) == len(self.recipients) else \
@@ -2752,7 +2658,7 @@ class RSVPApp(tk.Tk):
             "manual": True,
         }
         self._refresh_response_tree(roster=getattr(self, "_last_responses_roster", None))
-        self._save_responded_result_to_file(silent=True)
+        self._autosave_scan_results()
 
     def _on_response_manual_check_click(self, event):
         """MỚI: single-click ô "Manual edit" (cột checkbox ✅/⬜, đầu tiên
@@ -2784,7 +2690,7 @@ class RSVPApp(tk.Tk):
             # Đang ✅ -> bấm để bỏ tick: chỉ xoá cờ manual, GIỮ NGUYÊN vote.
             info["manual"] = False
             self._refresh_response_tree(roster=getattr(self, "_last_responses_roster", None))
-            self._save_responded_result_to_file(silent=True)
+            self._autosave_scan_results()
         else:
             # Đang ⬜ -> bấm để tick: mở dropdown Vote ngay để chọn giá trị
             # sửa tay (commit sẽ tự đặt manual=True, xem _commit_response_vote_edit()).
@@ -2813,17 +2719,18 @@ class RSVPApp(tk.Tk):
             deadline_date = None
 
         if not pending:
-            banner = f"✅ Response deadline: {deadline_str}  —  everyone in Tab 2 has responded."
+            banner, tone = f"Response deadline {deadline_str} — everyone on Recipients has responded.", "success"
         elif deadline_date is None:
-            banner = f"🕓 {len(pending)} people still haven't responded. (Couldn't read deadline date: '{deadline_str}')"
+            banner, tone = (f"{len(pending)} people still haven't responded. (Couldn't read the deadline "
+                            f"'{deadline_str}'.)"), "warning"
         elif overdue:
-            banner = (f"🔴 Response deadline REACHED/PASSED ({deadline_str}) — {len(pending)} people still haven't "
-                       f"replied. Review the reminder content below, then click send.")
+            banner, tone = (f"Response deadline reached ({deadline_str}) — {len(pending)} people still haven't "
+                            f"replied. Review the reminder below, then send it."), "danger"
         else:
             days_left = (deadline_date - datetime.now().date()).days
-            banner = (f"🕓 Response deadline: {deadline_str} ({days_left} days left) — "
-                      f"{len(pending)} people still haven't replied.")
-        self.lbl_deadline_banner.config(text=banner)
+            banner, tone = (f"Response deadline {deadline_str} ({days_left} days left) — "
+                            f"{len(pending)} people still haven't replied."), "warning"
+        self.banner_deadline.set(banner, tone)
 
         self.lbl_reminder_send.config(
             text=f"📨 Send reminder email to {len(pending)} people who haven't responded")
@@ -2874,6 +2781,7 @@ class RSVPApp(tk.Tk):
         lang_code = LANG_LABEL_TO_CODE.get(lang_label, "en")
 
         draft = build_reminder_body(lang_code, event_name, event_date, location, deadline, budget)
+        self._generated_drafts["reminder"] = draft
         self.txt_reminder_body.delete("1.0", "end")
         self.txt_reminder_body.insert("1.0", draft)
 
@@ -2892,10 +2800,12 @@ class RSVPApp(tk.Tk):
         if not body:
             messagebox.showwarning(
                 "Empty content",
-                "Click '🔄 Regenerate reminder text' or type the content by hand before sending.")
+                "Click '🔄 Regenerate text' or type the content by hand before sending.")
             return
 
         event_id = self.var_event_id.get().strip()
+        if not self._table_belongs_to_tab1_event("reminder"):
+            return
         event_name = self.var_event_name.get()
         lang_label = self.combo_reminder_lang.get() or LANG_LABELS["en"]
         lang_code = LANG_LABEL_TO_CODE.get(lang_label, "en")
@@ -2908,18 +2818,15 @@ class RSVPApp(tk.Tk):
         subject = build_reminder_subject(lang_code, event_id, event_name)
 
         attach = self.var_reminder_attach.get()
-        # MỚI: LUÔN False — mọi email nhắc nhở giờ chỉ mở Outlook để review,
-        # không còn tuỳ chọn tự động gửi thẳng từ trong app (xem ghi chú ở
-        # nơi checkbox cũ đã bị bỏ, phía trên trong _build_tab_collect()).
-        auto_send = False
         sent_date_hint = self._lookup_sent_date_hint(event_id) if attach else None
         pending_count = len(pending)
+        history_path = self.history_path.get()
 
         def worker():
             try:
                 mail, attached = self.outlook.send_reminder_email(
                     pending, subject, body,
-                    auto_send=auto_send,
+                    auto_send=False,  # a reminder is only ever opened for review
                     attach_event_id=(event_id if attach else None),
                     attach_hint_datetime=sent_date_hint,
                 )
@@ -2936,52 +2843,25 @@ class RSVPApp(tk.Tk):
                 action = "opened"
                 review_note = " Review it, then click Send in Outlook."
 
-                # MỚI: luôn ghi lại thời điểm BẤM gửi/mở email nhắc nhở (bất
-                # kể auto_send hay review mode) vào cột "LastReminderSentDate"
-                # — giống cách _send_invite() ghi SentDate ngay lúc gửi/mở,
-                # để Tab 6 (Event History) luôn có dữ liệu để xem lại, thay
-                # vì bị trống như trước đây. Cột này CHỈ để tra cứu lịch sử,
-                # KHÔNG liên quan tới cơ chế chống gửi trùng của cột
-                # "ReminderSent" bên dưới (cột đó vẫn CHỈ set khi auto_send=
-                # True chắc chắn đã gửi, giữ nguyên logic cũ cho script nền).
+                # Ghi lại thời điểm mở email nhắc nhở vào "LastReminderSentDate"
+                # — giống cách _send_invite() ghi SentDate ngay lúc gửi/mở — để
+                # Tab 7 (Event History) có dữ liệu để xem lại.
                 history_log_note = ""
                 try:
-                    db.save_event_record(
-                        {"EventID": event_id,
-                         "LastReminderSentDate": datetime.now().strftime("%Y-%m-%d %H:%M")},
-                        self.history_path.get()
-                    )
-                    self.after(0, self._refresh_history_tree)
+                    if db.update_event(
+                            event_id,
+                            {"LastReminderSentDate": datetime.now().strftime("%Y-%m-%d %H:%M")},
+                            history_path):
+                        self.after(0, self._refresh_history_tree)
                 except Exception:
                     history_log_note = ("\n\n⚠️ Couldn't write the reminder-sent time to "
                                          "the database — "
                                          "the email was still " + action + " normally.")
 
-                # Chỉ đánh dấu "ReminderSent" trong History khi email THỰC SỰ
-                # đã được gửi (auto_send=True -> mail.Send() đã chạy) — nếu
-                # chỉ Display() để review thì chưa chắc bạn sẽ bấm Send, nên
-                # KHÔNG đánh dấu (để tránh script chạy nền hiểu nhầm là đã
-                # nhắc rồi trong khi thực ra chưa ai nhận được gì). Việc này
-                # giúp send_scheduled_reminders.py không gửi TRÙNG LẶP nếu
-                # bạn đã tự nhắc tay trước khi tới ngày deadline.
-                mark_note = ""
-                if auto_send:
-                    try:
-                        for rec in db.load_history(self.history_path.get()):
-                            if rec.get("EventID") == event_id:
-                                rec["ReminderSent"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-                                db.save_event_record(rec, self.history_path.get())
-                                mark_note = ("\n\nMarked in the database that this event HAS "
-                                             "been reminded — the background script (if Task "
-                                             "Scheduler is set up) will not send it again.")
-                                break
-                    except Exception:
-                        pass  # best-effort — không có History record thì thôi, không chặn việc gửi
-
                 self.after(0, lambda: messagebox.showinfo(
                     "Done",
                     f"{action.capitalize()} a reminder email for {pending_count} people who haven't responded."
-                    + review_note + attach_note + mark_note + history_log_note))
+                    + review_note + attach_note + history_log_note))
             except Exception as e:
                 err_msg = str(e)
                 self.after(0, lambda: messagebox.showerror(
@@ -2989,335 +2869,126 @@ class RSVPApp(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _export_report(self):
-        if not self.recipients:
-            messagebox.showwarning("No data", "There is no list/response data to export yet.")
-            return
-        event_id = self.var_event_id.get()
-        out_path = f"{event_id}_Report.xlsx"
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = "Details"
-        headers = ["Name", "Email", "Vote", "Received At"]
-        for i, h in enumerate(headers, start=1):
-            c = ws.cell(row=1, column=i, value=h)
-            c.font = Font(bold=True, color="FFFFFF")
-            c.fill = PatternFill("solid", fgColor="003366")
-            c.alignment = Alignment(horizontal="center")
-        colors = {"Yes": "C6EFCE", "No": "FFC7CE", "Maybe": "FFEB9C", "No response": "F0F0F0"}
-        row = 2
-        for iid in self.tree_responses.get_children():
-            _manual, name, email, vote, received = self.tree_responses.item(iid, "values")
-            ws.cell(row=row, column=1, value=name)
-            ws.cell(row=row, column=2, value=email)
-            vc = ws.cell(row=row, column=3, value=vote)
-            vc.fill = PatternFill("solid", fgColor=colors.get(vote, "FFFFFF"))
-            ws.cell(row=row, column=4, value=received)
-            row += 1
-        for col, w in zip("ABCD", [26, 32, 14, 18]):
-            ws.column_dimensions[col].width = w
-        wb.save(out_path)
-        abs_path = os.path.abspath(out_path)
-        self._last_report_path = out_path
-        # BUG ĐÃ SỬA: trước đây hộp thoại chỉ hiện tên file ngắn (vd
-        # "Farewell_Tu_Jul26_Report.xlsx"), không cho biết nó nằm ở THƯ MỤC
-        # nào — vì out_path là đường dẫn TƯƠNG ĐỐI, Python lưu vào đúng thư
-        # mục mà app đang chạy (working directory) — thường là thư mục chứa
-        # rsvp_app.py + RSVP_History.xlsx, nhưng không phải lúc nào cũng rõ
-        # ràng với người dùng. Giờ hiện luôn đường dẫn ĐẦY ĐỦ + có nút mở
-        # thẳng thư mục đó trong File Explorer.
-        self._show_export_done_dialog(abs_path)
-
-    def _show_export_done_dialog(self, abs_path):
-        win = tk.Toplevel(self)
-        win.title("Exported")
-        win.resizable(False, False)
-        frame = ttk.Frame(win, padding=16)
-        frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="✅ Report saved to:", font=("Arial", 10, "bold"))\
-            .pack(anchor="w")
-        path_entry = ttk.Entry(frame, width=70)
-        path_entry.insert(0, abs_path)
-        path_entry.configure(state="readonly")
-        path_entry.pack(anchor="w", pady=(4, 10), fill="x")
-
-        btns = ttk.Frame(frame)
-        btns.pack(anchor="e", fill="x")
-
-        def open_folder():
-            folder = os.path.dirname(abs_path)
-            try:
-                os.startfile(folder)  # chỉ có trên Windows — đúng môi trường chạy app này
-            except Exception as e:
-                messagebox.showerror("Couldn't open the folder", str(e))
-
-        ttk.Button(btns, text="📂 Open containing folder", command=open_folder).pack(side="left", padx=(0, 6))
-        ttk.Button(btns, text="OK", command=win.destroy).pack(side="left")
-        win.transient(self)
-        win.grab_set()
-
-    def _save_to_history(self):
-        # Đảm bảo danh sách người nhận đã được lưu ra Excel với TÊN CHUẨN HOÁ
-        # (Participant_List_{EventID}.xlsx) TRƯỚC khi ghi đường dẫn đó vào
-        # History — kể cả khi bạn quên bấm '💾 Save to Excel' ở Tab 2 trước.
-        # Nhờ vậy cột RecipientFile trong History luôn trỏ đúng tới file mới
-        # nhất, và Tab 1 'Load setup from selected event' sau này nạp lại
-        # được chính xác.
-        if self.recipients:
-            self._save_recipients_to_db(silent=True)
-
-        counts = {"Yes": 0, "No": 0, "Maybe": 0, "No response": 0}
-        for iid in self.tree_responses.get_children():
-            _, _, _, vote, _ = self.tree_responses.item(iid, "values")
-            counts[vote] = counts.get(vote, 0) + 1
-
-        record = {
-            "EventID": self.var_event_id.get(),
-            "EventName": self.var_event_name.get(),
-            "EventDate": get_date_str(self.date_event),
-            "Deadline": get_date_str(self.date_deadline),
-            "Location": self.var_location.get(),
-            "Budget": self.var_budget.get(),
-            "EmailLanguage": self.combo_email_lang.get(),
-            "OrganizerNote": self._source_note_text(),
-            "RecipientFile": self.recipient_file.get(),
-            "TotalInvited": len(self.recipients),
-            "Yes": counts.get("Yes", 0),
-            "No": counts.get("No", 0),
-            "Maybe": counts.get("Maybe", 0),
-            "NoResponse": counts.get("No response", 0),
-            "ReportFile": getattr(self, "_last_report_path", ""),
-            "CalendarSent": getattr(self, "_calendar_sent_flag", "Not sent"),
-            # MỚI: đã BỎ 5 key "ActualAttendees"/"CostPerPerson"/
-            # "TotalIncome"/"TotalExpense"/"Balance" khỏi record — khối UI
-            # nhập tay các số liệu này ở Tab 4 đã bị xoá (thay bằng Tab 5
-            # "Attendance & Payment" chi tiết hơn). KHÔNG ghi đè các cột
-            # này thành rỗng — save_event_record() dùng merge-preserve
-            # (chỉ cập nhật cột CÓ MẶT trong record), nên bỏ hẳn key ra
-            # khỏi đây giữ nguyên giá trị CŨ (nếu có, từ trước khi tính
-            # năng này bị gỡ) thay vì xoá mất.
-            "EventMode": self.var_event_mode.get(),
-            "Organizer": self.var_organizer.get(),
-            "GuestOfHonor": self.var_guest_of_honor.get(),
-            "GiftBudget": self.var_gift_budget.get(),
-            "GiftDeadline": get_date_str(self.date_gift_deadline),
-            "StartTime": self.var_start_time.get(),
-            "EndTime": self.var_end_time.get(),
-        }
-        # Use the ACTUAL time the confirmation email was sent (Tab 3), not
-        # whenever this "Save event to History" button happens to be clicked —
-        # those can differ by minutes, hours, or even days. Only set the key
-        # if we actually tracked a send this session; otherwise leave it out
-        # so db.save_event_record()'s existing "now" fallback still
-        # applies (e.g. re-saving an older event without re-sending).
-        if getattr(self, "_invite_sent_date", None):
-            record["SentDate"] = self._invite_sent_date.strftime("%Y-%m-%d %H:%M")
-        db.save_event_record(record, self.history_path.get())
-        self._refresh_history_combo()
-        self._refresh_history_tree()
-        # MỚI: "Save event" giờ không chỉ lưu vào History mà còn lưu snapshot
-        # kết quả Responded (Tab 4) vào sheet "Responded result" của
-        # Attendance_Payment_{EventID}.xlsx — để "Load setup from selected
-        # event" ở Tab 1 sau này khôi phục lại được mà KHÔNG cần quét lại
-        # Outlook (xem _load_from_history()). Cũng lưu lại luôn bảng
-        # Attendance & Payment (Tab 5) hiện tại, phòng khi có thay đổi chưa
-        # kịp auto-save (best-effort, không chặn nếu lỗi).
-        self._save_responded_result_to_file(silent=True)
-        self._save_attendance_sheet_to_file(silent=True)
-        messagebox.showinfo("Saved", f"Event '{record['EventID']}' saved to history.")
-
     # ══════════════════════════════════════════════════════════════════
     # TAB 5 — SEND MEETING (CALENDAR INVITE) TO EVERYONE WHO VOTED "YES"
     # ══════════════════════════════════════════════════════════════════
     def _build_tab_gift(self):
         f = self.tab_gift.body
-        pad = {"padx": 10, "pady": 6}
+        gap = {"fill": "x", "pady": (0, 16)}
 
-        ttk.Label(f, text="Gift Contribution tracking", font=("Arial", 11, "bold"))\
-            .grid(row=0, column=0, columnspan=3, sticky="w", **pad)
-        self._make_wrapping_label(f, text="Recipient list pulled from Tab 2 (Recipients). Check off everyone who has\n"
-                          "ALREADY contributed money for the gift — the checked state is saved to the\n"
-                          "database automatically as soon as you click, and reloaded automatically if\n"
-                          "there's saved data (nothing is lost when you close and reopen the app).",
-                  font=("Arial", 9, "italic")).grid(row=1, column=0, columnspan=3, sticky="w", padx=10)
+        self.var_gift_contributed_count = tk.StringVar(value="0 / 0")
+        self.var_gift_total_amount = tk.StringVar(value="0")
+        kpi_row(f, [
+            ("Contributors", self.var_gift_contributed_count, {"dot": COLORS["success_fill"]}),
+            ("Total collected", self.var_gift_total_amount, {}),
+        ]).pack(**gap)
 
-        btns = ttk.Frame(f)
-        btns.grid(row=2, column=0, columnspan=3, sticky="w", **pad)
-        ttk.Button(btns, text="🔄 Reload list from Tab 2", command=self._refresh_gift_contribution_list)\
-            .pack(side="left", padx=(0, 6))
-        # Import an EXISTING Gift_Contribution_List_*.xlsx file — used when:
-        # (1) you want to re-sync checked state from a file that was edited
-        # by hand outside the app (e.g. a colleague added notes directly in
-        # Excel), or (2) the file isn't named with the current Event ID, so
-        # it wasn't picked up automatically by "🔄 Reload list from Tab 2".
-        # Unlike the auto-load on tab open (only runs once, and only fills
-        # in people who aren't already in the current list), this button
-        # ACTIVELY overwrites the checked state for EVERYONE found in the
-        # chosen file.
-        ttk.Button(btns, text="📂 Load contribution list from file", command=self._load_gift_list_from_file)\
-            .pack(side="left", padx=6)
-        # MỚI: đã BỎ 2 nút "☑ Check all"/"☐ Uncheck all" — thay bằng 1 dấu
-        # ✅/⬜ NGAY TRÊN ĐẦU CỘT "Send email" và cột "Contributed" (bấm
-        # trực tiếp vào tiêu đề cột, xem tree.heading(..., command=...) bên
-        # dưới và _toggle_all_gift_column()) — mỗi cột tự chọn/bỏ chọn tất
-        # cả ĐỘC LẬP với nhau, và vẫn chỉ áp dụng cho các dòng ĐANG HIỂN THỊ
-        # (tôn trọng ô tìm kiếm, giống hành vi 2 nút cũ).
+        tracking = Card(f, "Contributions",
+                        "Everyone on Recipients. Tick who has contributed; it is saved as you click, and "
+                        "comes back when you reopen the event.")
+        tracking.pack(**gap)
+        ttk.Button(tracking.actions, text="📊 Export to Excel", command=self._export_gift_contribution_list)\
+            .pack(side="right")
+        # Importing a file (e.g. one a colleague edited in Excel) OVERWRITES
+        # the checked state and amount of EVERYONE found in it.
+        ttk.Button(tracking.actions, text="📂 Load from file", command=self._load_gift_list_from_file)\
+            .pack(side="right", padx=(0, 8))
 
-        # Quick Name search box — filters the table below directly as you
-        # type, case-insensitive. The checked state stays stored in
-        # self._gift_roster (the source of truth), so filtering/searching
-        # never loses anyone's checked state, even while they're hidden.
-        search_bar = ttk.Frame(f)
-        search_bar.grid(row=3, column=0, columnspan=3, sticky="w", **pad)
-        ttk.Label(search_bar, text="🔎 Search (name):").pack(side="left")
+        # Lọc TRỰC TIẾP bảng khi gõ; trạng thái tick vẫn nằm trong
+        # self._gift_roster nên lọc không làm mất tick của người bị ẩn.
+        toolbar = ttk.Frame(tracking.body)
+        toolbar.pack(fill="x", pady=(0, 12))
         self.var_gift_search = tk.StringVar(value="")
-        ttk.Entry(search_bar, textvariable=self.var_gift_search, width=40).pack(side="left", padx=6)
+        ttk.Label(toolbar, text="🔎", style="Muted.TLabel").pack(side="left", padx=(0, 6))
+        ttk.Entry(toolbar, textvariable=self.var_gift_search, width=36).pack(side="left")
         self.var_gift_search.trace_add("write", lambda *a: self._apply_gift_filter())
-        ttk.Button(search_bar, text="✕ Clear", command=lambda: self.var_gift_search.set(""))\
-            .pack(side="left", padx=4)
+        ttk.Button(toolbar, text="✕ Clear", style="Ghost.TButton",
+                   command=lambda: self.var_gift_search.set("")).pack(side="left", padx=(6, 0))
 
-        # Column order: send_email, check, No. (sequence number), Name, Email, Amount.
-        # MỚI: "send_email" — cột checkbox THÊM MỚI, đặt bên trái "check"
-        # (Contributed) — người dùng tick chọn AI sẽ nhận email báo cáo
-        # quyên góp (xem khối "📧 Send contribution report" ở cuối tab, và
-        # _send_gift_report_email()) — HOÀN TOÀN ĐỘC LẬP với "Contributed"
-        # (1 người có thể được chọn nhận báo cáo dù họ CHƯA đóng góp, hoặc
-        # ngược lại).
+        # Column order: send_email, check, No., Name, Email, Amount. "Send
+        # email" (who gets the report) is independent of "Contributed". Click
+        # a cell to toggle it, or a column header to toggle every row shown
+        # (see _on_gift_tree_click() / _toggle_all_gift_column()).
         cols = ("send_email", "check", "no", "name", "email", "amount")
-        tree_container, self.tree_gift = make_scrollable_treeview(f, columns=cols, height=16)
-        # Tiêu đề 2 cột checkbox ("send_email"/"check") tự hiển thị ✅/⬜
-        # phản ánh "tất cả dòng ĐANG HIỂN THỊ có đang được tick hết không"
-        # — bấm vào TIÊU ĐỀ (không phải 1 ô cụ thể) để chọn/bỏ chọn tất cả
-        # cùng lúc cho đúng cột đó (xem _toggle_all_gift_column()).
+        tree_container, self.tree_gift = make_scrollable_treeview(tracking.body, columns=cols, height=14)
         self.tree_gift.heading("send_email", text="⬜ Send email",
                                 command=lambda: self._toggle_all_gift_column("send_email"))
         self.tree_gift.heading("check", text="⬜ Contributed",
                                 command=lambda: self._toggle_all_gift_column("check"))
         self.tree_gift.heading("no", text="No.")
-        self.tree_gift.heading("name", text="Name")
-        self.tree_gift.heading("email", text="Email")
-        self.tree_gift.heading("amount", text="Amount")
-        self.tree_gift.column("send_email", width=100, anchor="center")
-        self.tree_gift.column("check", width=100, anchor="center")
-        self.tree_gift.column("no", width=40, anchor="center")
-        self.tree_gift.column("name", width=240)
-        self.tree_gift.column("email", width=280)
-        self.tree_gift.column("amount", width=100, anchor="e")
-        tree_container.grid(row=4, column=0, columnspan=3, sticky="w", padx=10)
-        # Clicking the "send_email" or "check" (Contributed) column toggles
-        # that row's checked state (tkinter's Treeview has no real checkbox
-        # widget, so ✅/⬜ characters simulate one — a common, simple
-        # approach that avoids pulling in an extra third-party library).
+        self.tree_gift.heading("name", text="Name", anchor="w")
+        self.tree_gift.heading("email", text="Email", anchor="w")
+        self.tree_gift.heading("amount", text="Amount", anchor="e")
+        self.tree_gift.column("send_email", width=110, anchor="center", stretch=False)
+        self.tree_gift.column("check", width=110, anchor="center", stretch=False)
+        self.tree_gift.column("no", width=44, anchor="center", stretch=False)
+        self.tree_gift.column("name", width=220)
+        self.tree_gift.column("email", width=260)
+        self.tree_gift.column("amount", width=110, anchor="e", stretch=False)
+        tree_container.pack(fill="both", expand=True)
         self.tree_gift.bind("<Button-1>", self._on_gift_tree_click)
+        # Double-click Amount to type what someone actually gave.
+        self.tree_gift.bind("<Double-1>", self._on_gift_tree_double_click)
+        WrapLabel(tracking.body, style="Hint.TLabel",
+                  text="Ticking Contributed fills Amount from the expected gift budget; double-click an "
+                       "Amount to type what that person actually gave. Click a column header to tick or "
+                       "untick everyone shown.").pack(fill="x", pady=(8, 0))
 
-        ttk.Label(f, text="Total contributors:").grid(row=5, column=0, sticky="w", **pad)
-        self.var_gift_contributed_count = tk.StringVar(value="0 / 0")
-        ttk.Label(f, textvariable=self.var_gift_contributed_count, font=("Arial", 10, "bold"))\
-            .grid(row=5, column=1, sticky="w", **pad)
-
-        # Total amount collected so far — sum of "Amount" for everyone
-        # currently checked as "Contributed" (see _update_gift_contributed_count()).
-        ttk.Label(f, text="Total amount collected:").grid(row=6, column=0, sticky="w", **pad)
-        self.var_gift_total_amount = tk.StringVar(value="0")
-        ttk.Label(f, textvariable=self.var_gift_total_amount, font=("Arial", 10, "bold"))\
-            .grid(row=6, column=1, sticky="w", **pad)
-
-        ttk.Button(f, text="📊 Export to Excel", command=self._export_gift_contribution_list)\
-            .grid(row=7, column=0, columnspan=2, sticky="w", **pad)
-        self._make_wrapping_label(f, text="→ Contribution data is saved automatically to the database every time you "
-                          "check/uncheck someone — this button only creates an Excel file when you need "
-                          "one to share or archive. Use '📂 Load contribution list from file' above to "
-                          "import/merge from a specific Excel file instead.",
-                  font=("Arial", 8, "italic")).grid(row=8, column=0, columnspan=3, sticky="w", padx=14)
-
-        # ── Compose & send a reminder email to people who haven't contributed yet ──
-        # Always ONLY opens Outlook for review (mail.Display()) — there is no
-        # "Send immediately without review" option here (unlike Tab 4's RSVP
-        # reminder), per the requirement that every reminder email (both RSVP
-        # and Gift) must be checked by the user and sent by hand from
-        # Outlook, never sent automatically from within the app. See
-        # _send_gift_reminder().
-        gift_reminder_frame = ttk.LabelFrame(
-            f, text="📨 Compose & send a reminder email to people who haven't contributed yet")
-        gift_reminder_frame.grid(row=9, column=0, columnspan=3, sticky="we", padx=10, pady=6)
-
-        grbtn = ttk.Frame(gift_reminder_frame)
-        grbtn.pack(fill="x", padx=6, pady=4)
-        ttk.Label(grbtn, text="Language:").pack(side="left", padx=(0, 4))
+        # ── reminder to people who haven't contributed — always opens Outlook
+        # for review (mail.Display()); there is no auto-send here. ──
+        reminder = Card(f, "Reminder", "To everyone not ticked as Contributed. Opens in Outlook for you to "
+                                       "check and send.")
+        reminder.pack(**gap)
+        grbtn = ttk.Frame(reminder.body)
+        grbtn.pack(fill="x")
+        ttk.Label(grbtn, text="Language", style="Field.TLabel").pack(side="left", padx=(0, 8))
         self.combo_gift_reminder_lang = ttk.Combobox(
             grbtn, width=26, state="readonly",
             values=[LANG_LABELS["en"], LANG_LABELS["ja"], LANG_LABELS["vi"], LANG_LABELS["bilingual"]],
         )
         self.combo_gift_reminder_lang.current(0)  # default: English
-        self.combo_gift_reminder_lang.pack(side="left", padx=(0, 6))
+        self.combo_gift_reminder_lang.pack(side="left")
         self.combo_gift_reminder_lang.bind(
             "<<ComboboxSelected>>", lambda e: self._generate_gift_reminder_draft())
-        ttk.Button(grbtn, text="🔄 Regenerate reminder text (from Tab 1)",
-                   command=self._generate_gift_reminder_draft).pack(side="left", padx=(0, 6))
+        ttk.Button(grbtn, text="🔄 Regenerate text", command=self._generate_gift_reminder_draft)\
+            .pack(side="left", padx=(8, 0))
         self.var_gift_reminder_attach = tk.BooleanVar(value=True)
-        ttk.Checkbutton(grbtn, text="📎 Attach original Gift email (looked up from Sent Items)",
-                        variable=self.var_gift_reminder_attach).pack(side="left", padx=6)
-
-        ttk.Label(gift_reminder_frame, text="Reminder email content (review/edit before sending):",
-                  font=("Arial", 9, "italic")).pack(anchor="w", padx=6, pady=(4, 0))
+        ttk.Checkbutton(reminder.body, text="📎 Attach original Gift email (looked up from Sent Items)",
+                        variable=self.var_gift_reminder_attach).pack(anchor="w", pady=(10, 8))
         gift_reminder_text_container, self.txt_gift_reminder_body = make_scrollable_text(
-            gift_reminder_frame, width=100, height=7)
-        gift_reminder_text_container.pack(fill="x", padx=6, pady=4)
-
+            reminder.body, width=40, height=7)
+        gift_reminder_text_container.pack(fill="x")
         self.lbl_gift_reminder_send = ttk.Button(
-            gift_reminder_frame, text="📨 Open reminder email for 0 people who haven't contributed",
-            command=self._send_gift_reminder)
-        self.lbl_gift_reminder_send.pack(anchor="w", padx=6, pady=(2, 8))
-        ttk.Label(gift_reminder_frame,
-                  text="→ Always opens the email compose window in Outlook so you can review it and "
-                       "click Send YOURSELF — there is no auto-send option here.",
-                  font=("Arial", 8, "italic")).pack(anchor="w", padx=6, pady=(0, 6))
+            reminder.body, text="📨 Open reminder email for 0 people who haven't contributed",
+            style="Primary.TButton", command=self._send_gift_reminder)
+        self.lbl_gift_reminder_send.pack(anchor="w", pady=(12, 0))
 
-        # ── MỚI: gửi email báo cáo số tiền đã thu được, tới NHỮNG NGƯỜI ĐÃ
-        # TICK CHỌN ở cột "Send email" (hoàn toàn tách biệt với người CHƯA
-        # đóng góp ở khối nhắc nhở phía trên) — nội dung email liệt kê danh
-        # sách những ai ĐÃ ĐÓNG GÓP (cột "Contributed" = Yes), đánh số lại
-        # từ 1, KHÔNG đưa 2 cột checkbox ("Send email"/"Contributed") vào
-        # danh sách đó — xem _build_gift_report_workbook()/build_gift_report_body().
-        # Nội dung mail CHỈ là 1 thông báo TỔNG QUAN (đã thu bao nhiêu
-        # người/bao nhiêu tiền), KHÔNG liệt kê từng người trong nội dung —
-        # danh sách chi tiết nằm trong file Excel TỰ ĐỘNG ĐÍNH KÈM.
-        report_frame = ttk.LabelFrame(f, text="📧 Send contribution report to selected people")
-        report_frame.grid(row=10, column=0, columnspan=3, sticky="we", padx=10, pady=6)
-        self._make_wrapping_label(
-            report_frame,
-            text="Sent to everyone ticked in the \"Send email\" column above. The message body is a "
-                 "short summary (how many people contributed, total amount) — the detailed list "
-                 "(everyone who has ALREADY contributed, renumbered, without the \"Send email\"/"
-                 "\"Contributed\" checkbox columns) is automatically attached as an Excel file.",
-            font=("Arial", 8, "italic")).pack(anchor="w", padx=6, pady=(4, 0))
-
-        rbtn = ttk.Frame(report_frame)
-        rbtn.pack(fill="x", padx=6, pady=4)
-        ttk.Label(rbtn, text="Language:").pack(side="left", padx=(0, 4))
+        # ── contribution report to the people ticked in "Send email": a short
+        # summary in the body, the list of contributors attached as Excel
+        # (see reports.gift_report_workbook()/build_gift_report_body()). ──
+        report = Card(f, "Contribution report",
+                      "To everyone ticked in Send email: a short summary (how many contributed, the total), "
+                      "with the list of contributors attached as an Excel file. Opens in Outlook first.")
+        report.pack(fill="x")
+        rbtn = ttk.Frame(report.body)
+        rbtn.pack(fill="x", pady=(0, 10))
+        ttk.Label(rbtn, text="Language", style="Field.TLabel").pack(side="left", padx=(0, 8))
         self.combo_gift_report_lang = ttk.Combobox(
             rbtn, width=26, state="readonly",
             values=[LANG_LABELS["en"], LANG_LABELS["ja"], LANG_LABELS["vi"], LANG_LABELS["bilingual"]],
         )
         self.combo_gift_report_lang.current(0)  # default: English
-        self.combo_gift_report_lang.pack(side="left", padx=(0, 6))
+        self.combo_gift_report_lang.pack(side="left")
         self.combo_gift_report_lang.bind("<<ComboboxSelected>>", lambda e: self._generate_gift_report_draft())
-        ttk.Button(rbtn, text="🔄 Regenerate report text", command=self._generate_gift_report_draft)\
-            .pack(side="left", padx=(0, 6))
-
-        ttk.Label(report_frame, text="Report email content (review/edit before sending):",
-                  font=("Arial", 9, "italic")).pack(anchor="w", padx=6, pady=(4, 0))
+        ttk.Button(rbtn, text="🔄 Regenerate text", command=self._generate_gift_report_draft)\
+            .pack(side="left", padx=(8, 0))
         report_text_container, self.txt_gift_report_body = make_scrollable_text(
-            report_frame, width=100, height=10)
-        report_text_container.pack(fill="x", padx=6, pady=4)
-
+            report.body, width=40, height=10)
+        report_text_container.pack(fill="x")
         self.lbl_gift_report_send = ttk.Button(
-            report_frame, text="📧 Send report to 0 selected people", command=self._send_gift_report_email)
-        self.lbl_gift_report_send.pack(anchor="w", padx=6, pady=(2, 8))
-        ttk.Label(report_frame,
-                  text="→ Always opens the email compose window in Outlook so you can review it and "
-                       "click Send YOURSELF — there is no auto-send option here.",
-                  font=("Arial", 8, "italic")).pack(anchor="w", padx=6, pady=(0, 6))
+            report.body, text="📧 Send report to 0 selected people", style="Primary.TButton",
+            command=self._send_gift_report_email)
+        self.lbl_gift_report_send.pack(anchor="w", pady=(12, 0))
 
     def _pending_gift_contributors(self):
         """Returns list[(name, email)] of everyone NOT yet checked as
@@ -3351,6 +3022,7 @@ class RSVPApp(tk.Tk):
 
         draft = build_gift_reminder_body(lang_code, guest_of_honor, start_time, event_date,
                                           location, organizer, deadline, gift_budget)
+        self._generated_drafts["gift_reminder"] = draft
         self.txt_gift_reminder_body.delete("1.0", "end")
         self.txt_gift_reminder_body.insert("1.0", draft)
 
@@ -3367,7 +3039,7 @@ class RSVPApp(tk.Tk):
         if not body:
             messagebox.showwarning(
                 "Empty content",
-                "Click '🔄 Regenerate reminder text' or type the content by hand before sending.")
+                "Click '🔄 Regenerate text' or type the content by hand before sending.")
             return
 
         event_id = self.var_event_id.get().strip()
@@ -3469,55 +3141,13 @@ class RSVPApp(tk.Tk):
             f"Total in list now: {len(self._gift_roster)} people."
         )
 
-    def _build_gift_report_workbook(self):
-        """Dựng 1 openpyxl Workbook liệt kê CHỈ những người ĐÃ ĐÓNG GÓP
-        (self._gift_roster[...]["checked"] == True), đánh số lại từ 1 —
-        dùng làm file đính kèm của email báo cáo (xem
-        _send_gift_report_email()). KHÔNG gồm 2 cột checkbox "Send email"/
-        "Contributed" (2 cột đó chỉ có ý nghĩa thao tác trên UI, không phải
-        dữ liệu cần báo cáo cho người nhận) — chỉ còn No./Name/Email/
-        Amount."""
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = "Contributors"
-        headers = ["No.", "Name", "Email", "Amount"]
-        for i, h in enumerate(headers, start=1):
-            c = ws.cell(row=1, column=i, value=h)
-            c.font = Font(bold=True, color="FFFFFF")
-            c.fill = PatternFill("solid", fgColor="003366")
-            c.alignment = Alignment(horizontal="center")
-        row_idx = 2
-        seq = 0
-        total_amount = 0.0
-        for email, info in getattr(self, "_gift_roster", {}).items():
-            if not info.get("checked"):
-                continue
-            seq += 1
-            amount = info.get("amount", 0.0)
-            total_amount += amount
-            ws.cell(row=row_idx, column=1, value=seq)
-            ws.cell(row=row_idx, column=2, value=info.get("name") or email)
-            ws.cell(row=row_idx, column=3, value=email)
-            ws.cell(row=row_idx, column=4, value=amount or None)
-            row_idx += 1
-        total_row = row_idx + 1
-        ws.cell(row=total_row, column=2, value="TOTAL COLLECTED:").font = Font(bold=True)
-        c_amt = ws.cell(row=total_row, column=4, value=total_amount)
-        c_amt.font = Font(bold=True)
-        c_amt.number_format = "#,##0"
-        ws.column_dimensions["A"].width = 6
-        ws.column_dimensions["B"].width = 28
-        ws.column_dimensions["C"].width = 32
-        ws.column_dimensions["D"].width = 14
-        return wb
-
     def _gift_report_body_args(self):
         """Lấy đúng (guest_of_honor, event_name, contributor_count,
         total_amount) hiện tại từ Tab 1 + bảng Gift Contribution (Tab 6) —
         dùng để build nội dung email báo cáo mặc định
         (build_gift_report_body()) — nội dung chỉ là 1 THÔNG BÁO TỔNG QUAN,
         danh sách chi tiết nằm trong file Excel đính kèm (xem
-        _build_gift_report_workbook())."""
+        reports.gift_report_workbook())."""
         contributor_count = sum(
             1 for info in getattr(self, "_gift_roster", {}).values() if info.get("checked"))
         return (
@@ -3536,6 +3166,7 @@ class RSVPApp(tk.Tk):
         lang_label = self.combo_gift_report_lang.get() or LANG_LABELS["en"]
         lang_code = LANG_LABEL_TO_CODE.get(lang_label, "en")
         draft = build_gift_report_body(lang_code, *self._gift_report_body_args())
+        self._generated_drafts["gift_report"] = draft
         self.txt_gift_report_body.delete("1.0", "end")
         self.txt_gift_report_body.insert("1.0", draft)
 
@@ -3547,7 +3178,7 @@ class RSVPApp(tk.Tk):
         1 thông báo TỔNG QUAN (đã thu được bao nhiêu người/bao nhiêu tiền)
         — danh sách chi tiết từng người ĐÃ đóng góp (đánh số lại từ 1,
         KHÔNG gồm 2 cột checkbox) nằm trong file Excel TỰ ĐỘNG ĐÍNH KÈM
-        (xem _build_gift_report_workbook()). Không có Voting Buttons (dùng
+        (xem reports.gift_report_workbook()). Không có Voting Buttons (dùng
         self.outlook.send_gift_report_email(), hàm gửi thông báo thuần tuý
         + đính kèm file — KHÁC với send_voting_invite() vốn không hỗ trợ
         đính kèm)."""
@@ -3568,7 +3199,7 @@ class RSVPApp(tk.Tk):
         if not body:
             messagebox.showwarning(
                 "Empty content",
-                "Click '🔄 Regenerate report text' or type the content by hand before sending.")
+                "Click '🔄 Regenerate text' or type the content by hand before sending.")
             return
 
         event_id = self.var_event_id.get().strip()
@@ -3582,7 +3213,7 @@ class RSVPApp(tk.Tk):
         # worker thread), lưu vào 1 file tạm — không phải nơi lưu trữ
         # chính (dữ liệu thật vẫn ở database), chỉ để đính kèm email.
         try:
-            wb = self._build_gift_report_workbook()
+            wb = reports.gift_report_workbook(self._gift_roster)
             excel_path = os.path.join(
                 tempfile.gettempdir(), f"Gift_Contribution_Report_{event_id or 'event'}.xlsx")
             wb.save(excel_path)
@@ -3622,14 +3253,15 @@ class RSVPApp(tk.Tk):
            reading from the database (bảng gift_contributions) — to RESTORE
            the checked state (and amount) from last time, even after
            closing/reopening the app."""
-        if not hasattr(self, "tree_gift"):
-            return
-        if not hasattr(self, "_gift_roster"):
+        event_id = self.var_event_id.get().strip()
+        if self._gift_event != event_id:
+            # The roster in memory belongs to another event: start from what
+            # is saved for this one, never from the other event's ticks.
             self._gift_roster = {}  # email -> {"name":..., "checked": bool, "amount": float, "send_email": bool}
+            self._gift_event = event_id or None
 
         # Step 1: read the saved state from the database as a fallback —
         # ONLY used for people not already in self._gift_roster.
-        event_id = self.var_event_id.get().strip()
         saved_state = {}
         if event_id:
             try:
@@ -3666,7 +3298,7 @@ class RSVPApp(tk.Tk):
         seq = 0
         for email, info in self._gift_roster.items():
             name = info["name"]
-            if query and query not in (name or "").lower():
+            if query and query not in (name or "").lower() and query not in email.lower():
                 continue
             seq += 1
             send_email_display = "✅" if info.get("send_email") else "⬜"
@@ -3715,10 +3347,8 @@ class RSVPApp(tk.Tk):
             # Auto-fill the Amount from Tab 1's "Expected gift budget" the
             # moment someone is checked as contributed; clear it back to 0 if
             # unchecked, so the total only ever counts people currently marked
-            # as having contributed. (The amount can still be corrected later by
-            # editing the exported Excel file and reloading it via "📂 Load
-            # contribution list from file", if the actual amount differs from
-            # the expected budget.)
+            # as having contributed. A different actual amount is typed by
+            # double-clicking the Amount cell (_on_gift_tree_double_click()).
             if new_checked:
                 self._gift_roster[email]["amount"] = parse_amount_from_text(self.var_gift_budget.get())
             else:
@@ -3731,6 +3361,27 @@ class RSVPApp(tk.Tk):
         # separate button needed, so progress isn't lost if you forget to
         # save manually before closing the app. Saves silently (no
         # messagebox) so it doesn't interrupt every single click.
+        self._save_gift_roster_to_db(silent=True)
+
+    def _on_gift_tree_double_click(self, event):
+        if self.tree_gift.identify("region", event.x, event.y) != "cell":
+            return
+        iid = self.tree_gift.identify_row(event.y)
+        if iid and self.tree_gift.identify_column(event.x) == "#6":  # "amount"
+            self._begin_cell_edit(self.tree_gift, iid, "amount", self._commit_gift_amount_edit)
+
+    def _commit_gift_amount_edit(self, row_id, col_name, new_value):
+        """A typed amount replaces the expected budget for that person. A
+        positive amount also marks them as Contributed, since the totals and
+        the report count only contributors."""
+        info = self._gift_roster.get(row_id)
+        if info is None:
+            return
+        amount = parse_amount_from_text(new_value)
+        info["amount"] = amount
+        if amount > 0:
+            info["checked"] = True
+        self._apply_gift_filter()
         self._save_gift_roster_to_db(silent=True)
 
     def _toggle_all_gift_column(self, col_key):
@@ -3791,9 +3442,10 @@ class RSVPApp(tk.Tk):
         """Lưu self._gift_roster vào database (bảng gift_contributions) —
         gọi TỰ ĐỘNG sau mọi tick/bỏ tick, "Check all"/"Uncheck all", hoặc
         import từ file. Đây là hàm PERSIST THẬT SỰ trong kiến trúc mới
-        (thay cho việc ghi Excel liên tục trước đây)."""
-        event_id = self.var_event_id.get().strip()
-        if not event_id or not getattr(self, "_gift_roster", None):
+        (thay cho việc ghi Excel liên tục trước đây). Writes to the event the
+        roster belongs to, not whatever Tab 1 shows."""
+        event_id = self._gift_event
+        if not event_id or not self._gift_roster:
             return
         try:
             db.save_gift_roster(event_id, self._gift_roster, self.history_path.get())
@@ -3809,12 +3461,11 @@ class RSVPApp(tk.Tk):
         try:
             roster = db.load_gift_roster(event_id, self.history_path.get())
         except Exception:
-            return False
-        if not roster:
-            return False
+            roster = {}
         self._gift_roster = roster
+        self._gift_event = event_id
         self._apply_gift_filter()
-        return True
+        return bool(roster)
 
     def _export_gift_contribution_list(self, silent=False):
         """Exports the FULL self._gift_roster (not just rows currently shown
@@ -3832,7 +3483,7 @@ class RSVPApp(tk.Tk):
         if not getattr(self, "_gift_roster", None):
             if not silent:
                 messagebox.showwarning("List is empty",
-                                        "No one in the list yet — click '🔄 Reload list from Tab 2' first.")
+                                        "No one in the list yet — add recipients on Tab 2 first.")
             return
 
         out_path = filedialog.asksaveasfilename(
@@ -3845,54 +3496,13 @@ class RSVPApp(tk.Tk):
             return
 
         try:
-            wb = openpyxl.Workbook()
-            ws = wb.active
-            ws.title = "Gift Contribution"
-            headers = ["No.", "Name", "Email", "Amount", "Contributed"]
-            for i, h in enumerate(headers, start=1):
-                c = ws.cell(row=1, column=i, value=h)
-                c.font = Font(bold=True, color="FFFFFF")
-                c.fill = PatternFill("solid", fgColor="003366")
-                c.alignment = Alignment(horizontal="center")
-            row_idx = 2
-            contributed_count = 0
-            total_amount = 0.0
-            for i, (email, info) in enumerate(self._gift_roster.items(), start=1):
-                amount = info.get("amount", 0.0)
-                if info["checked"]:
-                    contributed_count += 1
-                    total_amount += amount
-                ws.cell(row=row_idx, column=1, value=i)
-                ws.cell(row=row_idx, column=2, value=info["name"])
-                ws.cell(row=row_idx, column=3, value=email)
-                ws.cell(row=row_idx, column=4, value=amount or None)
-                ws.cell(row=row_idx, column=5, value="Yes" if info["checked"] else "No")
-                row_idx += 1
-
-            # Grand total row, right below the table (one blank row for
-            # readability) — so the exported file always carries the total
-            # amount collected alongside the per-person breakdown. The label
-            # goes in the NAME column (not Email) so read_gift_contribution_rows()
-            # correctly skips this row on reload (it keys off the Email
-            # column being non-empty to recognize a real person's row).
-            total_row = row_idx + 1
-            label_cell = ws.cell(row=total_row, column=2, value="TOTAL COLLECTED:")
-            label_cell.font = Font(bold=True)
-            label_cell.alignment = Alignment(horizontal="right")
-            total_cell = ws.cell(row=total_row, column=4, value=total_amount)
-            total_cell.font = Font(bold=True)
-            total_cell.number_format = "#,##0"
-
-            ws.column_dimensions["A"].width = 6
-            ws.column_dimensions["B"].width = 28
-            ws.column_dimensions["C"].width = 32
-            ws.column_dimensions["D"].width = 14
-            ws.column_dimensions["E"].width = 14
-            wb.save(out_path)
+            reports.gift_contribution_workbook(self._gift_roster).save(out_path)
         except Exception as e:
             if not silent:
                 messagebox.showerror("Error", f"Couldn't export the file:\n{e}")
             return
+        contributed_count = sum(1 for info in self._gift_roster.values() if info["checked"])
+        total_amount = sum(info.get("amount", 0.0) for info in self._gift_roster.values() if info["checked"])
 
         if not silent:
             total = len(self._gift_roster)
@@ -3904,190 +3514,123 @@ class RSVPApp(tk.Tk):
 
     def _build_tab_calendar(self):
         f = self.tab_calendar.body
-        pad = {"padx": 10, "pady": 6}
+        gap = {"fill": "x", "pady": (0, 16)}
 
-        # MỚI: giờ lấy CẢ "Yes" LẪN "Maybe" (trước đây chỉ lấy "Yes") — vì
-        # người trả lời "Maybe" (chưa chắc chắn) vẫn nên được mời Calendar
-        # Invite chính thức, để họ có lịch trên Outlook phòng khi sau đó họ
-        # quyết định tham dự — không nên loại họ ra chỉ vì chưa chốt.
-        ttk.Label(f, text='People who voted "Yes" or "Maybe" (auto-pulled from Tab 4):',
-                  font=("Arial", 10, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", **pad)
-        self.list_yes = tk.Listbox(f, width=60, height=10)
-        yes_vscroll = ttk.Scrollbar(f, orient="vertical", command=self.list_yes.yview)
-        self.list_yes.configure(yscrollcommand=yes_vscroll.set)
-        self.list_yes.grid(row=1, column=0, sticky="w", padx=10)
-        yes_vscroll.grid(row=1, column=1, sticky="nsw")
-        ttk.Button(f, text="🔄 Refresh Yes/Maybe list", command=self._refresh_calendar_yes_list)\
-            .grid(row=2, column=0, sticky="w", **pad)
+        # Yes AND Maybe get the Calendar Invite: a Maybe should still have
+        # the event in Outlook in case they decide to come.
+        calendar = Card(f, "Calendar invite",
+                        "For everyone who voted Yes or Maybe on Collect responses. Date, time and place "
+                        "come from Event setup; the original invite email is attached.")
+        calendar.pack(**gap)
+        ttk.Label(calendar.body, text="Invitees", style="Field.TLabel").pack(anchor="w", pady=(0, 4))
+        yes_box = bordered(calendar.body)
+        yes_box.pack(fill="x")
+        self.list_yes = tk.Listbox(yes_box, height=7)
+        yes_vscroll = ttk.Scrollbar(yes_box, orient="vertical", command=self.list_yes.yview)
+        self.list_yes.configure(yscrollcommand=autohide(yes_vscroll))
+        self.list_yes.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=6)
+        yes_vscroll.grid(row=0, column=1, sticky="ns")
+        yes_box.columnconfigure(0, weight=1)
+        # Kept in step with Tab 4 by _refresh_response_tree(); no refresh needed.
 
-        # MỚI: đã BỎ dòng "Event date / time (from Tab 1)" ở đây theo yêu
-        # cầu — thông tin đó vẫn được dùng NGẦM khi gửi Calendar Invite
-        # (xem _send_calendar(), luôn lấy trực tiếp từ Tab 1), chỉ không
-        # còn hiển thị lặp lại thành 1 dòng riêng ở Tab 5 nữa. Muốn xem/đổi
-        # giờ, quay lại Tab 1.
-
-        # ── customizable appointment body ──
-        appt_header = ttk.Frame(f)
-        appt_header.grid(row=6, column=0, columnspan=2, sticky="w", **pad)
-        ttk.Label(appt_header, text="Appointment body (customize if needed):", font=("Arial", 9, "bold"))\
-            .pack(side="left")
-        ttk.Label(appt_header, text="   Language:").pack(side="left")
+        appt_header = ttk.Frame(calendar.body)
+        appt_header.pack(fill="x", pady=(14, 4))
+        ttk.Label(appt_header, text="Appointment text", style="Field.TLabel").pack(side="left")
         self.combo_calendar_lang = ttk.Combobox(
             appt_header, width=26, state="readonly",
             values=[LANG_LABELS["en"], LANG_LABELS["ja"], LANG_LABELS["vi"], LANG_LABELS["bilingual"]],
         )
         self.combo_calendar_lang.current(0)  # default: English
-        self.combo_calendar_lang.pack(side="left", padx=(4, 0))
-        # Đổi ngôn ngữ -> tự thay lại nội dung mặc định ngay (giống combo_reminder_lang
-        # ở Tab 4) — nếu bạn đã tự gõ tay nội dung riêng, đổi ngôn ngữ sẽ THAY THẾ
-        # bằng bản mặc định của ngôn ngữ mới (không cộng dồn/giữ lại bản cũ).
+        self.combo_calendar_lang.pack(side="right")
+        ttk.Label(appt_header, text="Language", style="Muted.TLabel").pack(side="right", padx=(0, 8))
+        # Đổi ngôn ngữ -> THAY THẾ nội dung bằng bản mặc định của ngôn ngữ mới.
         self.combo_calendar_lang.bind("<<ComboboxSelected>>", lambda e: self._apply_calendar_body_lang())
-
-        appt_container, self.txt_appt_body = make_scrollable_text(f, width=100, height=4)
+        appt_container, self.txt_appt_body = make_scrollable_text(calendar.body, width=40, height=4)
         default_body = build_calendar_body("en", *self._calendar_body_args())
         self.txt_appt_body.insert("1.0", default_body)
         self.var_appt_body_default = default_body  # Keep track of default for reset
-        appt_container.grid(row=7, column=0, columnspan=2, sticky="w", padx=10, pady=4)
+        appt_container.pack(fill="x")
+        ttk.Button(calendar.body, text="📅 Send Calendar Invite to the list above", style="Primary.TButton",
+                   command=self._send_calendar).pack(anchor="w", pady=(12, 0))
 
-        ttk.Button(f, text="📅 Send Calendar Invite to the list above", command=self._send_calendar)\
-            .grid(row=8, column=0, sticky="w", **pad)
+        # ── after the event: totals, the per-person table, the thank-you ──
+        self.var_total_actual_attend = tk.StringVar(value="0")
+        self.var_total_collected_amount = tk.StringVar(value="0")
+        self.var_remaining_amount = tk.StringVar(value="0")
+        # "Amount paid" — số tiền THỰC TẾ đã trả ra (đặt cọc nhà hàng...), nhập
+        # tay; "Remaining" = Total collected − Amount paid, tự tính. Lưu theo
+        # Event ID (cột AmountPaid), nạp lại khi Load setup.
+        self.var_amount_paid = tk.StringVar(value="0")
+        totals = kpi_row(f, [
+            ("Attended", self.var_total_actual_attend, {"dot": COLORS["success_fill"]}),
+            ("Collected", self.var_total_collected_amount, {}),
+            ("Amount paid",
+             lambda p: ttk.Entry(p, textvariable=self.var_amount_paid, font=self.fonts.title, width=12),
+             {"footnote": "Paid out so far"}),
+            ("Remaining", self.var_remaining_amount, {"footnote": "Collected − Amount paid"}),
+        ])
+        totals.pack(**gap)
+        self.var_amount_paid.trace_add("write", lambda *a: self._on_amount_paid_changed())
 
-        ttk.Separator(f).grid(row=9, column=0, columnspan=3, sticky="ew", padx=10, pady=10)
-
-        # ── Attendance & Payment tracking (post-event) ──
-        # Lists everyone who voted "Yes" or "Maybe" (same population as the
-        # Calendar Invite list above), so you can mark who ACTUALLY showed
-        # up, who's exempt from paying, and how much they paid, after the
-        # event happens. Double-click "Name"/"Vote"/"Amount" to type a new
-        # value; "Actual Attend" opens a Yes/No dropdown instead of free
-        # text; single-click the "Free" column to toggle it. Every edit is
-        # auto-saved straight to Attendance_Payment_{EventID}.xlsx in the
-        # Input folder — no manual export step needed (see
-        # _save_attendance_sheet_to_file()).
-        ttk.Label(f, text="Attendance & Payment tracking (fill in after the event):",
-                  font=("Arial", 10, "bold")).grid(row=10, column=0, columnspan=2, sticky="w", **pad)
-        self._make_wrapping_label(
-            f, text="Double-click \"Name\"/\"Vote\"/\"Amount\" to edit; \"Actual Attend\" opens a Yes/No "
-                    "dropdown; click a row's \"Free\" cell to toggle exemption. Setting \"Actual Attend\" to "
-                    "\"Yes\" auto-fills Amount from Tab 1's \"Expected event budget\" (0 if marked Free) — "
-                    "you can still overwrite Amount by hand afterward. Select rows and use Ctrl+C / Ctrl+V "
-                    "to copy/paste to or from Excel, or Delete to clear a row's tracking fields. Every "
-                    "change is saved automatically to the Attendance_Payment_{EventID}.xlsx file.",
-            font=("Arial", 8, "italic")).grid(row=11, column=0, columnspan=3, sticky="w", padx=10)
-
-        attend_btns = ttk.Frame(f)
-        attend_btns.grid(row=12, column=0, columnspan=3, sticky="w", **pad)
-        ttk.Button(attend_btns, text="🔄 Refresh list from Tab 4", command=self._refresh_attendance_list)\
-            .pack(side="left", padx=(0, 6))
-        # MỚI: dữ liệu giờ tự động lưu vào database sau MỌI thay đổi (xem
-        # _commit_attendance_edit(), _on_attendance_free_click(),
-        # _on_attendance_delete_key()) — nút này giờ chỉ để xuất ra 1 file
-        # Excel khi cần báo cáo/gửi người khác, không phải nơi lưu trữ chính.
-        ttk.Button(attend_btns, text="📊 Export to Excel", command=self._export_attendance_to_excel)\
-            .pack(side="left", padx=6)
-
+        attendance = Card(f, "Attendance & payment",
+                          "Fill in after the event. The list follows the Yes / Maybe votes each time this "
+                          "page opens, and every change is saved automatically.")
+        attendance.pack(**gap)
+        # Every edit is saved to the database already; this only writes a
+        # file to share or archive.
+        ttk.Button(attendance.actions, text="📊 Export to Excel", command=self._export_attendance_to_excel)\
+            .pack()
+        WrapLabel(attendance.body, style="Hint.TLabel",
+                  text="Double-click Name, Vote or Amount to edit; Actual Attend opens a Yes / No list; click "
+                       "Free to exempt someone. Actual Attend = Yes fills Amount from the expected event "
+                       "budget (0 if Free). Ctrl+C / Ctrl+V copy to and from Excel; Delete clears a row's "
+                       "tracking.").pack(fill="x", pady=(0, 10))
         attend_cols = ("no", "name", "vote", "actual_attend", "free", "amount")
-        attend_container, self.tree_attendance = make_scrollable_treeview(f, columns=attend_cols, height=14)
+        attend_container, self.tree_attendance = make_scrollable_treeview(
+            attendance.body, columns=attend_cols, height=12)
         attend_headers = ["No.", "Name", "Vote", "Actual Attend", "Free", "Amount"]
-        attend_widths = [40, 240, 70, 110, 60, 100]
+        attend_widths = [44, 260, 80, 120, 64, 110]
         for c, h, w in zip(attend_cols, attend_headers, attend_widths):
-            self.tree_attendance.heading(c, text=h)
             anchor = "center" if c in ("no", "vote", "actual_attend", "free") else ("e" if c == "amount" else "w")
-            self.tree_attendance.column(c, width=w, anchor=anchor)
-        attend_container.grid(row=13, column=0, columnspan=3, sticky="w", padx=10, pady=6)
-        # "Actual Attend" opens a readonly Yes/No dropdown (see
-        # _begin_cell_edit_combobox()); Name/Vote/Amount get a normal
-        # type-in-place Entry; "No." and "Free" are not double-click
-        # editable ("Free" toggles on single-click instead — see
-        # _on_attendance_free_click(), bound separately below so the two
-        # bindings don't conflict).
+            self.tree_attendance.heading(c, text=h, anchor=anchor)
+            self.tree_attendance.column(c, width=w, anchor=anchor, stretch=c == "name")
+        attend_container.pack(fill="both", expand=True)
+        # "Actual Attend" opens a readonly Yes/No dropdown; Name/Vote/Amount a
+        # type-in-place Entry; "Free" toggles on single-click (bound
+        # separately so the two bindings don't conflict).
         self.tree_attendance.bind("<Double-1>", self._on_attendance_tree_double_click)
         self.tree_attendance.bind("<Button-1>", self._on_attendance_free_click)
         self._enable_treeview_copy_paste(
             self.tree_attendance, on_commit=self._commit_attendance_edit,
             editable_cols={"name", "vote", "actual_attend", "free", "amount"})
-        # Select rows and press Delete/Backspace to clear that row's
-        # tracking fields (Actual Attend/Free/Amount) back to blank — Name
-        # and Vote are left untouched since they're identity data pulled
-        # from Tab 4, not something you'd normally want to blank out by
-        # accident. See _on_attendance_delete_key().
+        # Delete/Backspace clears the row's tracking fields (Actual Attend/
+        # Free/Amount); Name and Vote come from Tab 4 and are left alone.
         self.tree_attendance.bind("<Delete>", self._on_attendance_delete_key)
         self.tree_attendance.bind("<BackSpace>", self._on_attendance_delete_key)
 
-        totals_frame = ttk.Frame(f)
-        totals_frame.grid(row=14, column=0, columnspan=3, sticky="w", **pad)
-        ttk.Label(totals_frame, text="Total actual attend:").pack(side="left")
-        self.var_total_actual_attend = tk.StringVar(value="0")
-        ttk.Label(totals_frame, textvariable=self.var_total_actual_attend, font=("Arial", 10, "bold"))\
-            .pack(side="left", padx=(4, 24))
-        ttk.Label(totals_frame, text="Total collected amount:").pack(side="left")
-        self.var_total_collected_amount = tk.StringVar(value="0")
-        ttk.Label(totals_frame, textvariable=self.var_total_collected_amount, font=("Arial", 10, "bold"))\
-            .pack(side="left", padx=(4, 0))
-
-        # MỚI: "Amount paid" — số tiền THỰC TẾ đã trả (vd đặt cọc/thanh
-        # toán trước cho nhà hàng, chuyển khoản cho Guest of Honor...),
-        # nhập tay vì con số này KHÔNG thể tự suy ra được từ bảng
-        # Attendance. "Remaining amount" tự tính = Total collected amount −
-        # Amount paid, cập nhật ngay khi gõ (self.var_amount_paid.trace_add
-        # bên dưới) hoặc khi bảng Attendance đổi (_update_attendance_totals
-        # gọi lại cùng công thức). Giá trị Amount paid được lưu theo từng
-        # Event ID trong database (cột "AmountPaid" ở bảng events, xem
-        # db.py) — nạp lại tự động bởi "Load setup from selected event".
-        paid_frame = ttk.Frame(f)
-        paid_frame.grid(row=15, column=0, columnspan=3, sticky="w", **pad)
-        ttk.Label(paid_frame, text="Amount paid:").pack(side="left")
-        self.var_amount_paid = tk.StringVar(value="0")
-        ttk.Entry(paid_frame, textvariable=self.var_amount_paid, width=14)\
-            .pack(side="left", padx=(4, 24))
-        ttk.Label(paid_frame, text="Remaining amount:").pack(side="left")
-        self.var_remaining_amount = tk.StringVar(value="0")
-        ttk.Label(paid_frame, textvariable=self.var_remaining_amount, font=("Arial", 10, "bold"))\
-            .pack(side="left", padx=(4, 0))
-        # Ghi chú nhỏ để không ai nhầm đây là số tự tính từ bảng.
-        ttk.Label(paid_frame, text="  (type the amount actually paid out; "
-                                    "remaining = Total collected − Amount paid)",
-                  font=("Arial", 8, "italic")).pack(side="left")
-        self.var_amount_paid.trace_add("write", lambda *a: self._on_amount_paid_changed())
-
-        # ── Thank You email (post-event, MỚI) ──
-        # Soạn sẵn nội dung email cảm ơn mọi người đã tham gia, cùng cách
-        # làm với Appointment body ở trên: đa ngôn ngữ (English/Japanese/
-        # Vietnamese/Bilingual), có thể sửa tay trước khi gửi, tự refresh
-        # theo Tab 1 khi CHƯA hand-edit (xem _refresh_thankyou_body_display()
-        # / _apply_thankyou_body_lang(), cùng cơ chế với
-        # _refresh_calendar_datetime_display()). Người nhận = những ai
-        # "Actual Attend" = Yes trong bảng ở trên (xem _send_thank_you_email()).
-        ttk.Separator(f).grid(row=16, column=0, columnspan=3, sticky="ew", padx=10, pady=10)
-
-        ttk.Label(f, text="Thank You email (send after the event):",
-                  font=("Arial", 10, "bold")).grid(row=17, column=0, columnspan=2, sticky="w", **pad)
-        self._make_wrapping_label(
-            f, text="Sent to everyone marked \"Actual Attend\" = Yes above. Automatically attaches "
-                    "the Attendance & Payment Excel report (with everyone's attendance/cost info), "
-                    "and the Calendar Invite for this event if it can be found in your Calendar "
-                    "(best-effort — see the confirmation message after sending).",
-            font=("Arial", 8, "italic")).grid(row=18, column=0, columnspan=3, sticky="w", padx=10)
-
-        thankyou_header = ttk.Frame(f)
-        thankyou_header.grid(row=19, column=0, columnspan=2, sticky="w", **pad)
-        ttk.Label(thankyou_header, text="   Language:").pack(side="left")
+        # ── Thank You email: to everyone with "Actual Attend" = Yes; refreshes
+        # from Tab 1 until hand-edited (see _refresh_thankyou_body_display()). ──
+        thankyou = Card(f, "Thank-you email",
+                        "To everyone marked Actual Attend = Yes. Attaches the attendance & payment report, "
+                        "and the Calendar Invite if it can be found in your Calendar.")
+        thankyou.pack(fill="x")
+        thankyou_header = ttk.Frame(thankyou.body)
+        thankyou_header.pack(fill="x", pady=(0, 8))
+        ttk.Label(thankyou_header, text="Language", style="Field.TLabel").pack(side="left", padx=(0, 8))
         self.combo_thankyou_lang = ttk.Combobox(
             thankyou_header, width=26, state="readonly",
             values=[LANG_LABELS["en"], LANG_LABELS["ja"], LANG_LABELS["vi"], LANG_LABELS["bilingual"]],
         )
         self.combo_thankyou_lang.current(0)  # default: English
-        self.combo_thankyou_lang.pack(side="left", padx=(4, 0))
+        self.combo_thankyou_lang.pack(side="left")
         self.combo_thankyou_lang.bind("<<ComboboxSelected>>", lambda e: self._apply_thankyou_body_lang())
-
-        thankyou_container, self.txt_thankyou_body = make_scrollable_text(f, width=100, height=6)
+        thankyou_container, self.txt_thankyou_body = make_scrollable_text(thankyou.body, width=40, height=6)
         default_thankyou_body = build_thankyou_body("en", *self._thankyou_body_args())
         self.txt_thankyou_body.insert("1.0", default_thankyou_body)
         self.var_thankyou_body_default = default_thankyou_body  # Keep track of default for reset
-        thankyou_container.grid(row=20, column=0, columnspan=2, sticky="w", padx=10, pady=4)
-
-        ttk.Button(f, text="📧 Send Thank You email to confirmed attendees",
-                   command=self._send_thank_you_email).grid(row=21, column=0, sticky="w", **pad)
+        thankyou_container.pack(fill="x")
+        ttk.Button(thankyou.body, text="📧 Send Thank You email to confirmed attendees", style="Primary.TButton",
+                   command=self._send_thank_you_email).pack(anchor="w", pady=(12, 0))
 
     def _refresh_attendance_list(self):
         """Rebuilds self._attendance_roster (the source of truth for the
@@ -4098,11 +3641,24 @@ class RSVPApp(tk.Tk):
         switching back to this tab doesn't wipe out attendance already
         marked); brand-new voters default to Actual Attend = "Yes" (with
         Amount auto-filled to match), per the requirement that Yes is the
-        default rather than blank."""
-        if not hasattr(self, "tree_responses"):
+        default rather than blank.
+
+        Runs when Tab 5 opens. The table belongs to one event
+        (self._attendance_event): when Tab 1 now shows another, the roster is
+        first replaced by what is saved for that event, so marks never move
+        between events; votes are merged only from a Tab 4 table that was
+        scanned for that same event."""
+        current_id = self.var_event_id.get().strip()
+        if self._attendance_event != current_id:
+            try:
+                saved = db.load_attendance_roster(current_id, self.history_path.get()) if current_id else {}
+            except Exception:
+                saved = {}
+            self._attendance_roster = saved
+            self._attendance_event = current_id or None
+        if not current_id or current_id != self._last_scanned_event_id:
+            self._render_attendance_tree()
             return
-        if not hasattr(self, "_attendance_roster"):
-            self._attendance_roster = {}  # email -> {"name","vote","actual_attend","free","amount"}
         new_roster = {}
         newly_added = []
         for iid in self.tree_responses.get_children():
@@ -4129,8 +3685,6 @@ class RSVPApp(tk.Tk):
         self._render_attendance_tree()
 
     def _render_attendance_tree(self):
-        if not hasattr(self, "tree_attendance") or not hasattr(self, "_attendance_roster"):
-            return
         self.tree_attendance.delete(*self.tree_attendance.get_children())
         for i, (email, info) in enumerate(self._attendance_roster.items(), start=1):
             amount = info.get("amount", 0.0)
@@ -4282,32 +3836,62 @@ class RSVPApp(tk.Tk):
             format_amount(remaining_amount(total_collected, amount_paid)))
 
     def _on_amount_paid_changed(self):
-        """Recomputes Remaining amount and auto-saves "Amount paid" to the
-        database (events table, "AmountPaid" column) as the user types —
-        same auto-save-on-every-edit pattern as the rest of the Attendance
-        & Payment tab. Typing before an Event ID exists is not an error and
-        stays silent, but a save that actually FAILS is reported: this field
-        is money, and it used to swallow every exception, so a locked or
-        unwritable database lost the figure with the UI still showing it as
-        entered. Reported once per run rather than on every keystroke, since
-        this fires from a trace_add on each character typed."""
+        """Recomputes Remaining amount and auto-saves "Amount paid" as the user
+        types, to the event it belongs to (self._amount_paid_event) — never
+        to whatever Tab 1 shows. It is money, so a save that fails is
+        reported, once per run rather than on every keystroke: it used to
+        swallow every exception, losing the figure while the UI still showed
+        it as entered. It only UPDATEs: an event that is not in History yet
+        gets no row of its own, and the user is told to save it first."""
         self._refresh_remaining_amount()
-        event_id = self.var_event_id.get().strip()
+        if self._amount_paid_quiet:
+            return
+        event_id = self._amount_paid_event
         if not event_id:
             return
         try:
-            db.save_event_record(
-                {"EventID": event_id, "AmountPaid": self.var_amount_paid.get()},
-                self.history_path.get())
-            self._amount_paid_save_failed = False
+            saved = db.update_event(event_id, {"AmountPaid": self.var_amount_paid.get()},
+                                    self.history_path.get())
         except Exception as exc:
-            if not getattr(self, "_amount_paid_save_failed", False):
-                self._amount_paid_save_failed = True
-                messagebox.showwarning(
-                    "Amount paid not saved",
-                    f"'Amount paid' could not be written to the database:\n\n{exc}\n\n"
-                    f"The value on screen is NOT saved. Check that {self.history_path.get()} "
-                    f"is writable and not open in another program, then re-enter it.")
+            saved, reason = False, (f"It could not be written to the database:\n\n{exc}\n\n"
+                                    f"Check that {self.history_path.get()} is writable and not open "
+                                    f"in another program, then re-enter it.")
+        else:
+            reason = (f"Event ID '{event_id}' is not in History yet. Save it on Tab 1 "
+                      f"('💾 Save event details'), then re-enter Amount paid.")
+        if saved:
+            self._amount_paid_save_failed = False
+        elif not self._amount_paid_save_failed:
+            self._amount_paid_save_failed = True
+            messagebox.showwarning("Amount paid not saved",
+                                   f"The value on screen is NOT saved. {reason}")
+
+    def _set_amount_paid_quietly(self, value):
+        """Shows `value` as Amount paid without the trace saving it anywhere."""
+        self._amount_paid_quiet = True
+        try:
+            self.var_amount_paid.set(value)
+        finally:
+            self._amount_paid_quiet = False
+        self._refresh_remaining_amount()
+
+    def _refresh_amount_paid_for_current_event(self):
+        """Tab 5 opened: when the Amount paid on screen belongs to another
+        event than Tab 1's, show the one saved for Tab 1's event instead."""
+        current_id = self.var_event_id.get().strip()
+        if self._amount_paid_event == (current_id or None):
+            return
+        saved = "0"
+        if current_id:
+            try:
+                rec = next((r for r in db.load_history(self.history_path.get())
+                            if r.get("EventID") == current_id), None)
+            except Exception:
+                rec = None
+            if rec and rec.get("AmountPaid"):
+                saved = rec["AmountPaid"]
+        self._amount_paid_event = current_id or None
+        self._set_amount_paid_quietly(saved)
 
     # ── Attendance & Payment / Responded result — lưu vào database ──
     # MỚI: đã đổi từ file Excel Attendance_Payment_{EventID}.xlsx (2 sheet)
@@ -4323,8 +3907,8 @@ class RSVPApp(tk.Tk):
         vào database — gọi TỰ ĐỘNG sau mọi thay đổi (double-click, toggle
         Free, paste, Delete). Tên hàm giữ nguyên như cũ (dù giờ không còn
         ghi "file" Excel nữa) để không phải sửa lại các nơi đang gọi nó."""
-        event_id = self.var_event_id.get().strip()
-        if not event_id or not getattr(self, "_attendance_roster", None):
+        event_id = self._attendance_event  # the event this table belongs to
+        if not event_id or not self._attendance_roster:
             return
         try:
             db.save_attendance_roster(event_id, self._attendance_roster, self.history_path.get())
@@ -4341,29 +3925,46 @@ class RSVPApp(tk.Tk):
         try:
             roster = db.load_attendance_roster(event_id, self.history_path.get())
         except Exception:
-            return False
-        if not roster:
-            return False
+            roster = {}
         self._attendance_roster = roster
+        self._attendance_event = event_id
         self._render_attendance_tree()
-        return True
+        return bool(roster)
 
-    def _save_responded_result_to_file(self, silent=True):
-        """Lưu bảng "Responded / not yet responded" hiện tại của Tab 4
-        (self.responses) vào database — gọi tự động ngay sau mỗi lần Scan
-        Inbox thành công, và lại lần nữa khi bấm '🗂 Save event', để
-        '⬅ Load setup from selected event' khôi phục được kết quả quét gần
-        nhất mà KHÔNG cần quét lại Outlook (chỉ bấm '📨 Scan Inbox for Vote
-        results' mới thực sự quét lại — xem _collect_responses())."""
-        event_id = self.var_event_id.get().strip()
+    def _vote_counts_record(self):
+        """The Tab 4 table's counts, keyed by their History columns.
+        TotalInvited is the number of people tracked - Tab 2's rows with
+        group addresses expanded - the same denominator the table uses."""
+        counts = self._vote_counts
+        return {
+            "TotalInvited": len(self._last_responses_roster or []),
+            "Yes": counts.get("Yes", 0),
+            "No": counts.get("No", 0),
+            "Maybe": counts.get("Maybe", 0),
+            "NoResponse": counts.get("No response", 0),
+        }
+
+    def _autosave_scan_results(self):
+        """Saves Tab 4 to the database after every scan and every manual vote
+        edit: the responses (so '⬅ Load setup from selected event' restores
+        them without re-scanning Outlook) and the Yes/No/Maybe counts on the
+        event's History row. Keyed on the Event ID the table was scanned
+        for, which differs from Tab 1's while the status banner shows a stale
+        table; with no scan behind the table there is nothing to key on and
+        nothing is saved. Best-effort and silent, like every other auto-save."""
+        event_id = self._last_scanned_event_id
         if not event_id:
             return
+        path = self.history_path.get()
         try:
-            db.save_responses(event_id, self.responses, self._last_scan_time, self.history_path.get())
+            db.save_responses(event_id, self.responses, self._last_scan_time, path)
+            # UPDATE only: a scan never creates a History row of its own. The
+            # banner says so when the event has none yet.
+            self._scan_in_history = db.update_event(event_id, self._vote_counts_record(), path)
         except Exception:
-            if not silent:
-                raise
-            pass  # best-effort silent auto-save
+            return
+        if self._scan_in_history:
+            self._refresh_history_tree()
 
     def _load_responded_result_from_file(self, event_id):
         """Đọc kết quả Responded đã lưu trong database cho event_id, nạp
@@ -4380,77 +3981,16 @@ class RSVPApp(tk.Tk):
         self.responses = responses
         self._last_scanned_event_id = event_id
         self._last_scan_time = last_scan or datetime.now()
-        roster = self._build_effective_roster() if hasattr(self, "_build_effective_roster") else self.recipients
-        self._refresh_response_tree(0, roster)
+        self._scan_in_history = True  # loaded from the past-event list, so it has a row
+        self._refresh_response_tree(0, self._build_effective_roster())
         self._update_scan_status_banner()
         return True
 
     def _build_attendance_workbook(self):
-        """Dựng 1 openpyxl Workbook cho báo cáo Attendance & Payment —
-        TÁCH RIÊNG từ _export_attendance_to_excel() (giữ nguyên layout cũ)
-        để dùng chung ở 2 nơi: nút "📊 Export to Excel" (lưu ra file người
-        dùng chọn) VÀ file đính kèm tự động của email cảm ơn (lưu ra file
-        tạm, xem _send_thank_you_email()) — tránh code trùng lặp giữa 2
-        chỗ. MỚI: thêm 2 dòng "Amount paid"/"Remaining amount" (tính năng
-        #3) vào cuối báo cáo, ngay dưới "Total collected amount"."""
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = "Attendance & Payment"
-        headers = ["No.", "Name", "Email", "Vote", "Actual Attend", "Free", "Amount"]
-        for i, h in enumerate(headers, start=1):
-            c = ws.cell(row=1, column=i, value=h)
-            c.font = Font(bold=True, color="FFFFFF")
-            c.fill = PatternFill("solid", fgColor="003366")
-            c.alignment = Alignment(horizontal="center")
-        row_idx = 2
-        total_attend = 0
-        total_amount = 0.0
-        for i, (email, info) in enumerate(self._attendance_roster.items(), start=1):
-            attend = (info.get("actual_attend") or "").strip()
-            amount = info.get("amount", 0.0)
-            if attend.lower() == "yes":
-                total_attend += 1
-            total_amount += amount
-            ws.cell(row=row_idx, column=1, value=i)
-            ws.cell(row=row_idx, column=2, value=info["name"])
-            ws.cell(row=row_idx, column=3, value=email)
-            ws.cell(row=row_idx, column=4, value=info.get("vote", ""))
-            ws.cell(row=row_idx, column=5, value=attend)
-            ws.cell(row=row_idx, column=6, value="Yes" if info.get("free") else "No")
-            ws.cell(row=row_idx, column=7, value=amount or None)
-            row_idx += 1
-        total_row = row_idx + 1
-        ws.cell(row=total_row, column=2, value="Total actual attend:").font = Font(bold=True)
-        ws.cell(row=total_row, column=5, value=total_attend).font = Font(bold=True)
-        amount_row = total_row + 1
-        ws.cell(row=amount_row, column=2, value="Total collected amount:").font = Font(bold=True)
-        c_amt = ws.cell(row=amount_row, column=7, value=total_amount)
-        c_amt.font = Font(bold=True)
-        c_amt.number_format = "#,##0"
-        # MỚI: "Amount paid"/"Remaining amount" — đọc trực tiếp từ 2
-        # StringVar trên UI (đã tính sẵn bởi _refresh_remaining_amount()),
-        # thay vì tính lại ở đây, để LUÔN khớp đúng những gì đang hiển thị
-        # trên Tab 5 lúc xuất báo cáo.
-        amount_paid = parse_amount_from_text(getattr(self, "var_amount_paid", tk.StringVar(value="0")).get())
-        remaining = parse_amount_from_text(getattr(self, "var_remaining_amount", tk.StringVar(value="0")).get())
-        paid_row = amount_row + 1
-        ws.cell(row=paid_row, column=2, value="Amount paid:").font = Font(bold=True)
-        c_paid = ws.cell(row=paid_row, column=7, value=amount_paid)
-        c_paid.font = Font(bold=True)
-        c_paid.number_format = "#,##0"
-        remaining_row = paid_row + 1
-        ws.cell(row=remaining_row, column=2, value="Remaining amount:").font = Font(bold=True)
-        c_rem = ws.cell(row=remaining_row, column=7, value=remaining)
-        c_rem.font = Font(bold=True)
-        c_rem.number_format = "#,##0"
-        ws.column_dimensions["A"].width = 6
-        ws.column_dimensions["B"].width = 26
-        ws.column_dimensions["C"].width = 30
-        ws.column_dimensions["D"].width = 10
-        ws.column_dimensions["E"].width = 14
-        ws.column_dimensions["F"].width = 10
-        ws.column_dimensions["G"].width = 14
-        return wb
+        """The Attendance & Payment report for the Export button and the
+        Thank-you email's attachment (see reports.attendance_workbook())."""
+        return reports.attendance_workbook(
+            self._attendance_roster, parse_amount_from_text(self.var_amount_paid.get()))
 
     def _export_attendance_to_excel(self):
         """Xuất bảng Attendance & Payment ra 1 file Excel — CHỈ khi bấm nút
@@ -4463,7 +4003,7 @@ class RSVPApp(tk.Tk):
             return
         if not getattr(self, "_attendance_roster", None):
             messagebox.showwarning("List is empty",
-                                    "No one in the list yet — click '🔄 Refresh list from Tab 4' first.")
+                                    "No one in the list yet — it lists the Yes/Maybe votes scanned on Tab 4.")
             return
         out_path = filedialog.asksaveasfilename(
             title="Export Attendance & Payment to Excel",
@@ -4566,19 +4106,23 @@ class RSVPApp(tk.Tk):
                 self._yes_emails.append(email)
 
     def _send_calendar(self):
-        if not getattr(self, "_yes_emails", None):
+        if not self._yes_emails:
             messagebox.showwarning("No Yes/Maybe votes", "No one has voted Yes or Maybe yet, or responses haven't been scanned on Tab 4.")
+            return
+        if not self._table_belongs_to_tab1_event("calendar invite"):
             return
         try:
             hh, mm = self.var_start_time.get().split(":")
             eh, em = self.var_end_time.get().split(":")
+            base = get_date_obj(self.date_event)
+            start_dt = base.replace(hour=int(hh), minute=int(mm))
+            end_dt = base.replace(hour=int(eh), minute=int(em))
         except Exception:
-            messagebox.showerror("Invalid time format", "Enter time as HH:MM, e.g. 18:00")
+            messagebox.showerror("Invalid time format", "Enter Start/End time on Tab 1 as HH:MM, e.g. 18:00")
             return
-
-        base = get_date_obj(self.date_event)
-        start_dt = base.replace(hour=int(hh), minute=int(mm))
-        end_dt = base.replace(hour=int(eh), minute=int(em))
+        if end_dt <= start_dt:
+            messagebox.showerror("Invalid times", "End time on Tab 1 must be later than Start time.")
+            return
         subject = self.var_event_name.get()
         location = self.var_location.get()
         # Use custom appointment body from Tab 5
@@ -4587,15 +4131,14 @@ class RSVPApp(tk.Tk):
             body = self.var_appt_body_default
 
         event_id = self.var_event_id.get().strip()
+        attendees = list(self._yes_emails)
+        history_path = self.history_path.get()
 
-        # MỚI: chỉ tìm email UPDATE INVITE để đính kèm nếu RSVP_History.xlsx
-        # CÓ ghi nhận đã từng gửi update invite cho đúng Event ID này (cột
-        # UpdateInviteDate không trống) — đúng yêu cầu "chỉ dựa vào thông
-        # tin trong History để quyết định đính kèm gì", thay vì cứ quét
-        # Sent Items xem có khớp Subject hay không.
+        # Chỉ tìm email UPDATE INVITE để đính kèm nếu History CÓ ghi nhận đã
+        # từng gửi update invite cho đúng Event ID này (cột UpdateInviteDate).
         include_update = False
         try:
-            for rec in db.load_history(self.history_path.get()):
+            for rec in db.load_history(history_path):
                 if rec.get("EventID") == event_id:
                     include_update = bool(rec.get("UpdateInviteDate"))
                     break
@@ -4604,37 +4147,41 @@ class RSVPApp(tk.Tk):
 
         def worker():
             try:
-                # send_calendar_invite() giờ CHỈ tìm + đính kèm ĐÚNG 2 loại
-                # email dựa theo thông tin History: email mời GỐC (luôn tìm)
-                # và email UPDATE INVITE (chỉ tìm nếu include_update=True ở
-                # trên) — trong CÙNG 1 phiên COM (tránh bug reference hỏng
-                # đã gặp trước đây — xem docstring trong outlook_com.py).
-                # KHÔNG còn đính kèm nhầm email nhắc nhở hay email reply
-                # Yes/No/RE (xem docstring _find_all_sent_invite_mails()).
+                # send_calendar_invite() CHỈ tìm + đính kèm email mời GỐC (luôn
+                # tìm) và email UPDATE INVITE (nếu include_update=True), trong
+                # CÙNG 1 phiên COM — xem docstring trong outlook_com.py.
                 # attached_count = SỐ email đính kèm thành công.
                 appt, attached_count = self.outlook.send_calendar_invite(
-                    self._yes_emails, subject, location, start_dt, end_dt, body,
-                    attach_event_id=event_id or None,
+                    attendees, subject, location, start_dt, end_dt, body,
+                    attach_event_id=event_id,
                     include_update=include_update,
                 )
-                self._calendar_sent_flag = "Sent"
                 if attached_count:
                     attach_note = (f"\n\n📎 Found and attached {attached_count} email(s) "
                                     f"(original invite" + (" + update invite" if include_update else "")
                                     + f") related to this event.")
-                elif event_id:
+                else:
                     attach_note = (
                         "\n\n⚠️ Could not find/attach any confirmation email in Sent "
                         "Items (it may have been moved/deleted, sent from a different account, "
                         "or this EventID has no matching email) — the invite was still created "
                         "without an attachment."
                     )
-                else:
-                    attach_note = ""
+                # Outlook only OPENED the invite; whether it is sent is up to
+                # the user, so History records the opening, not a send.
+                history_note = ""
+                try:
+                    if db.update_event(
+                            event_id,
+                            {"CalendarSent": "Opened " + datetime.now().strftime("%Y-%m-%d %H:%M")},
+                            history_path):
+                        self.after(0, self._refresh_history_tree)
+                except Exception:
+                    history_note = "\n\n⚠️ Couldn't record this in History."
                 self.after(0, lambda: messagebox.showinfo(
                     "Done",
-                    f"Meeting invite opened for {len(self._yes_emails)} people. "
-                    "Review it and click Send in Outlook." + attach_note))
+                    f"Meeting invite opened for {len(attendees)} people. "
+                    "Review it and click Send in Outlook." + attach_note + history_note))
             except Exception as e:
                 err_msg = str(e)
                 self.after(0, lambda: messagebox.showerror("Error", f"Could not send the meeting invite:\n{err_msg}"))
@@ -4670,12 +4217,6 @@ class RSVPApp(tk.Tk):
                 "Empty content",
                 "Change the language dropdown to regenerate the text, or type the content by hand "
                 "before sending.")
-            return
-
-        if not getattr(self, "_attendance_roster", None):
-            messagebox.showwarning("List is empty",
-                                    "No one in the Attendance & Payment table yet — click "
-                                    "'🔄 Refresh list from Tab 4' first.")
             return
 
         event_id = self.var_event_id.get().strip()
@@ -4727,69 +4268,35 @@ class RSVPApp(tk.Tk):
 
     def _build_tab_history(self):
         f = self.tab_history.body
-        top = ttk.Frame(f)
-        top.pack(fill="x", padx=10, pady=8)
-        ttk.Label(top, text="Database file:").pack(side="left")
-        ttk.Entry(top, textvariable=self.history_path, width=40).pack(side="left", padx=6)
-        ttk.Button(top, text="📂 Browse...", command=self._browse_history_file).pack(side="left", padx=4)
-        ttk.Button(top, text="🔄 Reload", command=self._refresh_history_tree).pack(side="left", padx=4)
-        # Double-click any cell below to edit it directly, then click this
-        # button to write your changes back to the database (see
-        # _save_history_edits()). Nothing is written until you click Save —
-        # double-clicking only edits what's shown on screen.
-        ttk.Button(top, text="💾 Save changes", command=self._save_history_edits)\
-            .pack(side="left", padx=4)
-        # MỚI: kiến trúc lưu trữ đã đổi sang SQLite (rsvp_data.db) — bảng
-        # này giờ đọc/ghi thẳng vào DB, KHÔNG còn tự động đọc/ghi
-        # RSVP_History.xlsx nữa. Muốn có file Excel để báo cáo/gửi người
-        # khác thì bấm nút này để xuất TOÀN BỘ bảng hiện tại ra 1 file
-        # .xlsx mới — Excel giờ chỉ còn là "ảnh chụp" xuất ra khi cần, không
-        # phải nơi lưu trữ chính nữa.
-        ttk.Button(top, text="📊 Export to Excel", command=self._export_history_to_excel)\
-            .pack(side="left", padx=4)
 
-        self._make_wrapping_label(f, text="💡 Double-click any cell below to edit it in place (or select rows and use "
-                          "Ctrl+C / Ctrl+V to copy/paste to or from Excel), then click "
-                          "'💾 Save changes' to write your edits back to the database. "
-                          "(Renaming the Event ID column is supported — it moves the row under the new ID "
-                          "instead of creating a duplicate.) Use '📊 Export to Excel' any time you need a "
-                          "report file to share or archive — the database itself is the working copy.",
-                  font=("Arial", 8, "italic")).pack(anchor="w", padx=10, pady=(0, 4))
+        source = Card(f, "Database", "Every page reads and writes this file. Back it up now and then.")
+        source.pack(fill="x", pady=(0, 16))
+        row = ttk.Frame(source.body)
+        row.pack(fill="x")
+        ttk.Entry(row, textvariable=self.history_path).pack(side="left", fill="x", expand=True)
+        ttk.Button(row, text="📂 Browse...", command=self._browse_history_file).pack(side="left", padx=(8, 0))
 
-        # BUG ĐÃ SỬA: trước đây bảng này chỉ hiện 1 phần cột (thiếu Deadline,
-        # Location, OrganizerNote, RecipientFile, UpdateInviteDate,
-        # ReportFile, CalendarSent, ReminderSent — 8/24 cột có trong
-        # RSVP_History.xlsx bị bỏ sót). Giờ hiện ĐẦY ĐỦ toàn bộ, đúng thứ tự
-        # với db.EVENT_COLUMNS — cuộn ngang (thanh cuộn dưới cùng cửa sổ) để
-        # xem hết nếu màn hình không đủ rộng. Đã thêm "LastReminderSentDate"
-        # (log lại lần gần nhất bấm "Gửi email nhắc nhở" ở Tab 4) và 7 cột
-        # MỚI của tính năng "Event mode": EventMode/Organizer/GuestOfHonor/
-        # GiftBudget/StartTime/EndTime/GiftDeadline.
-        cols = ("EventID", "EventName", "EventDate", "Deadline", "Location", "Budget",
-                 "EmailLanguage", "OrganizerNote", "RecipientFile", "SentDate", "UpdateInviteDate",
-                 "TotalInvited", "Yes", "No", "Maybe", "NoResponse",
-                 "ReportFile", "CalendarSent",
-                 "ActualAttendees", "CostPerPerson", "TotalIncome", "TotalExpense", "Balance",
-                 "ReminderSent", "LastReminderSentDate",
-                 "EventMode", "Organizer", "GuestOfHonor", "GiftBudget", "GiftDeadline", "StartTime", "EndTime")
-        tree_container, self.tree_history = make_scrollable_treeview(f, columns=cols, height=18)
-        widths = [110, 170, 85, 85, 110, 90, 140, 220, 220, 120, 130,
-                  65, 45, 45, 55, 70,
-                  180, 90,
-                  85, 85, 80, 80, 75,
-                  120, 140,
-                  90, 140, 140, 100, 90, 65, 65]
-        headers = ["Event ID", "Event Name", "Date", "Deadline", "Location", "Budget",
-                   "Language", "Organizer Note", "Recipient File", "Sent Date", "Update Invite Date",
-                   "Invited", "Yes", "No", "Maybe", "No Resp.",
-                   "Report File", "Calendar Sent",
-                   "Actual Att.", "Cost/Person", "Income", "Expense", "Balance",
-                   "Reminder Sent", "Last Reminder Sent",
-                   "Event Mode", "Organizer", "Guest of Honor", "Gift Budget", "Gift Deadline", "Start", "End"]
-        for c, h, w in zip(cols, headers, widths):
-            self.tree_history.heading(c, text=h)
-            self.tree_history.column(c, width=w)
-        tree_container.pack(fill="both", expand=True, padx=10, pady=6)
+        events = Card(f, "Saved events",
+                      "Double-click a cell to edit it (Ctrl+C / Ctrl+V work with Excel too), then save: "
+                      "only the cells you edited are written. Renaming an Event ID moves the whole "
+                      "event — recipients, votes, attendance and gift list — to the new ID.")
+        events.pack(fill="both", expand=True)
+        # The database is the working copy; Export writes a snapshot file with
+        # every stored column. Nothing is written until "Save changes".
+        ttk.Button(events.actions, text="📊 Export to Excel", command=self._export_history_to_excel)\
+            .pack(side="right")
+        ttk.Button(events.actions, text="🔄 Reload", command=self._refresh_history_tree)\
+            .pack(side="right", padx=(0, 8))
+        ttk.Button(events.actions, text="💾 Save changes", style="Primary.TButton",
+                   command=self._save_history_edits).pack(side="right", padx=(0, 8))
+
+        cols = tuple(c for c, _h, _w in HISTORY_TABLE_COLUMNS)
+        tree_container, self.tree_history = make_scrollable_treeview(
+            events.body, columns=cols, height=16, horizontal=True)
+        for c, h, w in HISTORY_TABLE_COLUMNS:
+            self.tree_history.heading(c, text=h, anchor="w")
+            self.tree_history.column(c, width=w, stretch=False)
+        tree_container.pack(fill="both", expand=True)
         # Every column is editable via double-click (editable_cols=None ->
         # no restriction) — see _commit_history_edit(). This only updates
         # what's shown in the table; nothing is saved to disk until
@@ -4804,115 +4311,123 @@ class RSVPApp(tk.Tk):
         # is written to the database until '💾 Save changes' is clicked.
         self._enable_treeview_copy_paste(self.tree_history, on_commit=self._commit_history_edit)
 
+        self._history_edits = {}    # row iid -> {column: edited value}, not saved yet
+        self._history_row_ids = {}  # row iid -> the EventID that row has in the database
         self._refresh_history_tree()
 
     def _browse_history_file(self):
         path = filedialog.askopenfilename(filetypes=[("SQLite database", "*.db"), ("All files", "*.*")])
         if path:
             self.history_path.set(path)
+            self._history_edits = {}
             self._refresh_history_tree()
 
     def _refresh_history_tree(self):
+        """Redraws Tab 7 from the database. Edits not saved yet are laid back
+        on top, so an automatic write elsewhere (a scan, a reminder) that
+        refreshes this table never throws them away."""
         self.tree_history.delete(*self.tree_history.get_children())
         try:
             records = db.load_history(self.history_path.get())
         except Exception:
             records = []
+        cols = self.tree_history["columns"]
+        self._history_row_ids = {}
         for rec in records:
-            # Use the ORIGINAL Event ID as this row's Treeview iid — even if
-            # the user later edits the displayed Event ID cell, the iid
-            # stays fixed, so _save_history_edits() can still tell which
-            # row on disk each edited row corresponds to (needed to support
-            # renaming the Event ID without creating a duplicate row).
+            # The row's iid is its ORIGINAL Event ID, so an edited Event ID
+            # cell can still be traced back to its row in the database.
             base_iid = (rec.get("EventID") or "").strip() or "(blank)"
             iid = base_iid
             suffix = 2
             while self.tree_history.exists(iid):
                 iid = f"{base_iid}__{suffix}"
                 suffix += 1
-            self.tree_history.insert("", "end", iid=iid, values=(
-                rec.get("EventID"), rec.get("EventName"), rec.get("EventDate"),
-                rec.get("Deadline"), rec.get("Location"), rec.get("Budget"),
-                rec.get("EmailLanguage"), rec.get("OrganizerNote"), rec.get("RecipientFile"),
-                rec.get("SentDate"), rec.get("UpdateInviteDate"),
-                rec.get("TotalInvited"), rec.get("Yes"), rec.get("No"), rec.get("Maybe"), rec.get("NoResponse"),
-                rec.get("ReportFile"), rec.get("CalendarSent"),
-                rec.get("ActualAttendees"), rec.get("CostPerPerson"),
-                rec.get("TotalIncome"), rec.get("TotalExpense"), rec.get("Balance"),
-                rec.get("ReminderSent"), rec.get("LastReminderSentDate"),
-                rec.get("EventMode"), rec.get("Organizer"), rec.get("GuestOfHonor"),
-                rec.get("GiftBudget"), rec.get("GiftDeadline"), rec.get("StartTime"), rec.get("EndTime"),
-            ))
+            self._history_row_ids[iid] = rec.get("EventID")
+            pending = self._history_edits.get(iid, {})
+            values = [pending.get(c, "" if rec.get(c) is None else rec.get(c)) for c in cols]
+            self.tree_history.insert("", "end", iid=iid, values=values)
+        # Edits of rows that no longer exist cannot be saved anywhere.
+        self._history_edits = {iid: e for iid, e in self._history_edits.items()
+                               if iid in self._history_row_ids}
 
     def _commit_history_edit(self, row_id, col_name, new_value):
-        """Called after double-click editing a cell on Tab 7 — only updates
-        what's displayed in the Treeview (in memory). Nothing touches the
-        database until _save_history_edits() runs."""
+        """Called after double-click editing (or pasting into) a cell on Tab
+        7 — only updates the table and remembers the edit. Nothing touches
+        the database until _save_history_edits() runs."""
         if not self.tree_history.exists(row_id):
             return
         self.tree_history.set(row_id, col_name, new_value)
-
-    def _delete_history_row_by_event_id(self, event_id, path):
-        """Deletes the row whose EventID matches event_id — used only to
-        clean up the OLD row after a rename (see _save_history_edits()).
-        Thin wrapper around db.delete_event() so the caller doesn't need to
-        know it's now backed by SQLite instead of an Excel row."""
-        if not event_id:
-            return False
-        try:
-            return db.delete_event(event_id, path)
-        except Exception:
-            return False
+        self._history_edits.setdefault(row_id, {})[col_name] = new_value
 
     def _save_history_edits(self):
-        """Writes every row currently shown in the Tab 7 table back to the
-        database — this is what actually persists any double-click edits
-        made above. Uses db.save_event_record() for each row (matches/
-        updates by EventID, same as the rest of the app), so it correctly
-        UPDATES existing rows rather than duplicating them. If a row's
-        Event ID was changed (renamed), the row is saved under the NEW
-        Event ID and the OLD row is then removed, so renaming works
-        cleanly instead of leaving a stale duplicate behind."""
-        if not hasattr(self, "tree_history"):
+        """Writes the cells edited on Tab 7 — only those, so a value written
+        meanwhile by the app (vote counts, reminder and calendar times) is
+        never reverted by a stale copy of the table. An edited Event ID
+        moves the whole event, every column and every per-event table, to
+        the new ID (db.rename_event()); an ID that already holds data is
+        refused rather than merged."""
+        if not self._history_edits:
+            messagebox.showinfo("Nothing to save", "No cell has been edited since the last save.")
             return
-        cols = self.tree_history["columns"]
         path = self.history_path.get()
-        saved = 0
-        renamed = 0
-        errors = []
-        for row_id in self.tree_history.get_children():
-            values = self.tree_history.item(row_id, "values")
-            record = dict(zip(cols, values))
-            new_id = (record.get("EventID") or "").strip()
-            if not new_id:
-                continue  # no Event ID to key off of — can't safely save this row
+        saved, renamed, errors = 0, 0, []
+        for iid, edits in list(self._history_edits.items()):
+            original_id = self._history_row_ids.get(iid)
+            target_id = original_id
             try:
-                db.save_event_record(record, path)
+                if not original_id:
+                    raise ValueError("this row has no Event ID to save it under")
+                new_id = str(edits.get("EventID", original_id)).strip()
+                fields = {c: v for c, v in edits.items() if c != "EventID"}
+                if new_id != original_id:
+                    if not db.rename_event(original_id, new_id, path):
+                        raise ValueError("the row is no longer in the database")
+                    target_id = new_id
+                    renamed += 1
+                    self._follow_event_rename(original_id, new_id)
+                    # The row is drawn under its new ID from now on; keep the
+                    # other edits with it in case writing them fails below.
+                    del self._history_edits[iid]
+                    iid = new_id
+                    self._history_edits[iid] = fields
+                if fields and not db.update_event(target_id, fields, path):
+                    raise ValueError("the row is no longer in the database")
                 saved += 1
-                original_id = row_id  # Treeview iid was set to the ORIGINAL EventID on load
-                if original_id and original_id != new_id:
-                    if self._delete_history_row_by_event_id(original_id, path):
-                        renamed += 1
+                self._history_edits.pop(iid, None)
             except Exception as e:
-                errors.append(f"{new_id}: {e}")
+                errors.append(f"{original_id or iid}: {e}")
 
         self._refresh_history_tree()
+        self._refresh_history_combo_values()
         if errors:
             messagebox.showerror(
                 "Some rows failed to save",
-                f"Saved {saved} row(s), but {len(errors)} failed:\n\n" + "\n".join(errors[:10])
+                f"Saved {saved} row(s), but {len(errors)} failed (their edits are still on screen):\n\n"
+                + "\n".join(errors[:10])
             )
         else:
             note = f"\n\n({renamed} Event ID rename(s) applied.)" if renamed else ""
-            messagebox.showinfo("Saved", f"Saved {saved} row(s) to the database.{note}")
+            messagebox.showinfo("Saved", f"Saved the edits of {saved} row(s) to the database.{note}")
+
+    def _follow_event_rename(self, old_id, new_id):
+        """After an Event ID is renamed on Tab 7, everything the app holds for
+        that event follows it, so later auto-saves land on the renamed event
+        instead of re-creating data under the old ID."""
+        if self.var_event_id.get().strip() == old_id:
+            self.var_event_id.set(new_id)
+        for attr in ("_last_scanned_event_id", "_attendance_event", "_gift_event", "_amount_paid_event"):
+            if getattr(self, attr) == old_id:
+                setattr(self, attr, new_id)
+        self._update_scan_status_banner()
 
     def _export_history_to_excel(self):
-        """Exports every row currently shown in the Tab 7 table to a new
-        RSVP_History.xlsx-style Excel file — on demand only, since the
-        database is now the actual working copy (see db.py). Prompts for a
-        save location so it doesn't silently overwrite an old Excel file
-        left over from before the SQLite migration."""
-        if not hasattr(self, "tree_history") or not self.tree_history.get_children():
+        """Exports every row of the Tab 7 table to a new RSVP_History.xlsx-
+        style Excel file, with EVERY stored column: the ones shown come from
+        the table (edits not saved yet included), the hidden ones from the
+        database row. Prompts for a save location so it doesn't silently
+        overwrite an old Excel file left over from before the SQLite
+        migration."""
+        if not self.tree_history.get_children():
             messagebox.showwarning("Nothing to export", "There's no data in the table to export yet.")
             return
         out_path = filedialog.asksaveasfilename(
@@ -4924,19 +4439,18 @@ class RSVPApp(tk.Tk):
         if not out_path:
             return
         try:
-            cols = self.tree_history["columns"]
+            stored = {r.get("EventID"): r for r in db.load_history(self.history_path.get())}
+            shown_cols = self.tree_history["columns"]
+            cols = db.EVENT_COLUMNS
             wb = openpyxl.Workbook()
             ws = wb.active
             ws.title = "History"
-            for i, c in enumerate(cols, start=1):
-                cell = ws.cell(row=1, column=i, value=c)
-                cell.font = Font(bold=True, color="FFFFFF")
-                cell.fill = PatternFill("solid", fgColor="003366")
-                cell.alignment = Alignment(horizontal="center")
+            reports.write_header_row(ws, cols)
             for r, row_id in enumerate(self.tree_history.get_children(), start=2):
-                values = self.tree_history.item(row_id, "values")
-                for c, v in enumerate(values, start=1):
-                    ws.cell(row=r, column=c, value=v)
+                shown = dict(zip(shown_cols, self.tree_history.item(row_id, "values")))
+                record = stored.get(self._history_row_ids.get(row_id), {})
+                for c_idx, c in enumerate(cols, start=1):
+                    ws.cell(row=r, column=c_idx, value=shown[c] if c in shown else record.get(c))
             for i in range(1, len(cols) + 1):
                 ws.column_dimensions[get_column_letter(i)].width = 16
             wb.save(out_path)

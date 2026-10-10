@@ -34,7 +34,7 @@ share a report — it's no longer where "live" data is stored, unlike the older 
 | File | Role |
 |---|---|
 | `rsvp_app.py` | Main UI (7 tabs) — the file you run |
-| `rsvp/` | The app's package: `storage/db.py` (SQLite, `rsvp_data.db`), `adapters/outlook_com.py` (Outlook COM: emails, Calendar Invites), `export/` (Excel), `domain/`, `i18n/`, `ports/`, `services/` |
+| `rsvp/` | The app's package: `storage/db.py` (SQLite, `rsvp_data.db`), `storage/settings.py` (saved wording and Copilot prompt), `adapters/outlook_com.py` (Outlook COM: emails, Calendar Invites), `export/` (Excel reports and the one-time import of old Excel files), `domain/`, `i18n/`, `ports/`, `services/` |
 
 **Other supporting files:**
 
@@ -58,7 +58,10 @@ share a report — it's no longer where "live" data is stored, unlike the older 
 python rsvp_app.py
 ```
 
-The window opens with 7 tabs. For each new event, work through them left to right.
+The window opens with a sidebar listing the 7 steps of the workflow (the "tabs" below);
+for each new event, work through them top to bottom. The current Event ID is shown at the
+top right of every page. The look follows the Automation UI Kit (white cards, black primary
+buttons, colour only for status); its tokens live in `rsvp/ui/`.
 
 ---
 
@@ -66,14 +69,18 @@ The window opens with 7 tabs. For each new event, work through them left to righ
 
 ### Tab 1 — Event Setup
 Enter event details: Event ID (unique identifier used to match emails), event name,
-date/time (Start/End Time), location, deadline, budget. Choose an **Event Mode**:
+date/time (Start/End Time), location, deadline, budget. **💾 Save event details** writes them
+to History (no email is sent); **🆕 Save & start a new event** saves and then clears every
+page for the next event. Choose an **Event Mode**:
 - `Event` — a normal event
 - `Gift` — gift-contribution collection only (adds Organizer / Guest of Honor /
   Expected Gift Budget / Gift Contribution Deadline)
 - `Event + Gift` — both
 
 ### Tab 2 — Recipients
-Load the recipient list (Name + Email) from an Excel file, or enter manually.
+**Import from Excel…** (Name in column A, Email in column B, on any row — title and header
+rows are skipped, repeated addresses are dropped), or add people by hand. The list is saved
+to the database after every change; **Export to Excel** writes a file in the same layout.
 
 ### Tab 3 — Compose & Send
 Compose and send email using one of 3 send modes:
@@ -81,15 +88,18 @@ Compose and send email using one of 3 send modes:
 - **Send Gift Contribution Notice** — call for gift contributions
 - Choose language: English / Japanese / Vietnamese / Bilingual (JP+EN)
 
+The preview is rebuilt from Tab 1 each time you open the tab, unless you edited it by hand.
 Content can be hand-edited; supports bilingual translation via a copy-paste bridge with
 Microsoft Copilot (paste a ready-made prompt, paste the translated result back into the
 app).
 
 ### Tab 4 — Collect Responses
-**Scan Inbox** to automatically read Yes/No/Maybe responses from recipients' reply
-emails. Individual votes can be manually corrected (tick "Manual edit" to open a
-dropdown) — manually edited votes are preserved across future Scan Inbox runs, unless a
-newer reply email for that same person is found.
+**Scan Inbox** reads the Yes/No/Maybe replies from every folder of your mailbox. Individual
+votes can be manually corrected (tick "Manual edit" to open a dropdown) — manually edited
+votes are preserved across future Scan Inbox runs, unless a newer reply email for that same
+person is found. Results and the Yes/No/Maybe counts in History are saved automatically.
+The reminder (and Tab 5's Calendar Invite) is only sent once the event on Tab 1 has been
+scanned, so it can never go to another event's list.
 
 ### Tab 5 — Attendance & Payment
 Send Calendar Invites to Yes/Maybe recipients. Track actual attendance (Actual Attend)
@@ -98,13 +108,23 @@ auto-calculate "Remaining amount". After the event, send a **Thank You** email w
 Attendance & Payment Excel file and the Calendar Invite attached.
 
 ### Tab 6 — Gift Contribution
-Track who has contributed gift money (✅/⬜ checkboxes), with name/email search. Choose
+Track who has contributed gift money (✅/⬜ checkboxes), with name/email search.
+Double-click an Amount to type what someone actually gave. Choose
 who receives the report email (the "Send email" column, independent of "Contributed").
 Send a summary report email (no per-person list included) with a separate Excel file
 containing only the people who contributed.
 
 ### Tab 7 — Event History
 Review the full history of all created events, Yes/No/Maybe counts, and send status.
+Double-click a cell to edit it; **Save changes** writes only the cells you edited.
+Renaming an Event ID moves the whole event (recipients, votes, attendance, gift list).
+
+### Loading a past event
+**⬅ Load setup from selected event** (Tab 1) replaces everything the app holds for the
+current event with what is saved for the selected one — nothing carries over. It asks first
+when that would discard Copilot translations or email text you edited by hand. To use an
+event as a template, load it and change the Event ID: the recipient list follows the new ID,
+while votes, attendance, gift ticks and Amount paid stay with the original event.
 
 ---
 
@@ -134,7 +154,7 @@ illustrates the 3 steps.
 |---|---|
 | `ModuleNotFoundError: win32com` | `pywin32` not installed — run `pip install pywin32` again |
 | App can't open Outlook / sending fails | Outlook Desktop isn't open/signed in — open Outlook first, then retry |
-| Scan Inbox doesn't pick up new responses | Check that the Event ID in Tab 1 matches the one used when the invite was sent; make sure reply emails are in the Inbox (not moved to another folder by a rule) |
+| Scan Inbox doesn't pick up new responses | Check that the Event ID in Tab 1 matches the one used when the invite was sent. Outlook's search index can lag a minute behind new mail; if a scan finds nothing where votes were found before, the previous results are kept — scan again shortly |
 | Calendar Invite not attaching to the Thank You email | The Calendar Invite's Subject in Outlook must match the Event Name exactly for the app to find it (best-effort search) |
 | App errors related to `rsvp_data.db` on startup | Back up the old `.db` file, check it isn't locked/open by another program (SQLite lock) |
 
@@ -142,13 +162,12 @@ illustrates the 3 steps.
 
 ## 7. Current limitations
 
-- Only reads email from the **Inbox** — if you have a rule that auto-moves email to
-  another folder, you'll need to update the folder lookup in `rsvp/adapters/outlook_com.py`
 - Can't distinguish between two people sharing the same email address
 - The old "Actual cost tracking" feature (formerly in Tab 4) has been fully replaced by
-  the more detailed Tab 5 (Attendance & Payment) — the old DB columns are kept as-is
-  (not deleted) so historical event data isn't lost, but nothing reads/writes them
-  anymore
+  the more detailed Tab 5 (Attendance & Payment). Its DB columns, and two others nothing
+  writes any more (ReminderSent, ReportFile), are hidden from Tab 7 but kept in the
+  database, and History's **Export to Excel** still writes them
+- Amount paid is saved only for an event that is in History (save it on Tab 1 first)
 
 ---
 

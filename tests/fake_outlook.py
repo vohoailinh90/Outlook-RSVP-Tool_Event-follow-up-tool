@@ -26,10 +26,6 @@ class FakeOutlook:
                      use_voting_buttons=use_voting_buttons)
         return object()
 
-    def list_folder_paths(self, max_depth=3):
-        self._record("list_folder_paths", max_depth=max_depth)
-        return []
-
     def scan_voting_responses(self, event_id, folder_paths=None,
                               scan_all=False):
         self._record("scan_voting_responses", event_id=event_id,
