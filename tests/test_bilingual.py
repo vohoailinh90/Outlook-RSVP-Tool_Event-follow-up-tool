@@ -181,6 +181,10 @@ def test_angle_brackets_that_belong_to_the_text_are_kept():
     ("Start 6:00 PM", "開始 18:00", []),
     ("午後6時開始", "Starts at 6 p.m.", []),
     ("10:30 a.m.", "午前10時半", []),
+    # Found by Codex review: noon and midnight were not read as halves of the day.
+    ("Start 12:00 noon", "Start 12:00 midnight", ["12:00"]),
+    ("Ends 12:00 midnight", "午前0時終了", []),
+    ("Lunch at 12 noon", "昼12時から昼食", []),
     # Found by Codex review: a space after 午後 hid it, so 午後 6時 read as 6:00.
     ("午後 6時開始", "午前6時開始", ["18:00"]),
     ("午後\u30006時開始", "Starts at 6 PM", []),
@@ -328,6 +332,11 @@ def test_an_amount_in_another_currency_is_reported(copied, translated, extras):
     ("Budget 500,000 VNĐ", "Budget 500,000", ["500000 VND"]),
     ("Budget VNĐ 500,000", "予算 500,000 USD", ["500000 VND"]),
     ("Budget 500,000 VNĐ", "予算 500,000ドン", []),
+    # Found by Codex review: a decimal comma hid the amount and its unit.
+    ("Budget 12,5 EUR", "Budget 12,5", ["12.5 EUR"]),
+    ("Lãi suất 12,5%", "Rate 12.5", ["12.5%"]),
+    ("Budget 12,5 EUR", "予算 12.5ユーロ", []),
+    ("Budget 1,000.50 USD", "予算 1,000.50ドル", []),
 ])
 def test_an_amount_that_loses_its_currency_is_reported(copied, translated, gaps):
     assert translation_gaps(copied, translated) == gaps

@@ -269,8 +269,9 @@ def parse_bilingual_reply(text):
 _NUMBER = re.compile(r"((?<![\w+-])[+-])?(\d+(?:,\d{3})*)")
 # Times are compared as times of day on a 24-hour clock, so "18:00" matches
 # "18時", "6:00 PM", "6 PM" or "午後6時", and "10:30" matches "10時半" -
-# while "18:00" turned into "18:30", or PM into AM, is caught.
-_MERIDIEM = r"(?:\s*([AaPp])\.?\s*[Mm]\.?(?![A-Za-z]))"
+# while "18:00" turned into "18:30", or PM into AM, is caught. "12:00 noon"
+# is 12:00 and "12:00 midnight" 0:00.
+_MERIDIEM = r"(?:\s*(?:([AaPp])\.?\s*[Mm]\.?|((?i:noon|midnight)))(?![A-Za-z]))"
 _CLOCK_TIME = re.compile(r"(午前|午後)?\s*(?<!\d)(\d{1,2}):(\d{2})(?!\d)" + _MERIDIEM + "?")
 _JA_TIME = re.compile(r"(午前|午後)?[ \t]*(?<!\d)(\d{1,2})時(?!間)(?:(\d{1,2})分|(半))?")   # 3時間 is a duration
 _HOUR_MERIDIEM = re.compile(r"(?<![\d:])(\d{1,2})" + _MERIDIEM)
@@ -310,7 +311,8 @@ def _is_symbol(unit):
 # whole number, decimals included, never the end of "12.50" or "300.000".
 _LATIN = "A-Za-z\u00c0-\u1ef9"
 # Its sign follows the rule of _NUMBER: "¥-3,570" and "USD -500" keep theirs.
-_AMOUNT = r"((?<![\w+-])[+-])?(?<![\d.,])(\d+(?:,\d{3})*(?:\.\d+)?)(?![\d.,]*\d)"
+# A comma that does not group thousands is a decimal mark ("12,5 EUR" is 12.5).
+_AMOUNT = r"((?<![\w+-])[+-])?(?<![\d.,])(\d+(?:,\d{3})*(?:[.,]\d+)?)(?![\d.,]*\d)"
 _SYMBOL_FIRST = re.compile(rf"(?<![{_LATIN}\d])({_units(lambda u: _is_symbol(u) and u != '%')})"
                            rf"[ \t]?{_AMOUNT}",
                            re.IGNORECASE)   # "20€ 30€": the first € is the 20's
@@ -329,15 +331,16 @@ def _numbers(text):
 
     def take(hours, minutes, half_of_day=None):
         hours = int(hours)
-        if half_of_day in ("p", "P", "午後"):
+        half_of_day = (half_of_day or "").lower()
+        if half_of_day in ("p", "午後", "noon"):
             hours = hours % 12 + 12
-        elif half_of_day in ("a", "A", "午前"):
+        elif half_of_day in ("a", "午前", "midnight"):
             hours = hours % 12
         times[f"{hours}:{int(minutes):02d}"] += 1
         return " "
-    text = _CLOCK_TIME.sub(lambda m: take(m[2], m[3], m[4] or m[1]), text)
+    text = _CLOCK_TIME.sub(lambda m: take(m[2], m[3], m[4] or m[5] or m[1]), text)
     text = _JA_TIME.sub(lambda m: take(m[2], 30 if m[4] else (m[3] or 0), m[1]), text)
-    text = _HOUR_MERIDIEM.sub(lambda m: take(m[1], 0, m[2]), text)
+    text = _HOUR_MERIDIEM.sub(lambda m: take(m[1], 0, m[2] or m[3]), text)
     numbers = Counter(f"{sign}{int(digits.replace(',', ''))}"
                       for sign, digits in _NUMBER.findall(text))
     return numbers + times
@@ -356,8 +359,9 @@ def _priced(text):
     pairs = Counter()
 
     def take(sign, digits, unit):
-        digits = digits.replace(",", "")
-        amount = (sign or "") + (digits if "." in digits else str(int(digits)))
+        whole, fraction = re.fullmatch(r"(\d+(?:,\d{3})*)(?:[.,](\d+))?", digits).groups()
+        whole = str(int(whole.replace(",", "")))
+        amount = (sign or "") + (whole if fraction is None else f"{whole}.{fraction}")
         pairs[(amount, _CURRENCY_CODE[unit.lower()])] += 1
         return "_"    # a word character: "¥500-1,000円" leaves the 1,000 unsigned, as _numbers reads it
     text = unicodedata.normalize("NFKC", text).replace("\u2212", "-")   # − MINUS SIGN
