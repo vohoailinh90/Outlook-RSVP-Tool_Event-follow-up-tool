@@ -243,7 +243,7 @@ def test_a_typed_gift_amount_survives_ticking_contributed_again(app):
     assert db.load_gift_roster("EV1", app.db_path)["alice@example.com"]["manual_amount"] is True
 
 
-@pytest.mark.parametrize("typed", ["abc", "-500"])
+@pytest.mark.parametrize("typed", ["abc", "-500", "1 000"])
 def test_a_gift_amount_that_is_not_a_positive_number_is_refused(app, typed):
     _start_event(app)
     _select(app, app.tab_gift)
@@ -271,15 +271,18 @@ def test_search_filters_the_list_and_loads_the_event_shown(app):
 
 # ── Tab 2: group expansion reports what it could not list ──────────────
 
-def test_expanding_reports_groups_whose_members_could_not_be_listed(app):
+def test_expanding_keeps_a_group_not_every_member_of_which_could_be_listed(app):
+    """Codex review of PR #12: saving the members it could list dropped the
+    rest for good - the group's address, the only way back to them, was
+    gone. The group is kept as one row and the dialog says why."""
     app.recipients = [("Team", "team@example.com")]
     app.fake.groups["team@example.com"] = (
         [("Person A", "a@example.com")], ["Nested group"], ["Team: 2 direct (1 sub-groups, 1 people)"])
     app._expand_group_recipients()
     app.update()
     title, message = app.dialogs[-1][1:]
-    assert app.recipients == [("Person A", "a@example.com")]
-    assert "Nested group" in message and "MISSING" in message
+    assert app.recipients == [("Team", "team@example.com")]
+    assert "Nested group" in message and "kept as one row, not expanded" in message
 
 
 def test_working_on_an_event_with_no_tracked_money_keeps_its_typed_figures(app):
@@ -296,7 +299,7 @@ def test_working_on_an_event_with_no_tracked_money_keeps_its_typed_figures(app):
     assert (row["AmountPaid"], row["TotalIncome"], row["Balance"]) == ("100", "9,999", "500")
 
 
-@pytest.mark.parametrize("typed", ["abc", "-500"])
+@pytest.mark.parametrize("typed", ["abc", "-500", "1 000", "500 + 300"])
 def test_an_amount_cell_refuses_what_is_not_a_paid_amount(app, typed):
     """Review finding: parse_amount_from_text read "-500" as 500 and "abc"
     as 0, silently changing what someone paid."""
@@ -633,3 +636,13 @@ def test_choosing_whom_to_send_the_gift_report_to_keeps_typed_figures(app):
     app._gift_roster["alice@example.com"].update(checked=False, amount=0.0)
     app._save_gift_roster_to_db(silent=True)
     assert _row(app, "OLD1")["TotalIncome"] == "0"
+
+
+def test_a_later_rounds_amount_cell_refuses_two_numbers(app, monolith, monkeypatch):
+    """Codex review of PR #12: "1 000" in a later round's cell was saved as 1."""
+    _attendance(app)
+    key = _add_round(app, monolith, monkeypatch, "Karaoke")
+    app._commit_attendance_edit("alice@example.com", f"extra_{key}", "2,000")
+    app._commit_attendance_edit("alice@example.com", f"extra_{key}", "1 000")
+    assert app._attendance_roster["alice@example.com"]["extra_amounts"][key] == 2000.0
+    assert app.dialogs[-1][1] == "Amount not changed"

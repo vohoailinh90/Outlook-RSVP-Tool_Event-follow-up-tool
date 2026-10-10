@@ -1542,6 +1542,7 @@ class RSVPApp(tk.Tk):
             groups_expanded = []
             failed_groups = []
             groups_kept = []
+            groups_partial = []
             diag_lines = []
             errors = []
             for name, email in original:
@@ -1552,14 +1553,18 @@ class RSVPApp(tk.Tk):
                     errors.append(f"{email}: {e}")
                 failed_groups.extend(failed)
                 diag_lines.extend(diag)
-                if not members:
-                    # Not a group - or a group that listed nobody (members
-                    # Outlook could not list, or none with an email address):
-                    # keep the row, rather than save a list that has silently
-                    # lost everyone in it (the dialog says why).
+                if not members or failed:
+                    # Not a group - or one that listed nobody (no member with
+                    # an email address), or only part of its people (a
+                    # sub-group Outlook could not list): keep the row. Saving
+                    # the part would lose the rest for good - the group's
+                    # address, the only way back to them, would be gone; and
+                    # keeping both would invite those listed twice.
                     # Không phải group (hoặc không resolve được) -> giữ nguyên dòng gốc
                     if members is not None and not failed:
                         groups_kept.append(name or email)
+                    elif members is not None:
+                        groups_partial.append(name or email)
                     key = email.lower()
                     if key not in seen_emails:
                         seen_emails.add(key)
@@ -1592,9 +1597,13 @@ class RSVPApp(tk.Tk):
                     lines.append("\nThese groups listed nobody with an email address, so each was "
                                   "kept as one row:")
                     lines.extend(f"  • {g}" for g in groups_kept)
+                if groups_partial:
+                    lines.append("\n⚠️ Not every member of these groups could be listed, so each "
+                                  "was kept as one row, not expanded:")
+                    lines.extend(f"  • {g}" for g in groups_partial)
                 if failed_groups:
-                    lines.append("\n⚠️ These groups were found but their members could NOT be listed, "
-                                  "so their people are MISSING from the list above:")
+                    lines.append("\n⚠️ These (sub-)groups were found but their members could NOT "
+                                  "be listed:")
                     lines.extend(f"  • {g}" for g in dict.fromkeys(failed_groups))
                     lines.append(
                         "\nThis usually means Outlook is in Cached Exchange Mode and the Offline "
@@ -3798,19 +3807,20 @@ class RSVPApp(tk.Tk):
         """A typed Amount on Tab 6. Empty or 0 resets it (and forgets that it
         was typed). A positive amount is kept as typed - ticking Contributed
         again will not replace it with the budget - and marks the person as
-        Contributed, since the total counts every amount. Text without a
-        number, or a negative amount, is refused and the old value kept:
-        reading it as 0 would silently delete what that person gave."""
+        Contributed, since the total counts every amount. Text that is not
+        one number ("abc", "1 000"), or a negative amount, is refused and the
+        old value kept: reading it as 0 or 1 would silently change what that
+        person gave."""
         info = self._gift_roster.get(row_id)
         if info is None:
             return
         text = (new_value or "").strip()
         if not text:
             amount = 0.0
-        elif not re.search(r"\d", text):
+        elif unclear_typed_amount(text):
             messagebox.showwarning(
                 "Not a number",
-                f"“{text}” doesn't contain a number, so the amount was left unchanged.\n\n"
+                f"“{text}” is not one number, so the amount was left unchanged.\n\n"
                 "Type just the figure (e.g. 1000 or 1,000), or clear the cell to reset it to 0.")
             return
         elif text.startswith(("-", "\u2212")):
@@ -4292,9 +4302,9 @@ class RSVPApp(tk.Tk):
         # An empty Attend stays empty (not attending is "No", not blank).
         attend_value = "Yes" if truthy else ("No" if new_value else "")
         if (col_name == "amount" or col_name.startswith("extra_")) and new_value and (
-                not re.search(r"\d", new_value) or new_value.startswith(("-", "\u2212"))):
-            # Reading it as 0 - or a negative as positive - would silently
-            # change what that person paid.
+                unclear_typed_amount(new_value) or new_value.startswith(("-", "\u2212"))):
+            # Reading it as 0, a negative as positive or "1 000" as 1 would
+            # silently change what that person paid.
             if self._paste_refusals is not None:
                 self._paste_refusals.append(new_value)
                 return
