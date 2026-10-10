@@ -2689,22 +2689,24 @@ class RSVPApp(tk.Tk):
         # which is testable without Outlook. Expansion itself needs the
         # address book, so it is passed in rather than imported there.
         # A group that listed nobody stays one row to chase - tracking nobody
-        # for it would hide that its people never answered. Such a result,
-        # or one missing a sub-group, is not cached: the next scan asks again
+        # for it would hide that its people never answered. One missing a
+        # sub-group gives the people it could list AND keeps its own row for
+        # the rest. Neither result is cached: the next scan asks again
         # (Outlook's offline address book may have been downloaded meanwhile).
+        recipients = self.recipients if recipients is None else recipients
+        names = {(email or "").lower(): name for name, email in recipients}
         ask_again = set()
 
         def expand(email):
+            key = (email or "").lower()
             members, failed, _diag = self.outlook.expand_group_members_detailed(email)
             if members is not None and (failed or not members):
-                ask_again.add((email or "").lower())
+                ask_again.add(key)
+            if members and failed:
+                return list(members) + [(names.get(key) or email, email)]
             return members or None
 
-        roster = merge_expanded_roster(
-            self.recipients if recipients is None else recipients,
-            expand,
-            cache=self._group_expansion_cache,
-        )
+        roster = merge_expanded_roster(recipients, expand, cache=self._group_expansion_cache)
         for key in ask_again:
             self._group_expansion_cache.pop(key, None)
         return roster

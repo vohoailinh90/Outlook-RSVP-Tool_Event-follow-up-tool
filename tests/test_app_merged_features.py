@@ -347,6 +347,15 @@ def test_response_tracking_keeps_a_group_whose_members_could_not_be_listed(app, 
     assert roster == [("Team", "team@example.com"), ("Person A", "a@example.com")]
 
 
+def test_response_tracking_keeps_a_partly_listed_groups_row_for_the_rest(app):
+    """Codex review of PR #12: a group with one sub-group that could not be
+    listed was replaced by the people it could list, so that sub-group's
+    people vanished from "not responded" and the reminders."""
+    app.fake.groups["team@example.com"] = ([("Person A", "a@example.com")], ["Sub team"], [])
+    roster = app._build_effective_roster([("Team", "team@example.com")])
+    assert roster == [("Person A", "a@example.com"), ("Team", "team@example.com")]
+
+
 def test_a_group_not_listed_yet_is_asked_again_on_the_next_scan(app):
     """Third review: the failure was cached for the session, so downloading
     the address book changed nothing until the app restarted. People and
