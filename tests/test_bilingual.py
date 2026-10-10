@@ -229,6 +229,20 @@ def test_a_part_that_mentions_its_own_marker_is_not_cut_there():
     assert parse_bilingual_reply(_reply(en_note=en)) == (JA_NOTE, JA_DETAILS, en, EN_DETAILS)
 
 
+@pytest.mark.parametrize("en_note", [
+    "Please keep [JA DETAILS] exactly.",     # found by Codex review: after the real one
+    "Please keep [JA NOTE] and [EN DETAILS] as written.",
+])
+def test_a_part_that_mentions_another_parts_marker_is_not_cut_there(en_note):
+    assert parse_bilingual_reply(_reply(en_note=en_note)) == (
+        JA_NOTE, JA_DETAILS, en_note, EN_DETAILS)
+
+
+def test_glued_markers_of_an_answer_without_notes_still_split():
+    assert parse_bilingual_reply(f"[JA DETAILS]\n{JA_DETAILS}[EN DETAILS]\n{EN_DETAILS}") == (
+        "", JA_DETAILS, "", EN_DETAILS)
+
+
 def test_text_that_mentions_a_marker_mid_line_is_not_cut_there():
     ja = "英語版は [EN NOTE] をご覧ください。"
     assert parse_bilingual_reply(_reply(ja_note=ja)) == (ja, JA_DETAILS, EN_NOTE, EN_DETAILS)

@@ -132,12 +132,12 @@ def cleanup_pasted_translation(text):
 # details, each in Japanese and in English, under the markers [JA NOTE],
 # [JA DETAILS], [EN NOTE] and [EN DETAILS]. The '#', bold, 【】 and colon
 # Copilot sometimes puts around a marker belong to it. Markers at the start of
-# a line are taken first; one found mid-line counts only when no line-start
-# marker of the same part comes after it, and the marker before it opened a
-# different part. The copy quirk above can glue a marker - any one of them,
-# also in a corrected copy that follows a draft - to the words before it, while
-# text that merely mentions "[EN NOTE]" mid-line comes before the real marker
-# on its own line, or sits inside the [EN NOTE] part itself, and is not cut.
+# a line always count. One found mid-line - the copy quirk above can glue a
+# marker to the words before it, also in a corrected copy that follows a
+# draft - counts only when it opens the part that comes next in the reply's
+# order (a note may be skipped, and after the last part a new copy may start),
+# and no line-start marker of the same part follows it. Text that merely
+# mentions a marker mid-line, inside any part, is not cut there.
 _MARKER = (r"(?:[#>]+[ \t]*)?(?:\*\*|__)?[\[【]\s*"
            r"(?:(?P<ja>JA|JP|JAPANESE|日本語)|(?P<en>EN|ENGLISH|英語))"
            r"[ \t_\-]*(?:(?P<note>NOTE)|(?P<details>DETAILS?))"
@@ -163,6 +163,15 @@ def _marker_key(marker):
     return ("ja" if marker.group("ja") else "en", "note" if marker.group("note") else "details")
 
 
+# The parts that may follow each part, in the order the prompt asks for.
+_NEXT_PARTS = {
+    ("ja", "note"): {("ja", "details")},
+    ("ja", "details"): {("en", "note"), ("en", "details")},
+    ("en", "note"): {("en", "details")},
+    ("en", "details"): {("ja", "note"), ("ja", "details")},   # a corrected copy
+}
+
+
 def _reply_markers(text):
     at_line_start = list(_LINE_START_MARKER.finditer(text))
     last_at_line_start = {_marker_key(m): m.start() for m in at_line_start}
@@ -173,8 +182,9 @@ def _reply_markers(text):
     glued_ids = {id(m) for m in glued}
     markers = []
     for m in sorted(at_line_start + glued, key=lambda m: m.start()):
-        if id(m) in glued_ids and markers and _marker_key(markers[-1]) == _marker_key(m):
-            continue    # its own part's text, mentioning its marker
+        if (id(m) in glued_ids and markers
+                and _marker_key(m) not in _NEXT_PARTS[_marker_key(markers[-1])]):
+            continue    # text of the open part that mentions a marker
         markers.append(m)
     return markers
 
