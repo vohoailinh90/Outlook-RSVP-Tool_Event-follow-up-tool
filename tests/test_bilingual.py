@@ -212,6 +212,14 @@ def test_numbers_added_by_hand_to_one_half_must_reach_both_translations():
                             template=ja_template, other=(en_template, en_template)) == []
 
 
+def test_button_names_added_by_hand_to_one_half_must_reach_both_translations():
+    """Found by Codex review: only numbers crossed between the halves."""
+    ja_template, en_template = "Yes / No / Maybe を押す", "Click Yes / No / Maybe."
+    ja_edited = ja_template + "\n迷ったら Maybe を押してください。"
+    assert translation_gaps(en_template, "Click Yes / No / Maybe.", template=en_template,
+                            other=(ja_edited, ja_template)) == ["Maybe"]
+
+
 def test_a_note_in_two_languages_is_two_versions_of_one_note():
     """Found by Codex review: a note copied after a saved translation holds
     both halves, and its numbers were expected twice in each translation."""
@@ -248,6 +256,21 @@ def test_one_marker_glued_to_the_line_before_it_still_splits_there(glued):
     reply = _reply().replace("\n" + glued, glued)
     assert reply.count("\n" + glued) == 0
     assert parse_bilingual_reply(reply) == PARTS
+
+
+def test_a_corrected_copy_without_notes_replaces_the_drafts_notes():
+    """Found by Codex review: a corrected copy of the details only kept the
+    draft's notes beside them."""
+    reply = (_reply("draft note", "draft", "draft note", "draft")
+             + f"\n[JA DETAILS]\n{JA_DETAILS}\n[EN DETAILS]\n{EN_DETAILS}")
+    assert parse_bilingual_reply(reply) == ("", JA_DETAILS, "", EN_DETAILS)
+
+
+def test_template_brackets_go_also_beside_a_none_note():
+    """Found by Codex review: "(none)" has no brackets, so the details kept
+    the template's."""
+    reply = _reply("(none)", f"<{JA_DETAILS}>", "(none)", f"<{EN_DETAILS}>")
+    assert parse_bilingual_reply(reply) == ("", JA_DETAILS, "", EN_DETAILS)
 
 
 def test_a_corrected_copy_with_glued_markers_wins_over_the_draft():

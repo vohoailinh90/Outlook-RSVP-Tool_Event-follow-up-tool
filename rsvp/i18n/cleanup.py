@@ -206,7 +206,8 @@ def parse_bilingual_reply(text):
     the first marker ("Here is the translation:") is dropped, and so are
     divider lines and code fences around a part. The prompt's <...> brackets
     are dropped only when every part kept them - one part written as <TBD>
-    is the text itself. A marker found twice keeps its later part, as
+    is the text itself. A part named a second time starts a later copy, which
+    replaces the whole earlier answer - parts it leaves out included - as
     dedupe_pasted_translation() keeps the later copy. Text Copilot adds after
     the last part stays in it: the app shows the result for checking before
     anything is sent."""
@@ -219,11 +220,17 @@ def parse_bilingual_reply(text):
         if _PLACEHOLDER.fullmatch((_unwrapped(part) or part).lower()):
             continue    # the template, echoed back unfilled
         raw.append((_marker_key(marker), part))
-    wrapped = [part for _, part in raw if part]
-    if wrapped and all(_unwrapped(part) is not None for part in wrapped):
-        raw = [(key, _unwrapped(part) if part else part) for key, part in raw]
+    # "(none)" is written without brackets, as the prompt asks: it does not
+    # tell whether Copilot kept the template's brackets around its text.
+    texts = [part for key, part in raw
+             if part and not (key[1] == "note" and _is_no_note(part))]
+    if texts and all(_unwrapped(part) is not None for part in texts):
+        raw = [(key, _unwrapped(part) if _unwrapped(part) is not None else part)
+               for key, part in raw]
     found = {}
     for key, part in raw:
+        if key in found:
+            found = {}  # a part named again starts a later copy, which replaces all of the earlier one
         if key[1] == "note" and _is_no_note(part):
             part = ""
         if part or key[1] == "note":
@@ -292,8 +299,8 @@ def translation_gaps(source, translated, template=None, other=None):
     version that has it most, so one written into a single version must still
     reach the translation, and one in both is not expected twice.
 
-    other=(other_source, other_template) adds the numbers typed into the
-    other language's source beyond its built-in template - less those typed
+    other=(other_source, other_template) adds the numbers and button names
+    typed into the other language's source beyond its built-in template - less those typed
     into this source beyond `template` - so a deadline added by hand to one
     half of the fixed part must reach both translations, also when it repeats
     the event date, and one added to both halves counts once. The halves' own
@@ -307,9 +314,10 @@ def translation_gaps(source, translated, template=None, other=None):
         buttons |= _button_names(version)
     if other:
         other_source, other_template = other
-        added_there = _numbers(other_source) - _numbers(other_template)
-        added_here = expected - _numbers(template) if template is not None else Counter()
-        expected = expected + (added_there - added_here)
+        for counted, count in ((expected, _numbers), (buttons, _button_names)):
+            added_there = count(other_source) - count(other_template)
+            added_here = counted - count(template) if template is not None else Counter()
+            counted.update(added_there - added_here)
     missing = expected - _numbers(translated)
     def order(item):
         n = item[0]
