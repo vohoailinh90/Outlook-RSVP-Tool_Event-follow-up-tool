@@ -303,8 +303,8 @@ def _is_symbol(unit):
 _LATIN = "A-Za-z\u00c0-\u1ef9"
 # Its sign follows the rule of _NUMBER: "¥-3,570" and "USD -500" keep theirs.
 _AMOUNT = r"((?<![\w+-])[+-])?(?<![\d.,])(\d+(?:,\d{3})*(?:\.\d+)?)(?![\d.,]*\d)"
-_SYMBOL_FIRST = re.compile(rf"(?<![{_LATIN}])({_units(_is_symbol)})[ \t]?{_AMOUNT}",
-                           re.IGNORECASE)
+_SYMBOL_FIRST = re.compile(rf"(?<![{_LATIN}\d])({_units(_is_symbol)})[ \t]?{_AMOUNT}",
+                           re.IGNORECASE)   # "20€ 30€": the first € is the 20's
 _UNIT_AFTER = re.compile(rf"{_AMOUNT}[ \t-]?({_units(lambda u: True)})(?![{_LATIN}])",
                          re.IGNORECASE)   # "3,000 yen", "a 3,000-yen fee", "500円"
 _CODE_FIRST = re.compile(rf"(?<![{_LATIN}])({'|'.join(_CURRENCIES)})"
@@ -349,7 +349,7 @@ def _priced(text):
         digits = digits.replace(",", "")
         amount = (sign or "") + (digits if "." in digits else str(int(digits)))
         pairs[(amount, _CURRENCY_CODE[unit.lower()])] += 1
-        return " "
+        return "_"    # a word character: "¥500-1,000円" leaves the 1,000 unsigned, as _numbers reads it
     text = unicodedata.normalize("NFKC", text).replace("\u2212", "-")   # − MINUS SIGN
     text = _SYMBOL_FIRST.sub(lambda m: take(m[2], m[3], m[1]), text)
     text = _UNIT_AFTER.sub(lambda m: take(m[1], m[2], m[3]), text)

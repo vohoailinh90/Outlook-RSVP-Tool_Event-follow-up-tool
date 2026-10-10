@@ -309,6 +309,10 @@ def test_an_amount_in_another_currency_is_reported(copied, translated, extras):
     ("Balance USD -500", "残高 -500", ["-500 USD"]),
     ("Refund ¥-3,570", "返金 -3,570円", []),
     ("Balance USD -500", "残高 −500ドル", []),
+    # Found in review: the end of a range read as a negative amount.
+    ("¥500-1,000円", "¥500〜1,000円", []),
+    ("Fee ¥500-200円", "会費 ¥500〜200円", []),
+    ("20€ 30€", "20 euros, 30 euros", []),
 ])
 def test_an_amount_that_loses_its_currency_is_reported(copied, translated, gaps):
     assert translation_gaps(copied, translated) == gaps
