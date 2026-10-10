@@ -133,10 +133,11 @@ def cleanup_pasted_translation(text):
 # [JA DETAILS], [EN NOTE] and [EN DETAILS]. The '#', bold, 【】 and colon
 # Copilot sometimes puts around a marker belong to it. Markers at the start of
 # a line are taken first; one found mid-line counts only when no line-start
-# marker of the same part comes after it. The copy quirk above can glue a
-# marker - any one of them, also in a corrected copy that follows a draft - to
-# the words before it, while text that merely mentions "[EN NOTE]" mid-line
-# comes before the real marker on its own line, and is not cut there.
+# marker of the same part comes after it, and the marker before it opened a
+# different part. The copy quirk above can glue a marker - any one of them,
+# also in a corrected copy that follows a draft - to the words before it, while
+# text that merely mentions "[EN NOTE]" mid-line comes before the real marker
+# on its own line, or sits inside the [EN NOTE] part itself, and is not cut.
 _MARKER = (r"(?:[#>]+[ \t]*)?(?:\*\*|__)?[\[【]\s*"
            r"(?:(?P<ja>JA|JP|JAPANESE|日本語)|(?P<en>EN|ENGLISH|英語))"
            r"[ \t_\-]*(?:(?P<note>NOTE)|(?P<details>DETAILS?))"
@@ -169,7 +170,13 @@ def _reply_markers(text):
     glued = [m for m in _ANYWHERE_MARKER.finditer(text)
              if m.end() not in line_start_ends
              and m.start() > last_at_line_start.get(_marker_key(m), -1)]
-    return sorted(at_line_start + glued, key=lambda m: m.start())
+    glued_ids = {id(m) for m in glued}
+    markers = []
+    for m in sorted(at_line_start + glued, key=lambda m: m.start()):
+        if id(m) in glued_ids and markers and _marker_key(markers[-1]) == _marker_key(m):
+            continue    # its own part's text, mentioning its marker
+        markers.append(m)
+    return markers
 
 
 def parse_bilingual_reply(text):

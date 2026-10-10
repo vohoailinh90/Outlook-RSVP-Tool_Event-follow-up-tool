@@ -222,6 +222,13 @@ def test_a_corrected_copy_with_glued_markers_wins_over_the_draft():
     assert parse_bilingual_reply(reply) == PARTS
 
 
+def test_a_part_that_mentions_its_own_marker_is_not_cut_there():
+    """Found by Codex review: after the real [EN NOTE], the same marker
+    inside the English note counted as a glued one and cut the note short."""
+    en = "Please keep the [EN NOTE] tag here."
+    assert parse_bilingual_reply(_reply(en_note=en)) == (JA_NOTE, JA_DETAILS, en, EN_DETAILS)
+
+
 def test_text_that_mentions_a_marker_mid_line_is_not_cut_there():
     ja = "英語版は [EN NOTE] をご覧ください。"
     assert parse_bilingual_reply(_reply(ja_note=ja)) == (ja, JA_DETAILS, EN_NOTE, EN_DETAILS)
