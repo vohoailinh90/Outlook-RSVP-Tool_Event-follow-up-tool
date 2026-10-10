@@ -132,10 +132,11 @@ def cleanup_pasted_translation(text):
 # details, each in Japanese and in English, under the markers [JA NOTE],
 # [JA DETAILS], [EN NOTE] and [EN DETAILS]. The '#', bold, 【】 and colon
 # Copilot sometimes puts around a marker belong to it. Markers at the start of
-# a line are taken first; one found mid-line counts only for a part no
-# line-start marker names. The copy quirk above can glue a marker - any one of
-# them - to the words before it, while text that merely mentions "[EN NOTE]"
-# mid-line sits beside the real marker on its own line, and is not cut there.
+# a line are taken first; one found mid-line counts only when no line-start
+# marker of the same part comes after it. The copy quirk above can glue a
+# marker - any one of them, also in a corrected copy that follows a draft - to
+# the words before it, while text that merely mentions "[EN NOTE]" mid-line
+# comes before the real marker on its own line, and is not cut there.
 _MARKER = (r"(?:[#>]+[ \t]*)?(?:\*\*|__)?[\[【]\s*"
            r"(?:(?P<ja>JA|JP|JAPANESE|日本語)|(?P<en>EN|ENGLISH|英語))"
            r"[ \t_\-]*(?:(?P<note>NOTE)|(?P<details>DETAILS?))"
@@ -163,8 +164,11 @@ def _marker_key(marker):
 
 def _reply_markers(text):
     at_line_start = list(_LINE_START_MARKER.finditer(text))
-    named = {_marker_key(m) for m in at_line_start}
-    glued = [m for m in _ANYWHERE_MARKER.finditer(text) if _marker_key(m) not in named]
+    last_at_line_start = {_marker_key(m): m.start() for m in at_line_start}
+    line_start_ends = {m.end() for m in at_line_start}   # the same markers, found again
+    glued = [m for m in _ANYWHERE_MARKER.finditer(text)
+             if m.end() not in line_start_ends
+             and m.start() > last_at_line_start.get(_marker_key(m), -1)]
     return sorted(at_line_start + glued, key=lambda m: m.start())
 
 

@@ -186,6 +186,13 @@ def test_one_marker_glued_to_the_line_before_it_still_splits_there(glued):
     assert parse_bilingual_reply(reply) == PARTS
 
 
+def test_a_corrected_copy_with_glued_markers_wins_over_the_draft():
+    """Found by Codex review: the draft's line-start markers named every
+    part, so the corrected copy's glued markers were thrown away."""
+    reply = _reply("draft", "draft", "draft", "draft") + "\n" + _reply().replace("\n[", "[")
+    assert parse_bilingual_reply(reply) == PARTS
+
+
 def test_text_that_mentions_a_marker_mid_line_is_not_cut_there():
     ja = "英語版は [EN NOTE] をご覧ください。"
     assert parse_bilingual_reply(_reply(ja_note=ja)) == (ja, JA_DETAILS, EN_NOTE, EN_DETAILS)
@@ -414,6 +421,31 @@ def test_clearing_asks_before_replacing_edits(app, monolith, monkeypatch):
     app._clear_translated_email()
     assert _box(app.txt_fixed_preview).startswith(ja + "\n追記")
     assert app.full_translations["bilingual"]
+    # Found by Codex review: answering No still emptied the paste box.
+    assert _box(app.txt_translation_paste) == reply
+
+
+def test_an_answer_to_a_copy_from_the_other_send_mode_is_refused(app):
+    """Found by Codex review: copied as an invite, saved after switching to
+    Gift mode, the invite's details went into the gift notice."""
+    app.var_guest_of_honor.set("Guest Example")
+    _compose(app)
+    app._copy_email_for_translation()
+    reply = _answer(app)[0]
+    app.combo_send_mode.set("Send Gift Contribution Notice")
+    app._refresh_compose_preview()
+    _paste_and_save(app, reply)
+    assert app.dialogs[-1][:2] == ("showwarning", "Copied in another Send mode")
+    assert not app.gift_full_translations["bilingual"] and not app.full_translations["bilingual"]
+
+
+def test_a_second_save_after_a_saved_copy_does_not_ask_about_edits(app):
+    _compose(app)
+    app._copy_email_for_translation()
+    reply = _answer(app)[0]
+    _paste_and_save(app, reply)
+    _paste_and_save(app, reply)          # e.g. after 'Clean up spacing'
+    assert not [d for d in app.dialogs if d[0] == "askyesno"]
 
 
 def test_an_answer_that_drops_the_note_is_refused(app):

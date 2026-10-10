@@ -466,10 +466,11 @@ class RSVPApp(tk.Tk):
         # để tránh 2 loại nội dung email hoàn toàn khác nhau ghi đè lẫn nhau
         # khi chỉ đổi qua lại Send mode trên CÙNG 1 ngôn ngữ.
         self.gift_full_translations = {"en": "", "ja": "", "vi": "", "bilingual": ""}
-        # Bilingual translation bookkeeping, per Send mode ("invite"/"gift"):
-        # what the last Copy sent, and what Event setup said when the saved
-        # translation was made - see _bilingual_basis().
-        self._bilingual_copied = {}
+        # Bilingual translation bookkeeping: what the last Copy sent, and in
+        # which Send mode ("invite"/"gift"), until a Save uses it; and, per
+        # Send mode, what Event setup said when the saved translation was
+        # made - see _bilingual_basis().
+        self._bilingual_copied = None
         self._bilingual_basis_saved = {}
         # The text each draft generator last put in its box, so a box that
         # differs from it holds hand edits (see _hand_edited_drafts).
@@ -1031,7 +1032,7 @@ class RSVPApp(tk.Tk):
         # Tab 3 — translations are content of the old event's email
         self.full_translations = {"en": "", "ja": "", "vi": "", "bilingual": ""}
         self.gift_full_translations = {"en": "", "ja": "", "vi": "", "bilingual": ""}
-        self._bilingual_copied = {}
+        self._bilingual_copied = None
         self._bilingual_basis_saved = {}
         self.combo_send_mode.current(0)  # về lại "Send first Invite"
         self._refresh_send_button_label()
@@ -2289,7 +2290,7 @@ class RSVPApp(tk.Tk):
                 "The fixed part is empty. Click '🔄 Refresh preview from Tab 1 / Tab 2' to "
                 "rebuild it, then copy again.")
             return
-        self._bilingual_copied[self._mode_key()] = (note, details, self._bilingual_basis())
+        self._bilingual_copied = (self._mode_key(), note, details, self._bilingual_basis())
         self.clipboard_clear()
         self.clipboard_append(build_bilingual_prompt(note, details))
         shown = note if len(note) <= 300 else note[:300].rstrip() + " …"
@@ -2420,7 +2421,16 @@ class RSVPApp(tk.Tk):
             return
         ja_note, ja_details, en_note, en_details = parts
         mode = self._mode_key()
-        copied = self._bilingual_copied.get(mode)
+        if self._bilingual_copied and self._bilingual_copied[0] != mode:
+            copied_label = "Gift Contribution Notice" if self._bilingual_copied[0] == "gift" else "invite"
+            messagebox.showwarning(
+                "Copied in another Send mode",
+                f"The last Copy was the {copied_label} email, but Send mode has changed since, so "
+                "this answer belongs to the other email.\n\n"
+                "Switch Send mode back and Save, or copy this email and paste Copilot's new answer."
+                + dedupe_note)
+            return
+        copied = self._bilingual_copied[1:] if self._bilingual_copied else None
         now = (self._editable_box_text_for_translation(), self.txt_fixed_preview.get("1.0", "end").strip())
         source_note, source_details = copied[:2] if copied else now
 
@@ -2471,6 +2481,7 @@ class RSVPApp(tk.Tk):
 
         self._active_full_translations()["bilingual"] = text
         self._bilingual_basis_saved[mode] = copied[2] if copied else self._bilingual_basis()
+        self._bilingual_copied = None       # used: a later Save checks the boxes as saved
         self._refresh_compose_preview()
         messagebox.showinfo(
             "Saved & Applied",
@@ -2484,8 +2495,8 @@ class RSVPApp(tk.Tk):
     def _clear_translated_email(self):
         code = self._target_lang_code()
         if code == "bilingual":
-            self.txt_translation_paste.delete("1.0", "end")
             if not self._active_full_translations().get("bilingual", "").strip():
+                self.txt_translation_paste.delete("1.0", "end")
                 return      # nothing saved: leave the boxes, and any edits, alone
             if self._compose_box_texts() != getattr(self, "_compose_generated", None) and \
                     not messagebox.askyesno(
