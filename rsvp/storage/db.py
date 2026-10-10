@@ -208,19 +208,6 @@ def load_history(path=DB_FILE_DEFAULT):
     return [{c: row[c] for c in EVENT_COLUMNS} for row in rows]
 
 
-def delete_event(event_id, path=DB_FILE_DEFAULT):
-    """Xoá HẲN 1 sự kiện khỏi bảng events — dùng khi ĐỔI TÊN Event ID ở Tab
-    7 (Event History): lưu dòng mới dưới ID mới rồi xoá dòng cũ, tránh bị
-    trùng lặp (xem rsvp_app.py: _save_history_edits())."""
-    conn = get_connection(path)
-    try:
-        cur = conn.execute("DELETE FROM events WHERE EventID = ?", (event_id,))
-        conn.commit()
-        return cur.rowcount > 0
-    finally:
-        conn.close()
-
-
 # Every table keyed by EventID besides events itself.
 _PER_EVENT_TABLES = ("recipients", "gift_contributions", "attendance", "responses")
 
