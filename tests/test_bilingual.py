@@ -321,6 +321,10 @@ def test_an_amount_in_another_currency_is_reported(copied, translated, extras):
     ("10% off ¥500", "500円の10パーセント引き", []),
     # Found in review: a Latin word glued to a non-Latin unit hid it.
     ("50% off, ¥500 off", "50%OFF、500円OFF", []),
+    # Found by Codex review: VNĐ, which rsvp.domain.money reads, was not a unit.
+    ("Budget 500,000 VNĐ", "Budget 500,000", ["500000 VND"]),
+    ("Budget VNĐ 500,000", "予算 500,000 USD", ["500000 VND"]),
+    ("Budget 500,000 VNĐ", "予算 500,000ドン", []),
 ])
 def test_an_amount_that_loses_its_currency_is_reported(copied, translated, gaps):
     assert translation_gaps(copied, translated) == gaps

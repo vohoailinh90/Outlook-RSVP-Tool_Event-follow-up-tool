@@ -283,7 +283,7 @@ _CURRENCIES = {
     "JPY": ("¥", "円", "日本円", "yen", "Japanese yen", "JPY"),
     "USD": ("US$", "$", "USD", "dollars", "dollar", "US dollars", "US dollar", "ドル", "米ドル"),
     "EUR": ("€", "EUR", "euros", "euro", "ユーロ"),
-    "VND": ("₫", "đồng", "đ", "dong", "Vietnamese dong", "VND", "ドン"),
+    "VND": ("₫", "đồng", "đ", "dong", "Vietnamese dong", "VND", "VNĐ", "ドン"),
     "%": ("%", "percent", "per cent", "パーセント", "phần trăm"),
 }
 _CURRENCY_CODE = {unit.lower(): code for code, units in _CURRENCIES.items() for unit in units}
@@ -316,7 +316,8 @@ _SYMBOL_FIRST = re.compile(rf"(?<![{_LATIN}\d])({_units(lambda u: _is_symbol(u) 
                            re.IGNORECASE)   # "20€ 30€": the first € is the 20's
 _UNIT_AFTER = re.compile(rf"{_AMOUNT}[ \t-]?({_units(lambda u: True)})",
                          re.IGNORECASE)   # "3,000 yen", "a 3,000-yen fee", "500円"
-_CODE_FIRST = re.compile(rf"(?<![{_LATIN}])({'|'.join(c for c in _CURRENCIES if c.isalpha())})"
+_CODES = [unit for units in _CURRENCIES.values() for unit in units if unit.isalpha() and unit.isupper()]
+_CODE_FIRST = re.compile(rf"(?<![{_LATIN}])({'|'.join(_CODES)})"
                          rf"[ \t]?{_AMOUNT}", re.IGNORECASE)
 
 
