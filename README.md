@@ -95,10 +95,13 @@ app).
 
 **Bilingual (JP+EN):** the note box holds only your note, in any language; the fixed-part
 box holds the event details and voting instructions in Japanese and English, either side of
-a divider line. **📋 Copy note + prompt** sends just the note to Copilot, which answers with
-a `[JA]` part and an `[EN]` part in one go. Paste that answer back and Save: the note box then
-shows both languages, and each half of the email gets its own greeting and fixed part,
-Japanese first and English second. An empty note needs no translation at all.
+a divider line. **📋 Copy note + fixed part + prompt** sends both to Copilot in one prompt, and
+Copilot answers with a Japanese and an English version of each, under `[JA NOTE]`,
+`[JA DETAILS]`, `[EN NOTE]` and `[EN DETAILS]`. Paste that answer back and Save: the translated
+note goes into the note box and the translated details into the fixed-part box, and each half
+of the email gets its own greeting, Japanese first and English second. Wording you added to
+the fixed part is translated too. The fixed part is already in both languages, so an email
+can also be sent without translating.
 
 ### Tab 4 — Collect Responses
 **Scan Inbox** reads the Yes/No/Maybe replies from every folder of your mailbox. Individual

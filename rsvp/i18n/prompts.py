@@ -49,26 +49,61 @@ DEFAULT_PROMPT_SINGLE = (
     "its own line as in the source."
 )
 
-# The bilingual prompt sends only the organizer's note: the greeting and the
-# fixed part already exist in Japanese and English. Its reply format, a [JA]
-# part and an [EN] part, is what parse_bilingual_reply() in cleanup.py reads.
+# The bilingual prompt sends the whole email content except the greeting:
+# the organizer's note, in any language, and the fixed part (event details and
+# voting instructions) as the fixed box holds it, in Japanese and English and
+# possibly edited. build_bilingual_prompt() puts both in marked blocks near
+# the top. The reply - a Japanese and an English version of each part, under
+# four markers - is what parse_bilingual_reply() in cleanup.py reads.
+NO_NOTE = "(none)"
 DEFAULT_PROMPT_BILINGUAL = (
-    "Below is the organizer's note from an internal workplace event email. It may be "
-    "written in ANY language. Translate it into BOTH Japanese AND English. If it is "
-    "already in Japanese or English, keep its meaning and polish it in that language.\n\n"
-    "Translate ONLY the note. Do NOT add a greeting, a sign-off, event details or voting "
-    "instructions: the email already has them in both languages.\n\n"
-    "Reply in EXACTLY this format, keeping the two marker lines [JA] and [EN] as written, "
-    "and write nothing else (no title, no explanation):\n"
-    "[JA]\n"
-    "(the note in Japanese)\n"
-    "[EN]\n"
-    "(the note in English)\n\n"
-    "Keep a polite, professional tone suitable for a workplace email (Japanese: polite "
+    "Translate the email content below into BOTH Japanese AND English. It has two parts: "
+    "the organizer's NOTE, which may be written in ANY language, and the EVENT DETAILS with "
+    "the voting instructions, given in Japanese and in English (if the two versions differ, "
+    "keep everything from both). If a part is already in Japanese or English, keep its "
+    "meaning and polish it in that language.\n\n"
+    "===== NOTE =====\n"
+    "[NOTE]\n"
+    "===== EVENT DETAILS =====\n"
+    "[DETAILS]\n"
+    "===== END =====\n\n"
+    "Do NOT add a greeting or a sign-off: the email adds them.\n\n"
+    "Reply in EXACTLY this format and write nothing else (no title, no explanation). Keep "
+    "the four marker lines exactly as they are, and replace each line in angle brackets with "
+    "your translation (if the note is " + NO_NOTE + ", write " + NO_NOTE + " under both NOTE "
+    "markers):\n"
+    "[JA NOTE]\n"
+    "<the note in Japanese>\n"
+    "[JA DETAILS]\n"
+    "<the event details and voting instructions in Japanese>\n"
+    "[EN NOTE]\n"
+    "<the note in English>\n"
+    "[EN DETAILS]\n"
+    "<the event details and voting instructions in English>\n\n"
+    "Keep a polite, professional tone suitable for a workplace event email (Japanese: polite "
     "business style). Keep names, dates, numbers and amounts exactly as written. Do not "
     "summarize, merge or repeat sentences: translate everything exactly once.\n\n"
+    "Make both versions easy to scan by adding ONE relevant emoji icon inline right before "
+    "these types of information (no legend, just place the icon naturally in the sentence):\n"
+    "  ⏰ before any time / date / deadline\n"
+    "  📍 before any location / venue\n"
+    "  💰 before any cost / budget / price\n"
+    "  📋 before instructions or action items\n"
+    "  👥 before attendee / participant / headcount information\n"
+    "Use each icon at most once per sentence, and add none to the Yes/No/Maybe voting-button "
+    "list.\n\n"
     "FORMATTING: plain text only. Do NOT use Markdown anywhere (no **bold**, no '-' or '*' "
-    "bullet lists, no '#' headers, no code blocks). Write each paragraph as continuous "
-    "text and separate paragraphs with ONE blank line.\n\n"
-    "The note:"
+    "bullet lists, no '#' headers, no code blocks). Write each paragraph as continuous text "
+    "and separate paragraphs with ONE blank line. For the Yes/No/Maybe list, keep each bullet "
+    "('•' character) on its own line as in the source."
 )
+
+
+def build_bilingual_prompt(note, details):
+    """DEFAULT_PROMPT_BILINGUAL with the note and the fixed part in their
+    marked blocks; an empty note reads NO_NOTE. The template's placeholders
+    are filled before the content is, so content that says "[NOTE]" or
+    "[DETAILS]" is kept as written."""
+    head, rest = DEFAULT_PROMPT_BILINGUAL.split("[NOTE]", 1)
+    middle, tail = rest.split("[DETAILS]", 1)
+    return head + (note.strip() or NO_NOTE) + middle + details.strip() + tail
