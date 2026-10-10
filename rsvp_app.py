@@ -2500,11 +2500,16 @@ class RSVPApp(tk.Tk):
         ja_source, en_source = split_bilingual(source_details)
         en_source = ja_source if en_source is None else en_source
         ja_template, en_template = self._fixed_text("ja"), self._fixed_text("en")
+        # A note copied after a saved translation is already in both languages:
+        # its halves are two versions of one note, not two notes.
+        note_halves = split_bilingual(source_note)
+        note_versions = [half for half in note_halves if half] if note_halves[1] is not None \
+            else source_note
         gaps = [
-            ("Japanese note", translation_gaps(source_note, ja_note)),
+            ("Japanese note", translation_gaps(note_versions, ja_note)),
             ("Japanese details", translation_gaps(ja_source, ja_details, template=ja_template,
                                                   other=(en_source, en_template))),
-            ("English note", translation_gaps(source_note, en_note)),
+            ("English note", translation_gaps(note_versions, en_note)),
             ("English details", translation_gaps(en_source, en_details, template=en_template,
                                                  other=(ja_source, ja_template))),
         ]

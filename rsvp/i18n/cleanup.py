@@ -287,6 +287,11 @@ def translation_gaps(source, translated, template=None, other=None):
     voting-button names Yes, No and Maybe, counted the same way. [] when
     nothing is missing.
 
+    `source` may also be a list of versions of the same text - a note already
+    in Japanese and English: each number is then expected as often as the
+    version that has it most, so one written into a single version must still
+    reach the translation, and one in both is not expected twice.
+
     other=(other_source, other_template) adds the numbers typed into the
     other language's source beyond its built-in template - less those typed
     into this source beyond `template` - so a deadline added by hand to one
@@ -295,7 +300,11 @@ def translation_gaps(source, translated, template=None, other=None):
     differences in wording ("3 BUTTONS" in English only) do not count. A
     deterministic check, not a judgement: a correct translation that spells a
     number out ("three") is reported too, for a person to look at."""
-    expected = _numbers(source)
+    versions = source if isinstance(source, (list, tuple)) else [source]
+    expected, buttons = Counter(), Counter()
+    for version in versions:
+        expected |= _numbers(version)
+        buttons |= _button_names(version)
     if other:
         other_source, other_template = other
         added_there = _numbers(other_source) - _numbers(other_template)
@@ -306,6 +315,6 @@ def translation_gaps(source, translated, template=None, other=None):
         n = item[0]
         return (0, int(n), n) if ":" not in n else (1, 0, n)
     gaps = [n if k == 1 else f"{n} (×{k})" for n, k in sorted(missing.items(), key=order)]
-    lost_buttons = _button_names(source) - _button_names(translated)
+    lost_buttons = buttons - _button_names(translated)
     return gaps + [b if lost_buttons[b] == 1 else f"{b} (×{lost_buttons[b]})"
                    for b in _BUTTONS if lost_buttons[b]]

@@ -212,6 +212,16 @@ def test_numbers_added_by_hand_to_one_half_must_reach_both_translations():
                             template=ja_template, other=(en_template, en_template)) == []
 
 
+def test_a_note_in_two_languages_is_two_versions_of_one_note():
+    """Found by Codex review: a note copied after a saved translation holds
+    both halves, and its numbers were expected twice in each translation."""
+    versions = ["締切 10/10/2026", "Deadline 10/10/2026"]
+    assert translation_gaps(versions, "締切 2026年10月10日") == []
+    # A number written into one version only must still reach the translation.
+    assert translation_gaps(["締切 10/10/2026 18:00", "Deadline 10/10/2026"],
+                            "Deadline 10/10/2026") == ["18:00"]
+
+
 def test_a_hand_added_date_equal_to_the_event_date_is_counted_again():
     """Found by Codex review: taking the larger count let a deadline equal to
     the event date, typed into one half, be dropped from the other."""
@@ -570,6 +580,15 @@ def test_an_answer_to_a_copy_from_the_other_send_mode_is_refused(app):
     _paste_and_save(app, reply)
     assert app.dialogs[-1][:2] == ("showwarning", "Copied in another Send mode")
     assert not app.gift_full_translations["bilingual"] and not app.full_translations["bilingual"]
+
+
+def test_translating_a_saved_translation_again_raises_no_false_alarm(app):
+    _compose(app, note="Hạn chót 10/10/2026")
+    reply, ja, en = _answer(app, "締切 2026年10月10日", "Deadline 10/10/2026")
+    _paste_and_save(app, reply)
+    app._copy_email_for_translation()                  # the note is now JA + EN
+    _paste_and_save(app, _answer(app, "締切 2026年10月10日", "Deadline 10/10/2026")[0])
+    assert not [d for d in app.dialogs if d[0] == "askyesno"]
 
 
 def test_a_second_save_after_a_saved_copy_does_not_ask_about_edits(app):
