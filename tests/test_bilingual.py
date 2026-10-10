@@ -319,6 +319,8 @@ def test_an_amount_in_another_currency_is_reported(copied, translated, extras):
     ("Deposit: 50%", "手付金: 50％", []),
     ("Deposit: 50%", "Deposit: 50 percent", []),
     ("10% off ¥500", "500円の10パーセント引き", []),
+    # Found in review: a Latin word glued to a non-Latin unit hid it.
+    ("50% off, ¥500 off", "50%OFF、500円OFF", []),
 ])
 def test_an_amount_that_loses_its_currency_is_reported(copied, translated, gaps):
     assert translation_gaps(copied, translated) == gaps

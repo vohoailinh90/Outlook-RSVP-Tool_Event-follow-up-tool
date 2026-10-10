@@ -290,10 +290,15 @@ _CURRENCY_CODE = {unit.lower(): code for code, units in _CURRENCIES.items() for 
 
 
 def _units(keep):
-    # Longest first; a katakana unit is not the start of a longer word (ドンキ).
+    # Longest first; a word unit is not the start of a longer word ("5 đêm",
+    # ドンキ), while "50%OFF" and "500円OFF" keep theirs.
+    def unit_pattern(unit):
+        for letters in (_LATIN, "ァ-ヶー"):
+            if re.search(f"[{letters}]$", unit):
+                return re.escape(unit) + f"(?![{letters}])"
+        return re.escape(unit)
     units = sorted((unit for unit in _CURRENCY_CODE if keep(unit)), key=len, reverse=True)
-    return "|".join(re.escape(unit) + ("(?![ァ-ヶー])" if re.search("[ァ-ヶー]$", unit) else "")
-                    for unit in units)
+    return "|".join(map(unit_pattern, units))
 
 
 def _is_symbol(unit):
@@ -309,7 +314,7 @@ _AMOUNT = r"((?<![\w+-])[+-])?(?<![\d.,])(\d+(?:,\d{3})*(?:\.\d+)?)(?![\d.,]*\d)
 _SYMBOL_FIRST = re.compile(rf"(?<![{_LATIN}\d])({_units(lambda u: _is_symbol(u) and u != '%')})"
                            rf"[ \t]?{_AMOUNT}",
                            re.IGNORECASE)   # "20€ 30€": the first € is the 20's
-_UNIT_AFTER = re.compile(rf"{_AMOUNT}[ \t-]?({_units(lambda u: True)})(?![{_LATIN}])",
+_UNIT_AFTER = re.compile(rf"{_AMOUNT}[ \t-]?({_units(lambda u: True)})",
                          re.IGNORECASE)   # "3,000 yen", "a 3,000-yen fee", "500円"
 _CODE_FIRST = re.compile(rf"(?<![{_LATIN}])({'|'.join(c for c in _CURRENCIES if c.isalpha())})"
                          rf"[ \t]?{_AMOUNT}", re.IGNORECASE)
