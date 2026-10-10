@@ -5452,7 +5452,8 @@ class RSVPApp(tk.Tk):
         instead of re-creating data under the old ID."""
         if self.var_event_id.get().strip() == old_id:
             self.var_event_id.set(new_id)
-        for attr in ("_last_scanned_event_id", "_attendance_event", "_gift_event", "_amount_paid_event"):
+        for attr in ("_last_scanned_event_id", "_attendance_event", "_gift_event", "_gift_item_event",
+                     "_amount_paid_event"):
             if getattr(self, attr) == old_id:
                 setattr(self, attr, new_id)
         self._update_scan_status_banner()

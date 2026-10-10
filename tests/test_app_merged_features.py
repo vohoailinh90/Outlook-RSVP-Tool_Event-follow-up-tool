@@ -697,3 +697,19 @@ def test_a_gift_item_that_could_not_be_read_is_never_saved_over(app, monolith, m
     app.update()
     row = _row(app, "EV9")
     assert (row["GiftItemName"], row["GiftItemPrice"], row["GiftItemLink"]) == ("Speaker", "3,570", "")
+
+
+def test_the_gift_item_follows_an_event_id_renamed_on_tab_7(app):
+    """Codex review of PR #12: the gift item's owner stayed on the old ID, so
+    the next edit was saved to an event that no longer existed."""
+    _start_event(app)
+    _select(app, app.tab_gift)
+    app.var_gift_item_name.set("Speaker")
+    app.update()
+    app._commit_history_edit("EV1", "EventID", "EV1B")
+    app._save_history_edits()
+    app.var_gift_item_price.set("3,570")
+    app.update()
+    row = _row(app, "EV1B")
+    assert (row["GiftItemName"], row["GiftItemPrice"]) == ("Speaker", "3,570")
+    assert app._gift_item_event == "EV1B"
