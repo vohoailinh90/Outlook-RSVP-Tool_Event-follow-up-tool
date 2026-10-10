@@ -306,18 +306,24 @@ def _listed(counter, key=None):
 
 
 def translation_extras(texts, translated):
-    """Numbers and times in `translated` beyond those in the copied `texts` -
-    a fact Copilot made up ("budget 500", or a second date), which
-    translation_gaps(), looking only for what went missing, cannot see. Each
-    of `texts` is a string, or a list of versions of one text (the Japanese
-    and English halves of the fixed part), whose numbers count as often as
-    the version that has them most - so a number only one half has
-    ("3 BUTTONS" in English only) is not an invention."""
-    allowed = Counter()
-    for text in texts:
-        allowed += _counted(text, _numbers)
-    extra = _numbers(translated) - allowed
-    return _listed(extra, key=lambda item: _number_order(item[0]))
+    """Numbers, times and voting-button names in `translated` beyond those in
+    the copied `texts` - a fact Copilot made up ("budget 500", a second date,
+    or "click Yes if you cannot attend"), which translation_gaps(), looking
+    only for what went missing, cannot see. Each of `texts` is a string, or a
+    list of versions of one text (the Japanese and English halves of the
+    fixed part), whose values count as often as the version that has them
+    most - so a number only one half has ("3 BUTTONS" in English only) is not
+    an invention. Like translation_gaps(), a check rather than a judgement: a
+    plain English "No" ("No parking") that the copied text did not have is
+    reported for a person to look at."""
+    extra = {}
+    for count in (_numbers, _button_names):
+        allowed = Counter()
+        for text in texts:
+            allowed += _counted(text, count)
+        extra[count] = count(translated) - allowed
+    return (_listed(extra[_numbers], key=lambda item: _number_order(item[0]))
+            + _listed(extra[_button_names], key=lambda item: _BUTTONS.index(item[0])))
 
 
 def translation_gaps(source, translated, template=None, other=None):

@@ -239,6 +239,18 @@ def test_a_number_the_translation_made_up_is_reported():
                               "Bring it on 10/10. Held 10/10") == []
 
 
+def test_a_button_name_the_translation_made_up_is_reported():
+    """Found by Codex review: only numbers were counted, so a made-up voting
+    instruction that kept every original button name passed."""
+    source = "Click Yes / No / Maybe. Maybe = you are not sure yet"
+    assert translation_extras([source], source + "\nClick Yes if you cannot attend") == ["Yes"]
+    # Each button counts as often as the half of the fixed part that names it most.
+    halves = ["「Yes / No / Maybe」を押す。Yes = 出席", "Click Yes / No / Maybe"]
+    assert translation_extras([halves], "Click Yes / No / Maybe. Yes = attending") == []
+    assert translation_extras([["5 people", "5人"]], "5 people, 10 max. Maybe more") == [
+        "10", "Maybe"]
+
+
 def test_a_note_in_two_languages_is_two_versions_of_one_note():
     """Found by Codex review: a note copied after a saved translation holds
     both halves, and its numbers were expected twice in each translation."""
@@ -732,6 +744,20 @@ def test_a_value_in_both_the_note_and_the_details_is_not_asked_about(app, monoli
                                 "Please bring 4,321 yen in cash.", en_fixed))
     assert asked == []
     assert "4,321" in app.full_translations["bilingual"]
+
+
+def test_an_answer_with_a_made_up_voting_instruction_is_asked_about(app, monolith,
+                                                                    monkeypatch):
+    _compose(app)
+    ja_fixed, en_fixed = split_bilingual(_box(app.txt_fixed_preview))
+    asked = []
+    monkeypatch.setattr(monolith.messagebox, "askyesno",
+                        lambda title, message=None, **_: asked.append((title, message)) or False)
+    _paste_and_save(app, _reply(JA_NOTE, ja_fixed, EN_NOTE,
+                                en_fixed + "\nClick Yes if you cannot attend."))
+    assert [title for title, _ in asked] == ["Check the translation"]
+    assert "English: Yes" in asked[0][1]
+    assert app.full_translations["bilingual"] == ""
 
 
 def test_an_answer_that_loses_a_date_is_asked_about(app, monolith, monkeypatch):
