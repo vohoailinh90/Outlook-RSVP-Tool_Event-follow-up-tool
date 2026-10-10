@@ -448,3 +448,17 @@ def test_every_unclear_amount_really_is_misread(text):
     """The check is not just stricter than the parser: what it flags is what
     the parser reads as 0 (Codex review of PR #12)."""
     assert money.parse_amount_from_text(text) == 0.0 and money.unclear_typed_amount(text)
+
+
+@pytest.mark.parametrize("text", ["(500", "500)", "-500)", "(1,500"])
+def test_a_balance_with_unmatched_parentheses_is_unreadable(text):
+    """Codex review of PR #12: "(500" read as -500 and "500)" as 500, and the
+    running Dept. Fund total carried the guess into every later row."""
+    assert money.parse_signed_amount(text) is None
+    assert money.running_fund(["100", text, "1"]) == [100.0, None, None]
+
+
+@pytest.mark.parametrize("text, value", [("(500)", -500.0), ("( 1,500 )", -1500.0),
+                                         ("-500", -500.0), ("500", 500.0)])
+def test_a_balance_with_matched_parentheses_or_a_minus_reads(text, value):
+    assert money.parse_signed_amount(text) == value

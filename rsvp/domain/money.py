@@ -287,8 +287,10 @@ def count_actual_attendees(roster) -> int:
 # screen labels; here they are computed once, from the data, and the screen,
 # the emails, the Excel report and History all use the same result.
 
+# The sign is a leading minus, or accounting parentheses that must close:
+# "(500" or "500)" is not a number this app wrote.
 _SIGNED_AMOUNT = re.compile(
-    r"^\s*([-−(])?\s*(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?\s*\)?\s*$")
+    r"^\s*(?:([-−(])\s*)?(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?\s*(\))?\s*$")
 
 
 def parse_signed_amount(text):
@@ -305,6 +307,8 @@ def parse_signed_amount(text):
     match = _SIGNED_AMOUNT.match(str(text))
     if not match or len(match.group(3) or "") == 4:
         return None
+    if (match.group(1) == "(") != bool(match.group(4)):
+        return None  # "(500" or "500)": a parenthesis without its pair
     value = float(match.group(2).replace(",", "") + (match.group(3) or ""))
     return -value if match.group(1) else value
 
