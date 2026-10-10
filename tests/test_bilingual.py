@@ -181,6 +181,9 @@ def test_angle_brackets_that_belong_to_the_text_are_kept():
     ("Start 6:00 PM", "開始 18:00", []),
     ("午後6時開始", "Starts at 6 p.m.", []),
     ("10:30 a.m.", "午前10時半", []),
+    # Found by Codex review: a space after 午後 hid it, so 午後 6時 read as 6:00.
+    ("午後 6時開始", "午前6時開始", ["18:00"]),
+    ("午後\u30006時開始", "Starts at 6 PM", []),
     # Found by Codex review: 3時間 is a duration, not 3:00.
     ("所要時間は3時間です", "It takes 3 hours", []),
     ("It takes 3 hours", "所要時間は3時間です", []),

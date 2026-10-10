@@ -272,7 +272,7 @@ _NUMBER = re.compile(r"((?<![\w+-])[+-])?(\d+(?:,\d{3})*)")
 # while "18:00" turned into "18:30", or PM into AM, is caught.
 _MERIDIEM = r"(?:\s*([AaPp])\.?\s*[Mm]\.?(?![A-Za-z]))"
 _CLOCK_TIME = re.compile(r"(午前|午後)?\s*(?<!\d)(\d{1,2}):(\d{2})(?!\d)" + _MERIDIEM + "?")
-_JA_TIME = re.compile(r"(午前|午後)?(?<!\d)(\d{1,2})時(?!間)(?:(\d{1,2})分|(半))?")   # 3時間 is a duration
+_JA_TIME = re.compile(r"(午前|午後)?[ \t]*(?<!\d)(\d{1,2})時(?!間)(?:(\d{1,2})分|(半))?")   # 3時間 is a duration
 _HOUR_MERIDIEM = re.compile(r"(?<![\d:])(\d{1,2})" + _MERIDIEM)
 _BUTTONS = ("Yes", "No", "Maybe")
 # A currency written next to an amount, by code - and a percentage, which is
