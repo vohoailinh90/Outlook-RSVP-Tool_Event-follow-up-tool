@@ -291,16 +291,33 @@ def _number_order(n):
     return (0, int(n), n) if ":" not in n else (1, 0, n)
 
 
-def translation_extras(sources, translated):
-    """Numbers and times in `translated` that appear nowhere in any of
-    `sources` - all the text that was copied, so a number one half of the
-    fixed part has and the other lacks ("3 BUTTONS" in English only) is not
-    an invention. Catches a fact Copilot made up ("budget 500"), which
-    translation_gaps(), looking only for what went missing, cannot."""
-    known = set()
-    for source in sources:
-        known |= set(_numbers(source))
-    return sorted((n for n in _numbers(translated) if n not in known), key=_number_order)
+def _counted(text, count):
+    """count(text), or for a list of versions of one text, each value as often
+    as the version that has it most."""
+    versions = text if isinstance(text, (list, tuple)) else [text]
+    most = Counter()
+    for version in versions:
+        most |= count(version)
+    return most
+
+
+def _listed(counter, key=None):
+    return [n if k == 1 else f"{n} (×{k})" for n, k in sorted(counter.items(), key=key)]
+
+
+def translation_extras(texts, translated):
+    """Numbers and times in `translated` beyond those in the copied `texts` -
+    a fact Copilot made up ("budget 500", or a second date), which
+    translation_gaps(), looking only for what went missing, cannot see. Each
+    of `texts` is a string, or a list of versions of one text (the Japanese
+    and English halves of the fixed part), whose numbers count as often as
+    the version that has them most - so a number only one half has
+    ("3 BUTTONS" in English only) is not an invention."""
+    allowed = Counter()
+    for text in texts:
+        allowed += _counted(text, _numbers)
+    extra = _numbers(translated) - allowed
+    return _listed(extra, key=lambda item: _number_order(item[0]))
 
 
 def translation_gaps(source, translated, template=None, other=None):
@@ -311,32 +328,27 @@ def translation_gaps(source, translated, template=None, other=None):
     nothing is missing.
 
     `source` may also be a list of versions of the same text - a note already
-    in Japanese and English: each number is then expected as often as the
-    version that has it most, so one written into a single version must still
-    reach the translation, and one in both is not expected twice.
+    in Japanese and English: each value is then expected as often as the
+    version that has it most.
 
-    other=(other_source, other_template) adds the numbers and button names
-    typed into the other language's source beyond its built-in template - less those typed
-    into this source beyond `template` - so a deadline added by hand to one
-    half of the fixed part must reach both translations, also when it repeats
-    the event date, and one added to both halves counts once. The halves' own
-    differences in wording ("3 BUTTONS" in English only) do not count. A
-    deterministic check, not a judgement: a correct translation that spells a
-    number out ("three") is reported too, for a person to look at."""
-    versions = source if isinstance(source, (list, tuple)) else [source]
-    expected, buttons = Counter(), Counter()
-    for version in versions:
-        expected |= _numbers(version)
-        buttons |= _button_names(version)
+    other=(other_source, other_template) is the other language's version of
+    the same fixed part, with `template` and other_template the two built-in
+    texts. Each value is then expected as often as the version that has it
+    most, after taking from the other version what only its template has
+    ("3 BUTTONS" in English only): so a deadline typed into one half must
+    reach both translations, also when it repeats the event date; one typed
+    into both counts once; and a value an earlier translation already carried
+    across is not expected twice. A deterministic check, not a judgement: a
+    correct translation that spells a number out ("three") is reported too,
+    for a person to look at."""
+    expected = _counted(source, _numbers)
+    buttons = _counted(source, _button_names)
     if other:
         other_source, other_template = other
         for counted, count in ((expected, _numbers), (buttons, _button_names)):
-            added_there = count(other_source) - count(other_template)
-            added_here = counted - count(template) if template is not None else Counter()
-            counted.update(added_there - added_here)
+            only_there = count(other_template) - (count(template) if template is not None else Counter())
+            counted |= count(other_source) - only_there
     missing = expected - _numbers(translated)
-    gaps = [n if k == 1 else f"{n} (×{k})"
-            for n, k in sorted(missing.items(), key=lambda item: _number_order(item[0]))]
     lost_buttons = buttons - _button_names(translated)
-    return gaps + [b if lost_buttons[b] == 1 else f"{b} (×{lost_buttons[b]})"
-                   for b in _BUTTONS if lost_buttons[b]]
+    return (_listed(missing, key=lambda item: _number_order(item[0]))
+            + _listed(lost_buttons, key=lambda item: _BUTTONS.index(item[0])))

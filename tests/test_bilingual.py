@@ -226,8 +226,14 @@ def test_a_number_the_translation_made_up_is_reported():
     assert translation_extras(["Event 10/10/2026"], "Event 10/10/2026, budget 500") == ["500"]
     assert translation_extras(["18:00 start"], "18時開始、19:30終了") == ["19:30"]
     # A number one half has and the other lacks is not made up.
-    sources = ["「Yes / No / Maybe」を押す", "Click one of the 3 BUTTONS"]
-    assert translation_extras(sources, "3つのボタンのいずれかを押す") == []
+    halves = ["「Yes / No / Maybe」を押す", "Click one of the 3 BUTTONS"]
+    assert translation_extras([halves], "3つのボタンのいずれかを押す") == []
+    # Found by Codex review: a second copy of a known value is made up too.
+    assert translation_extras(["Event 10/10/2026"], "Event 10/10/2026, deadline 10/10/2026") == [
+        "10 (×2)", "2026"]
+    # A value both in the note and in the details may be in both translations.
+    assert translation_extras(["Bring it on 10/10", ["Held 10/10", "10/10 開催"]],
+                              "Bring it on 10/10. Held 10/10") == []
 
 
 def test_a_note_in_two_languages_is_two_versions_of_one_note():
@@ -238,6 +244,17 @@ def test_a_note_in_two_languages_is_two_versions_of_one_note():
     # A number written into one version only must still reach the translation.
     assert translation_gaps(["締切 10/10/2026 18:00", "Deadline 10/10/2026"],
                             "Deadline 10/10/2026") == ["18:00"]
+
+
+def test_translating_a_saved_translation_again_does_not_expect_a_carried_value_twice():
+    """Found by Codex review: once the Japanese translation carried the
+    English template's "3" across, translating again expected two."""
+    ja_template, en_template = "ボタンを押す 10/10", "Click one of the 3 BUTTONS by 10/10"
+    ja_saved, en_saved = "3つのボタンのいずれかを 10/10 までに押す", "Click one of the 3 buttons by 10/10"
+    assert translation_gaps(en_saved, "Click one of the 3 buttons by 10/10", template=en_template,
+                            other=(ja_saved, ja_template)) == []
+    assert translation_gaps(ja_saved, "3つのボタンを 10/10 までに", template=ja_template,
+                            other=(en_saved, en_template)) == []
 
 
 def test_a_hand_added_date_equal_to_the_event_date_is_counted_again():
