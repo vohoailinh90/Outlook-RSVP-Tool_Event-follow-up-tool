@@ -2443,8 +2443,18 @@ class RSVPApp(tk.Tk):
             received = info.get("received")
             if received is not None and getattr(received, "tzinfo", None) is not None:
                 info["received"] = received.replace(tzinfo=None)
-        # Manual votes belong to the event they were made for, never another.
-        previous = self.responses if self._last_scanned_event_id == event_id else {}
+        # The baseline is what is known for THIS event: the table in memory if
+        # it was scanned for it, else what was saved for it (e.g. after a
+        # restart). Never another event's votes; never nothing when votes are
+        # saved, or the first scan after a restart would discard saved manual
+        # corrections, and an empty one would wipe every saved vote.
+        if self._last_scanned_event_id == event_id:
+            previous = self.responses
+        else:
+            try:
+                previous = db.load_responses(event_id, self.history_path.get())[0]
+            except Exception:
+                previous = {}
         found_before = sum(1 for info in previous.values() if not info.get("manual"))
         if not scanned and found_before:
             # Far more likely a lagging search index than every vote email
@@ -4541,17 +4551,22 @@ class RSVPApp(tk.Tk):
                 if not original_id:
                     raise ValueError("this row has no Event ID to save it under")
                 new_id = str(edits.get("EventID", original_id)).strip()
+                fields = {c: v for c, v in edits.items() if c != "EventID"}
                 if new_id != original_id:
                     if not db.rename_event(original_id, new_id, path):
                         raise ValueError("the row is no longer in the database")
                     target_id = new_id
                     renamed += 1
                     self._follow_event_rename(original_id, new_id)
-                fields = {c: v for c, v in edits.items() if c != "EventID"}
-                if fields:
-                    db.update_event(target_id, fields, path)
+                    # The row is drawn under its new ID from now on; keep the
+                    # other edits with it in case writing them fails below.
+                    del self._history_edits[iid]
+                    iid = new_id
+                    self._history_edits[iid] = fields
+                if fields and not db.update_event(target_id, fields, path):
+                    raise ValueError("the row is no longer in the database")
                 saved += 1
-                del self._history_edits[iid]
+                self._history_edits.pop(iid, None)
             except Exception as e:
                 errors.append(f"{original_id or iid}: {e}")
 

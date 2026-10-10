@@ -151,6 +151,41 @@ def test_an_empty_scan_does_not_wipe_saved_votes(app):
     assert _row(app, "EV1")["Yes"] == "1"
 
 
+def _restart(app):
+    """What the app holds after a restart: nothing in memory, the database
+    as it was. The user types the Event ID back and has the recipients."""
+    app.var_event_id.set("")
+    app._clear_event_state()
+    app.var_event_id.set("EV1")
+    app.recipients = [("Alice Example", "alice@example.com"),
+                      ("Bob Example", "bob@example.com"),
+                      ("Carol Example", "carol@example.com")]
+    app._refresh_recipient_tree()
+
+
+def test_an_empty_first_scan_after_a_restart_keeps_saved_votes(app):
+    _start_event(app)
+    _restart(app)
+    app.fake.scan_result = {}
+    app._collect_responses()
+    app.update()
+    assert db.load_responses("EV1", app.db_path)[0]["alice@example.com"]["vote"] == "Yes"
+    row = _row(app, "EV1")
+    assert (row["Yes"], row["No"]) == ("1", "1")
+
+
+def test_the_first_scan_after_a_restart_keeps_saved_manual_votes(app):
+    _start_event(app)
+    carol = next(i for i in app.tree_responses.get_children()
+                 if app.tree_responses.set(i, "email") == "carol@example.com")
+    app._commit_response_vote_edit(carol, "vote", "Maybe")
+    _restart(app)
+    app._collect_responses()   # finds Alice and Bob again, nothing from Carol
+    app.update()
+    assert app.responses["carol@example.com"]["vote"] == "Maybe"
+    assert db.load_responses("EV1", app.db_path)[0]["carol@example.com"]["manual"] is True
+
+
 def test_loading_an_event_carries_nothing_over_and_keeps_amount_paid(app):
     _start_event(app)
     _select(app, app.tab_calendar)
@@ -228,3 +263,18 @@ def test_tab7_rename_moves_the_whole_event(app):
     assert (row["Balance"], row["AmountPaid"]) == ("legacy", "5000")
     assert len(db.load_recipients("EV1B", app.db_path)) == 3
     assert app.var_event_id.get() == "EV1B" and app._last_scanned_event_id == "EV1B"
+
+
+def test_tab7_keeps_other_edits_when_a_rename_succeeds_but_they_fail(app, monkeypatch):
+    _start_event(app)
+    app._commit_history_edit("EV1", "EventID", "EV1B")
+    app._commit_history_edit("EV1", "Location", "Hall B")
+
+    def locked(*_args, **_kwargs):
+        raise OSError("database is locked")
+    monkeypatch.setattr(db, "update_event", locked)
+    app._save_history_edits()
+
+    assert _row(app, "EV1B") is not None                       # the rename went through
+    assert app.tree_history.set("EV1B", "Location") == "Hall B"  # the edit is still on screen
+    assert app._history_edits == {"EV1B": {"Location": "Hall B"}}
