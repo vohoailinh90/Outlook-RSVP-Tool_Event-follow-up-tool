@@ -713,3 +713,36 @@ def test_the_gift_item_follows_an_event_id_renamed_on_tab_7(app):
     row = _row(app, "EV1B")
     assert (row["GiftItemName"], row["GiftItemPrice"]) == ("Speaker", "3,570")
     assert app._gift_item_event == "EV1B"
+
+
+def test_amount_paid_that_could_not_be_read_is_never_saved_over(app, monkeypatch):
+    """Codex review of PR #12: a failed read showed 0 still owned by the
+    event, and Tab 1's save then wrote that 0 over the real Amount paid."""
+    db.save_event_record({"EventID": "EV9", "EventName": "Nine", "AmountPaid": "7,000"}, app.db_path)
+    _load(app, "EV9")
+    app._amount_paid_event = None          # as if Tab 5 had not been opened yet
+    real = app._history_record
+
+    def unreadable(event_id):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(app, "_history_record", unreadable)
+    app._refresh_amount_paid_for_current_event()
+    assert app.dialogs[-1][1] == "Amount paid not loaded"
+    monkeypatch.setattr(app, "_history_record", real)
+    app._save_event_from_tab1()
+    assert _row(app, "EV9")["AmountPaid"] == "7,000"
+
+
+def test_a_payout_typed_before_the_first_save_reaches_history(app):
+    """Codex review of PR #12: Amount paid typed before the event had a
+    History row was saved by Tab 1 but left out of TotalExpense/Balance."""
+    app.var_event_id.set("NEW1")
+    app.var_event_name.set("New")
+    _select(app, app.tab_calendar)
+    app.var_amount_paid.set("2,500")
+    app.update()
+    assert _row(app, "NEW1") is None
+    app._save_event_from_tab1()
+    row = _row(app, "NEW1")
+    assert (row["AmountPaid"], row["TotalExpense"], row["Balance"]) == ("2,500", "2,500", "-2,500")

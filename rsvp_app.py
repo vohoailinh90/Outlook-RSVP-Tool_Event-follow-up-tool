@@ -946,6 +946,16 @@ class RSVPApp(tk.Tk):
         if self._gift_item_event == event_id:
             record.update(self._gift_item_fields())
         was_tracked = self._was_money_tracked(event_id)
+        if "AmountPaid" in record and not was_tracked:
+            # A payout typed before the event had a History row (or changed
+            # since) reaches History only now: it is money worked on here, as
+            # when it is typed (_on_amount_paid_changed()). The page's 0 over
+            # nothing saved is not a payout.
+            try:
+                stored = (self._history_record(event_id) or {}).get("AmountPaid")
+                was_tracked = parse_typed_amount(record["AmountPaid"]) != parse_typed_amount(stored)
+            except Exception:
+                pass
         try:
             db.save_event_record(record, self.history_path.get())
         except Exception as e:
@@ -4645,8 +4655,17 @@ class RSVPApp(tk.Tk):
         if current_id:
             try:
                 rec = self._history_record(current_id)
-            except Exception:
-                rec = None
+            except Exception as exc:
+                # Shown as 0 but owned by no event, so neither typing here nor
+                # Tab 1's save writes the 0 over the real figure; the next
+                # visit to this page reads it again.
+                messagebox.showerror(
+                    "Amount paid not loaded",
+                    f"Couldn't read the Amount paid of '{current_id}':\n\n{exc}\n\n"
+                    "It is shown as 0 and will not be saved until it can be read.")
+                self._amount_paid_event = None
+                self._set_amount_paid_quietly(saved)
+                return
             if rec and rec.get("AmountPaid"):
                 saved = rec["AmountPaid"]
         self._amount_paid_event = current_id or None
