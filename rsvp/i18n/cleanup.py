@@ -189,6 +189,14 @@ def _reply_markers(text):
     return markers
 
 
+def _unwrapped(part):
+    """The part without one pair of <...> around it, or None if it has none
+    (the brackets of a tag like <b>...</b> inside do not count)."""
+    if part.startswith("<") and part.endswith(">") and not any(c in part[1:-1] for c in "<>"):
+        return part[1:-1].strip()
+    return None
+
+
 def parse_bilingual_reply(text):
     """(ja_note, ja_details, en_note, en_details) from Copilot's answer to
     DEFAULT_PROMPT_BILINGUAL, or None unless both a Japanese and an English
@@ -196,23 +204,26 @@ def parse_bilingual_reply(text):
     that says "(none)" in any of the ways Copilot writes it, is "". A part
     that is still the prompt's placeholder counts as missing. Anything before
     the first marker ("Here is the translation:") is dropped, and so are
-    divider lines, code fences and the prompt's <...> brackets around a
-    part (but not the brackets of a tag like <b>...</b> in the text). A marker found twice keeps its later part, as
+    divider lines and code fences around a part. The prompt's <...> brackets
+    are dropped only when every part kept them - one part written as <TBD>
+    is the text itself. A marker found twice keeps its later part, as
     dedupe_pasted_translation() keeps the later copy. Text Copilot adds after
     the last part stays in it: the app shows the result for checking before
     anything is sent."""
     text = text or ""
     markers = _reply_markers(text)
-    found = {}
+    raw = []
     for i, marker in enumerate(markers):
         end = markers[i + 1].start() if i + 1 < len(markers) else len(text)
         part = _EDGE_LINES.sub("", text[marker.end():end].strip()).strip()
-        if (part.startswith("<") and part.endswith(">")
-                and not any(c in part[1:-1] for c in "<>")):
-            part = part[1:-1].strip()   # the prompt's <...> placeholder brackets, kept
-        if _PLACEHOLDER.fullmatch(part.lower()):
-            continue
-        key = _marker_key(marker)
+        if _PLACEHOLDER.fullmatch((_unwrapped(part) or part).lower()):
+            continue    # the template, echoed back unfilled
+        raw.append((_marker_key(marker), part))
+    wrapped = [part for _, part in raw if part]
+    if wrapped and all(_unwrapped(part) is not None for part in wrapped):
+        raw = [(key, _unwrapped(part) if part else part) for key, part in raw]
+    found = {}
+    for key, part in raw:
         if key[1] == "note" and _is_no_note(part):
             part = ""
         if part or key[1] == "note":
@@ -226,10 +237,11 @@ def parse_bilingual_reply(text):
 # Numbers and the voting buttons are what a translation must never change: a
 # date, an amount or a deadline reaches colleagues as written, and the buttons
 # Outlook shows are always Yes, No and Maybe.
-# A minus sign belongs to a number when it is attached to it and does not
-# follow a letter or digit, so "-500" and "¥-500" are negative while the
-# hyphens of "2026-12-20" or "10-12" are not.
-_NUMBER = re.compile(r"(?:(?<![\w-])-)?\d+(?:,\d{3})*")
+# A sign belongs to a number when it is attached to it and does not follow a
+# letter, digit or another sign: "-500", "¥-500" and the "+81" of a phone
+# number keep theirs, while the hyphens of "2026-12-20" or "10-12" are not
+# signs.
+_NUMBER = re.compile(r"((?<![\w+-])[+-])?(\d+(?:,\d{3})*)")
 _ON_THE_HOUR = re.compile(r"(?<!\d)(\d{1,2}):00(?!\d)")
 _BUTTONS = ("Yes", "No", "Maybe")
 
@@ -240,7 +252,7 @@ def _numbers(text):
     translation - but every other zero is, a budget of 0 included."""
     text = unicodedata.normalize("NFKC", text).replace("\u2212", "-")   # − MINUS SIGN
     text = _ON_THE_HOUR.sub(r"\1", text)
-    return Counter(int(n.replace(",", "")) for n in _NUMBER.findall(text))
+    return Counter(f"{sign}{int(digits.replace(',', ''))}" for sign, digits in _NUMBER.findall(text))
 
 
 def _button_names(text):
@@ -268,5 +280,6 @@ def translation_gaps(source, translated, template=None, other=None):
         added_here = expected - _numbers(template) if template is not None else Counter()
         expected = expected + (added_there - added_here)
     missing = expected - _numbers(translated)
-    gaps = [str(n) if k == 1 else f"{n} (×{k})" for n, k in sorted(missing.items())]
+    gaps = [n if k == 1 else f"{n} (×{k})"
+            for n, k in sorted(missing.items(), key=lambda item: (int(item[0]), item[0]))]
     return gaps + [b for b in _button_names(source) if b not in _button_names(translated)]

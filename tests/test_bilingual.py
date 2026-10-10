@@ -153,6 +153,9 @@ def test_a_note_that_only_starts_like_none_is_kept():
 
 def test_angle_brackets_that_belong_to_the_text_are_kept():
     assert parse_bilingual_reply(_reply(ja_note="<b>注意</b>"))[0] == "<b>注意</b>"
+    # Found by Codex review: a part written as <TBD> lost its brackets. Only
+    # brackets every part kept are the template's.
+    assert parse_bilingual_reply(_reply(ja_note="<未定>", en_note="<TBD>"))[::2] == ("<未定>", "<TBD>")
 
 
 @pytest.mark.parametrize("source, translated, gaps", [
@@ -171,6 +174,9 @@ def test_angle_brackets_that_belong_to_the_text_are_kept():
     ("Balance: -500", "残高: 500", ["-500"]),
     ("残高 ¥-3,570", "Balance ¥-3570", []),
     ("Remaining \u22121,200", "残り －1200", []),        # typographic and full-width minus
+    # Found by Codex review: a dropped plus sign went unnoticed.
+    ("Phone: +81-3-1234-5678", "電話: 81-3-1234-5678", ["+81"]),
+    ("Phone: +81-3-1234-5678", "電話：＋81-3-1234-5678", []),
     ("2026-12-20, floors 10-12", "2026年12月20日、10〜12階", []),   # hyphens, not signs
     # Found by Codex review: with a set, a dropped deadline equal to the event
     # date went unnoticed.
