@@ -19,6 +19,7 @@ from rsvp.domain import (
     remaining_amount,
     sum_contributions,
 )
+from rsvp.domain import money
 
 
 class TestUnchangedByPhase2:
@@ -329,3 +330,83 @@ class TestArithmetic:
     ])
     def test_attendance_counting_is_case_and_space_insensitive(self, value, counted):
         assert count_actual_attendees([{"actual_attend": value}]) == (1 if counted else 0)
+
+
+class TestPaymentRounds:
+    """Ported from the other lineage, where these figures were read back from
+    on-screen labels. Example values follow its own worked examples."""
+
+    ROSTER = [
+        {"actual_attend": "Yes", "amount": 6000.0, "free": False,
+         "extra_attends": {"round_2": "Yes"}, "extra_amounts": {"round_2": 2000.0}},
+        {"actual_attend": "yes ", "amount": 6000.0, "free": False,
+         "extra_attends": {"round_2": "No"}, "extra_amounts": {}},
+        {"actual_attend": "No", "amount": 0.0, "free": True},
+    ]
+    ROUNDS = [{"key": "round_2", "label": "Karaoke", "amount_paid": "3,570"}]
+
+    def test_round_one_comes_first_then_each_round(self):
+        figures = money.payment_rounds(self.ROSTER, "Dinner", "10000", self.ROUNDS)
+        assert [(f.key, f.label, f.attendees, f.collected, f.paid) for f in figures] == [
+            (None, "Dinner", 2, 12000.0, 10000.0), ("round_2", "Karaoke", 1, 2000.0, 3570.0)]
+        assert figures[1].remaining == -1570.0
+
+    def test_totals_keep_the_sign(self):
+        figures = money.payment_rounds(self.ROSTER, "Dinner", "10000", self.ROUNDS)
+        assert money.round_totals(figures) == (14000.0, 13570.0, 430.0)
+
+    def test_free_applies_to_every_round(self):
+        assert money.amount_for(True, True, 6000.0) == 0.0
+        assert money.amount_for(True, False, 6000.0) == 6000.0
+        assert money.amount_for(False, False, 6000.0) == 0.0
+
+
+class TestGiftAndHistory:
+    def test_gift_only_when_not_linked(self):
+        fig = money.gift_figures(0.0, "3,570 JPY", False, (82000.0, 73570.0, 8430.0))
+        assert (fig["gift_remaining"], fig["grand_remaining"]) == (-3570.0, -3570.0)
+
+    def test_linked_adds_the_event(self):
+        fig = money.gift_figures(0.0, "3,570 JPY", True, (82000.0, 70000.0, 12000.0))
+        # The other lineage's example: event 12,000 left, gift -3,570 -> 8,430.
+        assert (fig["grand_collected"], fig["grand_paid"], fig["grand_remaining"]) == (
+            82000.0, 73570.0, 8430.0)
+
+    def test_history_counts_round_one_people_but_every_round_of_money(self):
+        roster = TestPaymentRounds.ROSTER
+        figures = money.payment_rounds(roster, "Dinner", "10000", TestPaymentRounds.ROUNDS)
+        assert money.history_figures(figures, 1500.0, "1,000") == {
+            "ActualAttendees": "2", "CostPerPerson": "6,000",
+            "TotalIncome": "15,500", "TotalExpense": "14,570", "Balance": "930"}
+
+    def test_cost_per_person_with_nobody_attending_is_zero(self):
+        figures = money.payment_rounds([], "Round 1", "", [])
+        assert money.history_figures(figures, 0.0, "")["CostPerPerson"] == "0"
+
+    def test_a_loss_is_a_negative_balance(self):
+        figures = money.payment_rounds([], "Round 1", "", [])
+        assert money.history_figures(figures, 0.0, "3,570")["Balance"] == "-3,570"
+
+
+class TestSignedAmountAndFund:
+    @pytest.mark.parametrize("text, expected", [
+        ("8,430", 8430.0), ("-3,570", -3570.0), ("−3,570", -3570.0), ("(3,570)", -3570.0),
+        ("0", 0.0), ("", 0.0), (None, 0.0), ("12.5", 12.5), (" 1,234,567 ", 1234567.0),
+    ])
+    def test_reads_what_the_app_writes(self, text, expected):
+        assert money.parse_signed_amount(text) == expected
+
+    @pytest.mark.parametrize("text", ["2026: -3,570 JPY", "about 500", "1,00", "abc", "5-3"])
+    def test_anything_else_is_reported_not_guessed(self, text):
+        # The free-text parser would find a positive number in the first one.
+        assert money.parse_signed_amount(text) is None
+
+    def test_the_fund_is_a_running_total(self):
+        # The other lineage's worked example: 500, then 0, then 9,930.
+        assert money.running_fund(["500", "0", "9,930"]) == [500.0, 500.0, 10430.0]
+
+    def test_a_loss_lowers_the_fund(self):
+        assert money.running_fund(["500", "-3,570"]) == [500.0, -3070.0]
+
+    def test_an_unreadable_balance_makes_every_later_total_unknown(self):
+        assert money.running_fund(["500", "five", "100"]) == [500.0, None, None]

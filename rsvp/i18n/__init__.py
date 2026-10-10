@@ -46,8 +46,10 @@ from .messages import (  # noqa: F401
     build_gift_report_body,
     build_editable_block,
 )
+from .tables import text_body_to_html  # noqa: F401
 
 __all__ = [
+    "text_body_to_html",
     "LANG_LABELS",
     "LANG_LABEL_TO_CODE",
     "TRANSLATE_TARGETS",
