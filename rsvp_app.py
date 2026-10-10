@@ -4657,29 +4657,32 @@ class RSVPApp(tk.Tk):
         self._render_attendance_tree()
         # Votes added or dropped people: save the table as shown, so what is
         # saved - and History's money computed from it - matches the screen.
+        # Rebuilt from this event's votes, an empty table means nobody comes.
         if people_changed:
-            self._save_attendance_sheet_to_file(silent=True)
+            self._save_attendance_sheet_to_file(silent=True, reconciled=True)
 
     # ── Attendance & Payment / Responded result — lưu vào database ──
     # Every change on Tab 5 is saved as it is made; '⬅ Load setup from
     # selected event' reads it back. "📊 Export to Excel" only writes a copy.
 
-    def _save_attendance_sheet_to_file(self, silent=True):
+    def _save_attendance_sheet_to_file(self, silent=True, reconciled=False):
         """Saves the table and its payment rounds, in one transaction, to the
         event the table belongs to; then History's money columns follow.
-        Returns True when saved. An empty table on screen never replaces a
-        saved one (it may simply not have been loaded)."""
+        Returns True when saved. An empty table on screen replaces a saved
+        one only when `reconciled` - rebuilt from the event's own votes, so
+        nobody is attending; otherwise it may simply not have been loaded."""
         event_id = self._attendance_event
         if not event_id:
             return False
+        cleared = reconciled and not self._attendance_roster
         try:
-            db.save_attendance(event_id, self._attendance_roster or None, self._extra_rounds,
-                               self.history_path.get())
+            db.save_attendance(event_id, self._attendance_roster or ({} if cleared else None),
+                               self._extra_rounds, self.history_path.get())
         except Exception:
             if not silent:
                 raise
             return False
-        self._sync_event_money(event_id)
+        self._sync_event_money(event_id, cleared=cleared)
         return True
 
     def _load_attendance_sheet_from_file(self, event_id):
@@ -4689,7 +4692,7 @@ class RSVPApp(tk.Tk):
 
     # ── History's money columns ──
 
-    def _sync_event_money(self, event_id):
+    def _sync_event_money(self, event_id, cleared=False):
         """Recomputes event_id's money columns in History - Actual Att.
         (main), Cost/Person, Income, Expense, Balance - from what is SAVED for
         it: its attendance table and rounds, Amount paid, gift contributions
@@ -4697,7 +4700,9 @@ class RSVPApp(tk.Tk):
         so the figures can only describe one event's saved data, never a mix
         of tables on screen. An event with nothing tracked here keeps
         whatever History holds (figures typed in the other copy of the app,
-        for instance); so does one without a History row."""
+        for instance) - unless `cleared`: its table was just emptied here, and
+        the figures it leaves behind would count people no longer coming. One
+        without a History row is left alone too."""
         if self._suspend_money_sync or not event_id:
             return
         path = self.history_path.get()
@@ -4708,7 +4713,7 @@ class RSVPApp(tk.Tk):
             roster = db.load_attendance_roster(event_id, path)
             rounds = db.load_attendance_rounds(event_id, path)
             gift = db.load_gift_roster(event_id, path)
-            if not (roster or rounds or gift or (rec.get("GiftItemPrice") or "").strip()):
+            if not cleared and not (roster or rounds or gift or (rec.get("GiftItemPrice") or "").strip()):
                 return
             figures = payment_rounds(roster.values(), rec.get("Round1Label") or ROUND1_DEFAULT_LABEL,
                                      rec.get("AmountPaid"), rounds)

@@ -506,3 +506,26 @@ def test_party_figures_that_cannot_be_read_are_not_reported_as_zero(app, monkeyp
     app.update()
     assert app.dialogs[-1][1] == "Party figures unknown"
     assert not [c for c in app.fake.calls if c[0] == "send_gift_report_email"]
+
+
+def test_a_table_emptied_by_new_votes_is_saved_empty(app):
+    """Codex review of PR #12: a rescan turning every Yes/Maybe into No
+    left the old table - and History's money - in the database, back on the
+    next load, while the screen showed nobody."""
+    _attendance(app)
+    assert set(db.load_attendance_roster("EV1", app.db_path)) == {"alice@example.com",
+                                                                  "carol@example.com"}
+    assert _row(app, "EV1")["ActualAttendees"] == "2"
+    when = app.fake.scan_result["alice@example.com"]["received"]
+    for email in ("alice@example.com", "carol@example.com"):
+        app.fake.scan_result[email] = {"name": email, "vote": "No", "received": when}
+    app._collect_responses()
+    _select(app, app.tab_config)
+    _select(app, app.tab_calendar)
+
+    assert db.load_attendance_roster("EV1", app.db_path) == {}
+    row = _row(app, "EV1")
+    assert (row["ActualAttendees"], row["TotalIncome"]) == ("0", "0")
+    _load(app, "EV1")
+    _select(app, app.tab_calendar)
+    assert app._attendance_roster == {}
