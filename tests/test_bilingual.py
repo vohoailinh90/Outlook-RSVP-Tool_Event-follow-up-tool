@@ -162,6 +162,10 @@ def test_angle_brackets_that_belong_to_the_text_are_kept():
     ("「Yes」を押す", "Yesを押してください", []),
     ("Ｙｅｓ 予算３，０００", "Yes budget 3000", []),        # full-width source
     ("", "anything 5", []),
+    ("18:00 start", "18時開始", []),                         # minutes :00 dropped
+    # Found by Codex review: with a set, a dropped deadline equal to the event
+    # date went unnoticed.
+    ("Event 10/10/2026, reply by 10/10/2026", "イベント 2026年10月10日", ["10 (×2)", "2026"]),
 ])
 def test_translation_gaps_reports_lost_numbers_and_buttons(source, translated, gaps):
     assert translation_gaps(source, translated) == gaps

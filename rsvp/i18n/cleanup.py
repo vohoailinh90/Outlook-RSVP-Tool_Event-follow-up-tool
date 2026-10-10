@@ -8,6 +8,7 @@ docs/agentic/ARCHITECTURE.md. The code is unchanged; only its location is.
 
 import re
 import unicodedata
+from collections import Counter
 
 # ══════════════════════════════════════════════════════════════════════════
 # Cleanup helper for a known Copilot-copy quirk: pasting a reply copied from
@@ -209,7 +210,10 @@ _BUTTONS = ("Yes", "No", "Maybe")
 
 
 def _numbers(text):
-    return {int(n.replace(",", "")) for n in _NUMBER.findall(unicodedata.normalize("NFKC", text))}
+    """How often each number occurs. Zero is left out: "18:00" becomes
+    "18時" in a good Japanese translation."""
+    values = (int(n.replace(",", "")) for n in _NUMBER.findall(unicodedata.normalize("NFKC", text)))
+    return Counter(v for v in values if v)
 
 
 def _button_names(text):
@@ -218,9 +222,11 @@ def _button_names(text):
 
 def translation_gaps(source, translated):
     """What `translated` lacks that `source` has: numbers, compared by value
-    (so 07 matches 7, 3,000 matches 3000, and a date may change its order),
-    and the voting-button names Yes, No and Maybe. [] when nothing is missing.
-    A deterministic check, not a judgement: a correct translation that spells
-    a number out ("three") is reported too, for a person to look at."""
-    gaps = [str(n) for n in sorted(_numbers(source) - _numbers(translated))]
+    and by how often they occur (so 07 matches 7, 3,000 matches 3000, a date
+    may change its order, and of two identical dates neither may go), and the
+    voting-button names Yes, No and Maybe. [] when nothing is missing. A
+    deterministic check, not a judgement: a correct translation that spells a
+    number out ("three") is reported too, for a person to look at."""
+    missing = _numbers(source) - _numbers(translated)
+    gaps = [str(n) if k == 1 else f"{n} (×{k})" for n, k in sorted(missing.items())]
     return gaps + [b for b in _button_names(source) if b not in _button_names(translated)]
