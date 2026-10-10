@@ -287,6 +287,22 @@ def _button_names(text):
     return Counter({b: len(re.findall(rf"(?<![A-Za-z]){b}(?![A-Za-z])", text)) for b in _BUTTONS})
 
 
+def _number_order(n):
+    return (0, int(n), n) if ":" not in n else (1, 0, n)
+
+
+def translation_extras(sources, translated):
+    """Numbers and times in `translated` that appear nowhere in any of
+    `sources` - all the text that was copied, so a number one half of the
+    fixed part has and the other lacks ("3 BUTTONS" in English only) is not
+    an invention. Catches a fact Copilot made up ("budget 500"), which
+    translation_gaps(), looking only for what went missing, cannot."""
+    known = set()
+    for source in sources:
+        known |= set(_numbers(source))
+    return sorted((n for n in _numbers(translated) if n not in known), key=_number_order)
+
+
 def translation_gaps(source, translated, template=None, other=None):
     """What `translated` lacks that `source` has: numbers, compared by value
     and by how often they occur (so 07 matches 7, 3,000 matches 3000, a date
@@ -319,10 +335,8 @@ def translation_gaps(source, translated, template=None, other=None):
             added_here = counted - count(template) if template is not None else Counter()
             counted.update(added_there - added_here)
     missing = expected - _numbers(translated)
-    def order(item):
-        n = item[0]
-        return (0, int(n), n) if ":" not in n else (1, 0, n)
-    gaps = [n if k == 1 else f"{n} (×{k})" for n, k in sorted(missing.items(), key=order)]
+    gaps = [n if k == 1 else f"{n} (×{k})"
+            for n, k in sorted(missing.items(), key=lambda item: _number_order(item[0]))]
     lost_buttons = buttons - _button_names(translated)
     return gaps + [b if lost_buttons[b] == 1 else f"{b} (×{lost_buttons[b]})"
                    for b in _BUTTONS if lost_buttons[b]]

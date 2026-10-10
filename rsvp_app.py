@@ -205,6 +205,7 @@ from rsvp.i18n import (  # noqa: F401
     parse_bilingual_reply,
     split_bilingual,
     text_body_to_html,
+    translation_extras,
     translation_gaps,
 )
 
@@ -2526,14 +2527,29 @@ class RSVPApp(tk.Tk):
                                                  other=(ja_source, ja_template))),
         ]
         gaps = [(label, missing) for label, missing in gaps if missing]
-        if gaps and not messagebox.askyesno(
-                "Check the translation",
-                "These are in the text you copied but not in Copilot's translation:\n\n"
-                + "\n".join(f"• {label}: {', '.join(missing)}" for label, missing in gaps)
-                + "\n\nDates, amounts, times and the Yes / No / Maybe button names must reach "
-                "colleagues exactly. Correct the answer in the box and Save again, or save it "
-                "as it is?"):
-            return
+        copied_texts = [*(note_versions if isinstance(note_versions, list) else [note_versions]),
+                        ja_source, en_source]
+        extras = [(label, translation_extras(copied_texts, part)) for label, part in (
+            ("Japanese note", ja_note), ("Japanese details", ja_details),
+            ("English note", en_note), ("English details", en_details))]
+        extras = [(label, added) for label, added in extras if added]
+        if gaps or extras:
+            findings = []
+            if gaps:
+                findings.append("These are in the text you copied but not in Copilot's "
+                                "translation:\n" + "\n".join(
+                                    f"• {label}: {', '.join(missing)}" for label, missing in gaps))
+            if extras:
+                findings.append("These are in Copilot's translation but nowhere in the text you "
+                                "copied:\n" + "\n".join(
+                                    f"• {label}: {', '.join(added)}" for label, added in extras))
+            if not messagebox.askyesno(
+                    "Check the translation",
+                    "\n\n".join(findings)
+                    + "\n\nDates, amounts, times and the Yes / No / Maybe button names must "
+                    "reach colleagues exactly. Correct the answer in the box and Save again, or "
+                    "save it as it is?"):
+                return
 
         self._active_full_translations()["bilingual"] = text
         self._bilingual_basis_saved[mode] = copied["basis"]

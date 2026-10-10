@@ -28,6 +28,7 @@ from rsvp.i18n import (
     join_bilingual,
     parse_bilingual_reply,
     split_bilingual,
+    translation_extras,
     translation_gaps,
 )
 from tests.test_app_event_state import app  # noqa: F401
@@ -218,6 +219,15 @@ def test_button_names_added_by_hand_to_one_half_must_reach_both_translations():
     ja_edited = ja_template + "\n迷ったら Maybe を押してください。"
     assert translation_gaps(en_template, "Click Yes / No / Maybe.", template=en_template,
                             other=(ja_edited, ja_template)) == ["Maybe"]
+
+
+def test_a_number_the_translation_made_up_is_reported():
+    """Found by Codex review: only lost numbers were looked for."""
+    assert translation_extras(["Event 10/10/2026"], "Event 10/10/2026, budget 500") == ["500"]
+    assert translation_extras(["18:00 start"], "18時開始、19:30終了") == ["19:30"]
+    # A number one half has and the other lacks is not made up.
+    sources = ["「Yes / No / Maybe」を押す", "Click one of the 3 BUTTONS"]
+    assert translation_extras(sources, "3つのボタンのいずれかを押す") == []
 
 
 def test_a_note_in_two_languages_is_two_versions_of_one_note():
@@ -659,6 +669,18 @@ def test_a_note_copilot_added_to_an_empty_one_is_asked_about(app, monolith, monk
     assert asked == ["Note added by Copilot"]
     assert app.full_translations["bilingual"] == ""
     assert _box(app.txt_editable_preview) == ""
+
+
+def test_an_answer_with_a_made_up_amount_is_asked_about(app, monolith, monkeypatch):
+    _compose(app)
+    ja_fixed, en_fixed = split_bilingual(_box(app.txt_fixed_preview))
+    asked = []
+    monkeypatch.setattr(monolith.messagebox, "askyesno",
+                        lambda title, message=None, **_: asked.append((title, message)) or False)
+    _paste_and_save(app, _reply(JA_NOTE, ja_fixed + "\n予算 98,765円", EN_NOTE, en_fixed))
+    assert [title for title, _ in asked] == ["Check the translation"]
+    assert "nowhere in the text you copied" in asked[0][1] and "Japanese details: 98765" in asked[0][1]
+    assert app.full_translations["bilingual"] == ""
 
 
 def test_an_answer_that_loses_a_date_is_asked_about(app, monolith, monkeypatch):
