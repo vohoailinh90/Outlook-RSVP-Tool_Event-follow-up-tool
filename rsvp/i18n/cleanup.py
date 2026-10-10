@@ -275,13 +275,16 @@ _CLOCK_TIME = re.compile(r"(午前|午後)?\s*(?<!\d)(\d{1,2}):(\d{2})(?!\d)" + 
 _JA_TIME = re.compile(r"(午前|午後)?(?<!\d)(\d{1,2})時(?!間)(?:(\d{1,2})分|(半))?")   # 3時間 is a duration
 _HOUR_MERIDIEM = re.compile(r"(?<![\d:])(\d{1,2})" + _MERIDIEM)
 _BUTTONS = ("Yes", "No", "Maybe")
-# A currency written next to an amount, by code. An amount whose unit Copilot
-# changed ("¥500" for "$500") keeps its number, so only the unit tells.
+# A currency written next to an amount, by code - and a percentage, which is
+# as much a part of its number. An amount whose unit Copilot changed ("¥500"
+# for "$500") or dropped ("50" for "50%") keeps its number, so only the unit
+# tells. A percent sign is read after its number only.
 _CURRENCIES = {
     "JPY": ("¥", "円", "日本円", "yen", "Japanese yen", "JPY"),
     "USD": ("US$", "$", "USD", "dollars", "dollar", "US dollars", "US dollar", "ドル", "米ドル"),
     "EUR": ("€", "EUR", "euros", "euro", "ユーロ"),
     "VND": ("₫", "đồng", "đ", "dong", "Vietnamese dong", "VND", "ドン"),
+    "%": ("%", "percent", "per cent", "パーセント", "phần trăm"),
 }
 _CURRENCY_CODE = {unit.lower(): code for code, units in _CURRENCIES.items() for unit in units}
 
@@ -303,11 +306,12 @@ def _is_symbol(unit):
 _LATIN = "A-Za-z\u00c0-\u1ef9"
 # Its sign follows the rule of _NUMBER: "¥-3,570" and "USD -500" keep theirs.
 _AMOUNT = r"((?<![\w+-])[+-])?(?<![\d.,])(\d+(?:,\d{3})*(?:\.\d+)?)(?![\d.,]*\d)"
-_SYMBOL_FIRST = re.compile(rf"(?<![{_LATIN}\d])({_units(_is_symbol)})[ \t]?{_AMOUNT}",
+_SYMBOL_FIRST = re.compile(rf"(?<![{_LATIN}\d])({_units(lambda u: _is_symbol(u) and u != '%')})"
+                           rf"[ \t]?{_AMOUNT}",
                            re.IGNORECASE)   # "20€ 30€": the first € is the 20's
 _UNIT_AFTER = re.compile(rf"{_AMOUNT}[ \t-]?({_units(lambda u: True)})(?![{_LATIN}])",
                          re.IGNORECASE)   # "3,000 yen", "a 3,000-yen fee", "500円"
-_CODE_FIRST = re.compile(rf"(?<![{_LATIN}])({'|'.join(_CURRENCIES)})"
+_CODE_FIRST = re.compile(rf"(?<![{_LATIN}])({'|'.join(c for c in _CURRENCIES if c.isalpha())})"
                          rf"[ \t]?{_AMOUNT}", re.IGNORECASE)
 
 
@@ -358,7 +362,8 @@ def _priced(text):
 
 
 def _listed_prices(pairs):
-    return [f"{amount} {code}" + (f" (×{k})" if k > 1 else "") for (amount, code), k in
+    return [amount + ("%" if code == "%" else f" {code}") + (f" (×{k})" if k > 1 else "")
+            for (amount, code), k in
             sorted(pairs.items(), key=lambda item: (float(item[0][0]), item[0][1]))]
 
 
@@ -430,10 +435,10 @@ def translation_gaps(source, translated, template=None, other=None):
     into both counts once; and a value an earlier translation already carried
     across is not expected twice.
 
-    Each amount written with a currency ("$500") must keep one that is the
-    same ("500ドル"): one left bare ("500") or given in another currency is
-    reported as "500 USD" - unless its number went missing too, which is
-    reported already. A deterministic check, not a judgement: a correct
+    Each amount written with a currency ("$500") or as a percentage ("50%")
+    must keep a unit that is the same ("500ドル", "50パーセント"): one left
+    bare ("500") or given another unit is reported as "500 USD" or "50%" -
+    unless its number went missing too, which is reported already. A deterministic check, not a judgement: a correct
     translation that spells a number out ("three") is reported too, for a
     person to look at."""
     expected = _counted(source, _numbers)

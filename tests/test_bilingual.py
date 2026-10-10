@@ -313,6 +313,12 @@ def test_an_amount_in_another_currency_is_reported(copied, translated, extras):
     ("¥500-1,000円", "¥500〜1,000円", []),
     ("Fee ¥500-200円", "会費 ¥500〜200円", []),
     ("20€ 30€", "20 euros, 30 euros", []),
+    # Found by Codex review: a percentage lost its % unseen.
+    ("Deposit: 50%", "Deposit: 50", ["50%"]),
+    ("Deposit: 50%", "手付金: 50円", ["50%"]),
+    ("Deposit: 50%", "手付金: 50％", []),
+    ("Deposit: 50%", "Deposit: 50 percent", []),
+    ("10% off ¥500", "500円の10パーセント引き", []),
 ])
 def test_an_amount_that_loses_its_currency_is_reported(copied, translated, gaps):
     assert translation_gaps(copied, translated) == gaps
