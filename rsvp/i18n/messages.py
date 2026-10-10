@@ -15,6 +15,8 @@ only builders allowed to differ from the phase-1 golden file, and
 tests/golden/i18n_merge_snapshot.json pins their new output.
 """
 
+import re
+
 from rsvp.domain.money import parse_signed_amount
 
 from .langs import BILINGUAL_SEPARATOR, GREETING, NOT_TRANSLATED_FLAG
@@ -756,3 +758,38 @@ def build_editable_block(lang_code, note, note_is_translated):
         return note  # caller combines per-language notes separately for bilingual
     flag = "" if note_is_translated else NOT_TRANSLATED_FLAG.get(lang_code, "")
     return f"{note}{flag}"
+
+
+# ── Bilingual email, Japanese first and English second ──
+# Tab 3's note box and fixed box each hold the Japanese text, the divider line
+# of BILINGUAL_SEPARATOR, then the English text: the same line that parts the
+# two halves of the email itself.
+_DIVIDER_LINE = re.compile(r"^[ \t]*―{5,}[ \t]*$", re.MULTILINE)
+
+
+def join_bilingual(ja_text, en_text):
+    """Japanese and English text with the divider line between them."""
+    return ja_text.strip() + BILINGUAL_SEPARATOR + en_text.strip()
+
+
+def split_bilingual(text):
+    """(japanese, english) from text laid out by join_bilingual(), split at
+    its first divider line. english is None when there is no divider line."""
+    text = text or ""
+    match = _DIVIDER_LINE.search(text)
+    if not match:
+        return text.strip(), None
+    return text[:match.start()].strip(), text[match.end():].strip()
+
+
+def build_bilingual_body(ja_note, en_note, ja_fixed, en_fixed, is_update=False):
+    """The bilingual email: '[English below]', the Japanese half, the
+    divider, the English half. Each half is its greeting, the change notice
+    when is_update, the note and the fixed part - the order of a
+    single-language email. An empty note leaves no gap."""
+    def half(lang_code, note, fixed):
+        notice = build_update_notice(lang_code).strip() if is_update else ""
+        parts = (build_greeting(lang_code), notice, note.strip(), fixed.strip())
+        return "\n\n".join(part for part in parts if part)
+    return ("[English below]\n\n" + half("ja", ja_note, ja_fixed)
+            + BILINGUAL_SEPARATOR + half("en", en_note, en_fixed))

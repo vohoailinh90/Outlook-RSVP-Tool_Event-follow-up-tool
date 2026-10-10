@@ -115,8 +115,13 @@ def build_snapshot(module=None) -> dict[str, str]:
 # file allowed to differ; tests/test_i18n_parity.py also requires each of
 # them to really differ, so the list cannot quietly hide an unchanged
 # builder. Widening it is a reviewed code change, not a data edit.
+#
+# DEFAULT_PROMPT_BILINGUAL was rewritten when bilingual mode stopped sending
+# the whole email to Copilot: it now sends only the organizer's note, in any
+# language, and asks for a [JA] and an [EN] part. tests/test_bilingual.py pins
+# that reply format against parse_bilingual_reply().
 RETIRED_BUILDERS = frozenset({"build_thankyou_body", "build_gift_report_body"})
-RETIRED_CONSTANTS = frozenset({"THANKYOU_LABELS", "GIFT_REPORT_LABELS"})
+RETIRED_CONSTANTS = frozenset({"THANKYOU_LABELS", "GIFT_REPORT_LABELS", "DEFAULT_PROMPT_BILINGUAL"})
 
 
 def is_retired(key: str) -> bool:

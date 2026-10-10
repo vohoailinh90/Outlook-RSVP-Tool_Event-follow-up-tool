@@ -124,3 +124,44 @@ def cleanup_pasted_translation(text):
     text = re.sub(r"\n{3,}", "\n\n", text)     # collapse 3+ blank lines to 1
 
     return text.strip()
+
+
+# Copilot's answer to DEFAULT_PROMPT_BILINGUAL: the note in Japanese after a
+# [JA] marker, in English after an [EN] marker. The '#', bold, 【】 and colon
+# Copilot sometimes puts around a marker belong to it. Markers are looked for
+# at the start of a line first, so a note that mentions "[English]" mid-line
+# is not cut there; only if that finds no complete answer are they looked for
+# anywhere, since the copy quirk above can glue them to the words around them.
+_MARKER = (r"(?:[#>]+[ \t]*)?(?:\*\*|__)?[\[【]\s*"
+           r"(?:(?P<ja>JA|JP|JAPANESE|日本語)|(?P<en>EN|ENGLISH|英語))"
+           r"\s*[\]】](?:\*\*|__)?[ \t]*[:：]?")
+_LINE_START_MARKER = re.compile(r"^[ \t]*" + _MARKER, re.IGNORECASE | re.MULTILINE)
+_ANYWHERE_MARKER = re.compile(_MARKER, re.IGNORECASE)
+# Divider lines and code fences Copilot draws around a part.
+_EDGE = r"(?:[―—–\-=_─━]{3,}|`{3}\w*)"
+_EDGE_LINES = re.compile(r"\A(?:" + _EDGE + r"\s*)+|(?:\s*" + _EDGE + r")+\Z")
+
+
+def _reply_parts(text, marker_pattern):
+    markers = list(marker_pattern.finditer(text))
+    found = {}
+    for i, marker in enumerate(markers):
+        end = markers[i + 1].start() if i + 1 < len(markers) else len(text)
+        part = _EDGE_LINES.sub("", text[marker.end():end].strip()).strip()
+        if part:
+            found["ja" if marker.group("ja") else "en"] = part
+    if "ja" not in found or "en" not in found:
+        return None
+    return found["ja"], found["en"]
+
+
+def parse_bilingual_reply(text):
+    """(japanese, english) from Copilot's answer to DEFAULT_PROMPT_BILINGUAL,
+    or None unless both a [JA] and an [EN] part with text in it are found.
+    Anything before the first marker ("Here is the translation:") is dropped,
+    and so are divider lines and code fences around a part. A marker found
+    twice keeps its later part, as dedupe_pasted_translation() keeps the later
+    copy. Text Copilot adds after the last part stays in it: the app shows the
+    result for checking before anything is sent."""
+    text = text or ""
+    return _reply_parts(text, _LINE_START_MARKER) or _reply_parts(text, _ANYWHERE_MARKER)
