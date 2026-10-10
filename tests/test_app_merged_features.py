@@ -288,15 +288,30 @@ def test_expanding_keeps_a_group_not_every_member_of_which_could_be_listed(app):
 def test_working_on_an_event_with_no_tracked_money_keeps_its_typed_figures(app):
     """Critic H4: an event whose money was typed in the other copy, with no
     attendance or gift data here, is not recomputed to zero when it is
-    loaded and touched."""
+    loaded and touched - opened on every page, saved on Tab 1, its gift
+    item named."""
     db.save_event_record({"EventID": "OLD1", "EventName": "Old", "TotalIncome": "9,999",
                           "Balance": "500"}, app.db_path)
     _load(app, "OLD1")
-    _select(app, app.tab_calendar)
-    app.var_amount_paid.set("100")
+    for tab in (app.tab_calendar, app.tab_gift, app.tab_history):
+        _select(app, tab)
+    app.var_gift_item_name.set("Speaker")
+    app._save_event_from_tab1()
     app.update()
     row = _row(app, "OLD1")
-    assert (row["AmountPaid"], row["TotalIncome"], row["Balance"]) == ("100", "9,999", "500")
+    assert (row["GiftItemName"], row["TotalIncome"], row["Balance"]) == ("Speaker", "9,999", "500")
+
+
+def test_what_was_paid_out_reaches_history_with_nobody_in_the_table(app):
+    """Codex review of PR #12: a cancelled event's costs typed as round 1's
+    Amount paid never reached History, since nothing else was tracked."""
+    db.save_event_record({"EventID": "OLD1", "EventName": "Old"}, app.db_path)
+    _load(app, "OLD1")
+    _select(app, app.tab_calendar)
+    app.var_amount_paid.set("4,000")
+    app.update()
+    row = _row(app, "OLD1")
+    assert (row["AmountPaid"], row["TotalExpense"], row["Balance"]) == ("4,000", "4,000", "-4,000")
 
 
 @pytest.mark.parametrize("typed", ["abc", "-500", "1 000", "500 + 300"])

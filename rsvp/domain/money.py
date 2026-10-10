@@ -318,16 +318,23 @@ def parse_typed_amount(text):
     return -value if value and head[:1] in ("-", "\u2212") else value
 
 
-_NUMBER_RUN = re.compile(r"\d[\d,.]*")
+# One number written the ways _to_float() reads: plain, comma- or
+# dot-grouped thousands with an optional decimal part, or one decimal mark.
+_WELL_FORMED_NUMBER = re.compile(
+    r"\d+|\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d{1,3}(?:\.\d{3})+(?:,\d+)?|\d+[.,]\d+")
 
 
 def unclear_typed_amount(text):
     """True when a hand-typed amount would not be read as what it shows: no
-    number at all ("abc" is read as 0), or more than one ("1 000" is read as
-    1, "500 + 300" as 500). A currency mark or word around one number is
-    fine ("¥1,500", "1.500.000 VND")."""
+    number at all ("abc" is read as 0), more than one ("1 000" is read as 1,
+    "500 + 300" as 500), or one with separators that make no number
+    ("1.2.3", "1,2,3" are read as 0). A currency mark or word around one
+    number is fine ("¥1,500", "1.500.000 VND")."""
     t = str(text or "").strip()
-    return bool(t) and len(_NUMBER_RUN.findall(t)) != 1
+    if not t:
+        return False
+    numbers = _ANY_NUMBER.findall(t)
+    return len(numbers) != 1 or not _WELL_FORMED_NUMBER.fullmatch(numbers[0])
 
 
 def amount_for(attending, free, budget):

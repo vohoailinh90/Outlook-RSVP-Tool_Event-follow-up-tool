@@ -429,13 +429,22 @@ class TestReviewFixes:
         figures = money.payment_rounds([], "Round 1", "-500", [])
         assert (figures[0].paid, figures[0].remaining) == (-500.0, 500.0)
 
-    @pytest.mark.parametrize("text", ["abc", "1 000", "500 + 300", "Round 2: 500"])
+    @pytest.mark.parametrize("text", ["abc", "1 000", "500 + 300", "Round 2: 500",
+                                      "1.2.3", "1,2,3", "12.345.6", "1,234,56"])
     def test_a_typed_amount_not_read_as_it_looks_is_unclear(self, text):
         """Third review: "1 000" was read as 1 and "abc" as 0, and nothing
         on screen said so."""
         assert money.unclear_typed_amount(text)
 
     @pytest.mark.parametrize("text", ["", "  ", "0", "1,500", "1500.5", "-500", "¥1,500",
-                                      "1,500 JPY", "1.500.000 VND", "３０００"])
+                                      "1,500 JPY", "1.500.000 VND", "３０００", "1,500.50",
+                                      "1.500,50", "1,5", "Paid 1,500."])
     def test_one_number_with_or_without_a_currency_is_clear(self, text):
         assert not money.unclear_typed_amount(text)
+
+
+@pytest.mark.parametrize("text", ["1.2.3", "1,2,3", "12.345.6", "1,234,56"])
+def test_every_unclear_amount_really_is_misread(text):
+    """The check is not just stricter than the parser: what it flags is what
+    the parser reads as 0 (Codex review of PR #12)."""
+    assert money.parse_amount_from_text(text) == 0.0 and money.unclear_typed_amount(text)

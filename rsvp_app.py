@@ -4594,7 +4594,6 @@ class RSVPApp(tk.Tk):
         event_id = self._amount_paid_event
         if not event_id:
             return
-        was_tracked = self._was_money_tracked(event_id)
         try:
             saved = db.update_event(event_id, {"AmountPaid": self.var_amount_paid.get()},
                                     self.history_path.get())
@@ -4607,7 +4606,10 @@ class RSVPApp(tk.Tk):
                       f"('💾 Save event details'), then re-enter Amount paid.")
         if saved:
             self._amount_paid_save_failed = False
-            self._sync_event_money(event_id, was_tracked=was_tracked)
+            # Typing what was paid out is working on this event's money -
+            # even with nobody in the table (a cancelled event's costs) - so
+            # History follows it, as for every other Tab 5 change.
+            self._sync_event_money(event_id, was_tracked=True)
         elif not self._amount_paid_save_failed:
             self._amount_paid_save_failed = True
             messagebox.showwarning("Amount paid not saved",
