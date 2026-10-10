@@ -338,6 +338,17 @@ def test_an_amount_in_another_currency_is_reported(copied, translated, extras):
     ("Lãi suất 12,5%", "Rate 12.5", ["12.5%"]),
     ("Budget 12,5 EUR", "予算 12.5ユーロ", []),
     ("Budget 1,000.50 USD", "予算 1,000.50ドル", []),
+    # Found by Codex review: a sign before the symbol was dropped, so a refund
+    # could turn positive.
+    ("Refund -¥500", "Refund ¥500", ["-500"]),
+    ("Refund -¥500", "返金 -500円", []),
+    ("Refund −$12.50", "Refund $-12.50", []),
+    # Found by Codex review: dot-grouped thousands read as two numbers.
+    ("Budget 3.000 EUR", "Budget 3000 EUR", []),
+    ("Phí 300.000đ", "Fee 300,000 VND", []),
+    ("Phí 12.500.000đ", "Fee 12,500,000 VND", []),
+    ("Phí 1.000,50 €", "Fee 1,000.50 EUR", []),
+    ("Phí 300.000đ", "Fee 30,000 VND", ["300000"]),
 ])
 def test_an_amount_that_loses_its_currency_is_reported(copied, translated, gaps):
     assert translation_gaps(copied, translated) == gaps

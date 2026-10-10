@@ -266,7 +266,17 @@ def parse_bilingual_reply(text):
 # letter, digit or another sign: "-500", "¥-500" and the "+81" of a phone
 # number keep theirs, while the hyphens of "2026-12-20" or "10-12" are not
 # signs.
-_NUMBER = re.compile(r"((?<![\w+-])[+-])?(\d+(?:,\d{3})*)")
+# Thousands are grouped with commas or, as in Vietnamese and European
+# amounts, with dots: "3,000", "3.000" and "3000" are one number. A dot
+# before anything but three digits ("12.20", "1.5") does not group.
+_NUMBER = re.compile(r"((?<![\w+-])[+-])?(\d{1,3}(?:\.\d{3})+(?!\.?\d)|\d+(?:,\d{3})*)")
+# A sign written before a currency symbol is the amount's: "-¥500" is ¥-500.
+_SIGN_BEFORE_SYMBOL = re.compile(r"(?<![\w+-])([+-])[ \t]?(US\$|[¥$€₫])[ \t]?(?=\d)")
+
+
+def _normalized(text):
+    text = unicodedata.normalize("NFKC", text).replace("\u2212", "-")   # − MINUS SIGN
+    return _SIGN_BEFORE_SYMBOL.sub(r"\2\1", text)
 # Times are compared as times of day on a 24-hour clock, so "18:00" matches
 # "18時", "6:00 PM", "6 PM" or "午後6時", and "10:30" matches "10時半" -
 # while "18:00" turned into "18:30", or PM into AM, is caught. "12:00 noon"
@@ -311,8 +321,10 @@ def _is_symbol(unit):
 # whole number, decimals included, never the end of "12.50" or "300.000".
 _LATIN = "A-Za-z\u00c0-\u1ef9"
 # Its sign follows the rule of _NUMBER: "¥-3,570" and "USD -500" keep theirs.
-# A comma that does not group thousands is a decimal mark ("12,5 EUR" is 12.5).
-_AMOUNT = r"((?<![\w+-])[+-])?(?<![\d.,])(\d+(?:,\d{3})*(?:[.,]\d+)?)(?![\d.,]*\d)"
+# Grouped as in _NUMBER; a comma that does not group thousands is a decimal
+# mark ("12,5 EUR" is 12.5, "1.000,50 €" 1000.50).
+_DIGITS = r"\d{1,3}(?:\.\d{3})+(?:,\d+)?(?!\.?\d)|\d+(?:,\d{3})*(?:[.,]\d+)?"
+_AMOUNT = rf"((?<![\w+-])[+-])?(?<![\d.,])({_DIGITS})(?![\d.,]*\d)"
 _SYMBOL_FIRST = re.compile(rf"(?<![{_LATIN}\d])({_units(lambda u: _is_symbol(u) and u != '%')})"
                            rf"[ \t]?{_AMOUNT}",
                            re.IGNORECASE)   # "20€ 30€": the first € is the 20's
@@ -326,7 +338,7 @@ _CODE_FIRST = re.compile(rf"(?<![{_LATIN}])({'|'.join(_CODES)})"
 def _numbers(text):
     """How often each number occurs, with its sign, and each time of day as
     "H:MM". Every zero counts, a budget of 0 included."""
-    text = unicodedata.normalize("NFKC", text).replace("\u2212", "-")   # − MINUS SIGN
+    text = _normalized(text)
     times = Counter()
 
     def take(hours, minutes, half_of_day=None):
@@ -343,7 +355,7 @@ def _numbers(text):
     # "12 noon" is a time; "2 midnight snacks" is not.
     text = _HOUR_MERIDIEM.sub(lambda m: take(m[1], 0, m[2] or m[3]) if m[2] or m[1] == "12"
                               else m[0], text)
-    numbers = Counter(f"{sign}{int(digits.replace(',', ''))}"
+    numbers = Counter(f"{sign}{int(re.sub('[.,]', '', digits))}"
                       for sign, digits in _NUMBER.findall(text))
     return numbers + times
 
@@ -361,12 +373,13 @@ def _priced(text):
     pairs = Counter()
 
     def take(sign, digits, unit):
-        whole, fraction = re.fullmatch(r"(\d+(?:,\d{3})*)(?:[.,](\d+))?", digits).groups()
-        whole = str(int(whole.replace(",", "")))
+        whole, fraction = (re.fullmatch(r"(\d{1,3}(?:\.\d{3})+)(?:,(\d+))?", digits)
+                           or re.fullmatch(r"(\d+(?:,\d{3})*)(?:[.,](\d+))?", digits)).groups()
+        whole = str(int(re.sub("[.,]", "", whole)))
         amount = (sign or "") + (whole if fraction is None else f"{whole}.{fraction}")
         pairs[(amount, _CURRENCY_CODE[unit.lower()])] += 1
         return "_"    # a word character: "¥500-1,000円" leaves the 1,000 unsigned, as _numbers reads it
-    text = unicodedata.normalize("NFKC", text).replace("\u2212", "-")   # − MINUS SIGN
+    text = _normalized(text)
     text = _SYMBOL_FIRST.sub(lambda m: take(m[2], m[3], m[1]), text)
     text = _UNIT_AFTER.sub(lambda m: take(m[1], m[2], m[3]), text)
     _CODE_FIRST.sub(lambda m: take(m[2], m[3], m[1]), text)
