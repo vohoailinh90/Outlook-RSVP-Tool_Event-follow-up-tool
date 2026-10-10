@@ -646,3 +646,18 @@ def test_a_later_rounds_amount_cell_refuses_two_numbers(app, monolith, monkeypat
     app._commit_attendance_edit("alice@example.com", f"extra_{key}", "1 000")
     assert app._attendance_roster["alice@example.com"]["extra_amounts"][key] == 2000.0
     assert app.dialogs[-1][1] == "Amount not changed"
+
+
+def test_clearing_the_only_tracked_money_recomputes_history(app):
+    """Codex review of PR #12: clearing the gift price - the event's only
+    tracked money - left its expense and balance in History, because the
+    event no longer counted as tracked."""
+    db.save_event_record({"EventID": "OLD1", "EventName": "Old"}, app.db_path)
+    _load(app, "OLD1")
+    _select(app, app.tab_gift)
+    app.var_gift_item_price.set("3,000")
+    app.update()
+    assert (_row(app, "OLD1")["TotalExpense"], _row(app, "OLD1")["Balance"]) == ("3,000", "-3,000")
+    app.var_gift_item_price.set("")
+    app.update()
+    assert (_row(app, "OLD1")["TotalExpense"], _row(app, "OLD1")["Balance"]) == ("0", "0")

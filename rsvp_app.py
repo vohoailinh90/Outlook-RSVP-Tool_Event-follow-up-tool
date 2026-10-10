@@ -941,6 +941,7 @@ class RSVPApp(tk.Tk):
             record["Round1Label"] = self._round1_label
         if self._gift_event == event_id:
             record.update(self._gift_item_fields())
+        was_tracked = self._was_money_tracked(event_id)
         try:
             db.save_event_record(record, self.history_path.get())
         except Exception as e:
@@ -948,7 +949,7 @@ class RSVPApp(tk.Tk):
             return None
         self._save_failures_reported = {k for k in self._save_failures_reported if not k.startswith("fields:")}
         self._amount_paid_save_failed = False
-        self._sync_event_money(event_id)
+        self._sync_event_money(event_id, was_tracked=was_tracked)
         self._refresh_history_tree()
         self._refresh_history_combo()
         return event_id
@@ -3449,8 +3450,11 @@ class RSVPApp(tk.Tk):
             return
         self._update_gift_summary()
         event_id = self._gift_event
-        if event_id and self._save_event_fields(event_id, self._gift_item_fields(), "The gift item"):
-            self._sync_event_money(event_id)
+        if not event_id:
+            return
+        was_tracked = self._was_money_tracked(event_id)
+        if self._save_event_fields(event_id, self._gift_item_fields(), "The gift item"):
+            self._sync_event_money(event_id, was_tracked=was_tracked)
 
     def _on_gift_link_event_toggled(self):
         self._on_gift_item_changed()
@@ -3910,11 +3914,9 @@ class RSVPApp(tk.Tk):
         event_id = self._gift_event
         if not event_id or not self._gift_roster:
             return
-        path = self.history_path.get()
+        was_tracked = self._was_money_tracked(event_id)
         try:
-            had_contributors = any(info.get("checked")
-                                   for info in db.load_gift_roster(event_id, path).values())
-            db.save_gift_roster(event_id, self._gift_roster, path)
+            db.save_gift_roster(event_id, self._gift_roster, self.history_path.get())
         except Exception as exc:
             if not silent:
                 raise
@@ -3922,8 +3924,7 @@ class RSVPApp(tk.Tk):
             self._report_save_failure("gift", "Gift contribution", self._unwritable_reason(exc))
             return
         self._save_failures_reported.discard("gift")
-        has_contributors = any(info.get("checked") for info in self._gift_roster.values())
-        self._sync_event_money(event_id, cleared=had_contributors and not has_contributors)
+        self._sync_event_money(event_id, was_tracked=was_tracked)
 
     def _load_gift_roster_from_db(self, event_id):
         """Đọc gift roster đã lưu trong database cho event_id, dùng bởi
@@ -4593,6 +4594,7 @@ class RSVPApp(tk.Tk):
         event_id = self._amount_paid_event
         if not event_id:
             return
+        was_tracked = self._was_money_tracked(event_id)
         try:
             saved = db.update_event(event_id, {"AmountPaid": self.var_amount_paid.get()},
                                     self.history_path.get())
@@ -4605,7 +4607,7 @@ class RSVPApp(tk.Tk):
                       f"('💾 Save event details'), then re-enter Amount paid.")
         if saved:
             self._amount_paid_save_failed = False
-            self._sync_event_money(event_id)
+            self._sync_event_money(event_id, was_tracked=was_tracked)
         elif not self._amount_paid_save_failed:
             self._amount_paid_save_failed = True
             messagebox.showwarning("Amount paid not saved",
@@ -4700,6 +4702,7 @@ class RSVPApp(tk.Tk):
         if not event_id:
             return False
         cleared = reconciled and not self._attendance_roster
+        was_tracked = self._was_money_tracked(event_id)
         try:
             db.save_attendance(event_id, self._attendance_roster or ({} if cleared else None),
                                self._extra_rounds, self.history_path.get())
@@ -4710,7 +4713,7 @@ class RSVPApp(tk.Tk):
             self._report_save_failure("attendance", "Attendance & payment", self._unwritable_reason(exc))
             return False
         self._save_failures_reported.discard("attendance")
-        self._sync_event_money(event_id, cleared=cleared)
+        self._sync_event_money(event_id, was_tracked=was_tracked)
         return True
 
     def _load_attendance_sheet_from_file(self, event_id):
@@ -4720,18 +4723,42 @@ class RSVPApp(tk.Tk):
 
     # ── History's money columns ──
 
-    def _sync_event_money(self, event_id, cleared=False):
+    def _money_tracked(self, event_id):
+        """Whether what is saved for event_id gives History's money columns:
+        an attendance table, a payment round, someone marked as having
+        contributed to the gift, or a gift price. A gift list's rows do not
+        count on their own: they exist as soon as Tab 6 opens or "Send email"
+        is ticked. Raises when the database cannot be read."""
+        path = self.history_path.get()
+        rec = self._history_record(event_id) or {}
+        return bool(db.load_attendance_roster(event_id, path)
+                    or db.load_attendance_rounds(event_id, path)
+                    or any(info.get("checked") for info in db.load_gift_roster(event_id, path).values())
+                    or (rec.get("GiftItemPrice") or "").strip())
+
+    def _was_money_tracked(self, event_id):
+        """_money_tracked() before a save, for _sync_event_money() after it;
+        False when it cannot be read (the save and the sync report that)."""
+        if self._suspend_money_sync or not event_id:
+            return False  # no sync follows
+        try:
+            return self._money_tracked(event_id)
+        except Exception:
+            return False
+
+    def _sync_event_money(self, event_id, was_tracked=False):
         """Recomputes event_id's money columns in History - Actual Att.
         (main), Cost/Person, Income, Expense, Balance - from what is SAVED for
         it: its attendance table and rounds, Amount paid, gift contributions
-        and gift price. Called after each successful save on Tab 5 or Tab 6,
-        so the figures can only describe one event's saved data, never a mix
-        of tables on screen. An event with nothing tracked here keeps
-        whatever History holds (figures typed in the other copy of the app,
-        for instance) - unless `cleared`: its attendance table, or its last
-        gift contributor, was just removed here, and the figures left behind
-        would count money no longer there. One without a History row is left
-        alone too."""
+        and gift price. Called after each successful save, so the figures can
+        only describe one event's saved data, never a mix of tables on
+        screen. An event with nothing tracked here (_money_tracked()) keeps
+        whatever History holds - figures typed in the other copy of the app,
+        for instance - unless `was_tracked`: it was tracked before the save
+        that called this, so the save removed the last of it (the table
+        emptied, the last contributor unticked, the gift price cleared) and
+        the figures left behind would count money no longer there. One
+        without a History row is left alone too."""
         if self._suspend_money_sync or not event_id:
             return
         path = self.history_path.get()
@@ -4739,14 +4766,11 @@ class RSVPApp(tk.Tk):
             rec = self._history_record(event_id)
             if rec is None:
                 return
+            if not was_tracked and not self._money_tracked(event_id):
+                return
             roster = db.load_attendance_roster(event_id, path)
             rounds = db.load_attendance_rounds(event_id, path)
             gift = db.load_gift_roster(event_id, path)
-            # A gift list counts once someone is marked as contributing: its
-            # rows exist as soon as Tab 6 opens or "Send email" is ticked.
-            contributors = any(info.get("checked") for info in gift.values())
-            if not cleared and not (roster or rounds or contributors or (rec.get("GiftItemPrice") or "").strip()):
-                return
             figures = payment_rounds(roster.values(), rec.get("Round1Label") or ROUND1_DEFAULT_LABEL,
                                      rec.get("AmountPaid"), rounds)
             fields = history_figures(figures, contributed_total(gift.values()), rec.get("GiftItemPrice"))
