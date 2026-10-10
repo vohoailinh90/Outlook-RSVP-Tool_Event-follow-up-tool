@@ -182,9 +182,22 @@ def test_numbers_added_by_hand_to_one_half_must_reach_both_translations():
     ja_template, en_template = "31/10/2026 開催", "Held 31/10/2026. Click one of the 3 buttons."
     ja_edited = ja_template + "\n締切 25/12/2026"
     assert translation_gaps(en_template, "Held 31/10/2026. Click one of the 3 buttons.",
-                            added_in=(ja_edited, ja_template)) == ["12", "25"]
+                            template=en_template, other=(ja_edited, ja_template)) == ["12", "25", "2026"]
     assert translation_gaps(ja_edited, "2026年10月31日開催、締切2026年12月25日",
-                            added_in=(en_template, en_template)) == []
+                            template=ja_template, other=(en_template, en_template)) == []
+
+
+def test_a_hand_added_date_equal_to_the_event_date_is_counted_again():
+    """Found by Codex review: taking the larger count let a deadline equal to
+    the event date, typed into one half, be dropped from the other."""
+    ja_template, en_template = "10/10/2026 開催", "Held 10/10/2026."
+    ja_edited = ja_template + "\n締切 10/10/2026"
+    assert translation_gaps(en_template, "Held 10/10/2026.", template=en_template,
+                            other=(ja_edited, ja_template)) == ["10 (×2)", "2026"]
+    # The same deadline typed into both halves counts once.
+    en_edited = en_template + " Reply by 10/10/2026."
+    assert translation_gaps(en_edited, "Held 10/10/2026. Reply by 10/10/2026.",
+                            template=en_template, other=(ja_edited, ja_template)) == []
 
 
 def test_an_answer_without_note_markers_has_empty_notes():
@@ -258,6 +271,10 @@ def _answer(app, ja_note=JA_NOTE, en_note=EN_NOTE):
 
 
 def _paste_and_save(app, reply):
+    """Paste and Save, copying first unless the test already did: a
+    bilingual Save needs the Copy it answers."""
+    if app._current_lang_code() == "bilingual" and app._bilingual_copied is None:
+        app._copy_email_for_translation()
     _set_box(app.txt_translation_paste, reply)
     app._save_translated_email()
 
@@ -335,6 +352,14 @@ def test_a_saved_answer_with_no_note_leaves_the_note_box_empty(app):
     assert not [d for d in app.dialogs if d[0] == "askyesno"]
 
 
+def test_saving_without_a_copy_is_refused(app):
+    _compose(app)
+    _set_box(app.txt_translation_paste, _answer(app)[0])
+    app._save_translated_email()
+    assert app.dialogs[-1][:2] == ("showwarning", "Copy the email first")
+    assert app.full_translations["bilingual"] == ""
+
+
 def test_an_answer_without_both_parts_saves_nothing(app):
     _compose(app)
     before = (_box(app.txt_editable_preview), _box(app.txt_fixed_preview))
@@ -380,6 +405,19 @@ def test_a_translation_made_before_event_setup_changed_is_set_aside(app):
     assert "Hall B" in _box(app.txt_fixed_preview)
     (body,) = _send(app)                                  # untranslated note: the fixture says Yes
     assert "Hall B" in body and "Hall A" not in body
+
+
+def test_the_old_answer_cannot_be_saved_again_after_it_was_set_aside(app):
+    """Found by Codex review: Save again with the old answer still in the
+    paste box took the new Event setup as its basis."""
+    _compose(app)
+    _paste_and_save(app, _answer(app)[0])
+    app.var_location.set("Hall B")
+    app._refresh_compose_preview_unless_edited()          # set aside
+    app._save_translated_email()                          # the old answer, no new Copy
+    assert app.dialogs[-1][:2] == ("showwarning", "Event setup changed since the Copy")
+    assert app.full_translations["bilingual"] == ""
+    assert "Hall B" in _box(app.txt_fixed_preview)
 
 
 def test_an_edited_translation_after_event_setup_changed_is_asked_about(app, monolith, monkeypatch):
@@ -486,7 +524,7 @@ def test_a_date_added_to_one_half_and_lost_from_the_other_translation_is_asked_a
                         lambda title, message=None, **_: asked.append((title, message)) or False)
     _paste_and_save(app, reply)
     assert [title for title, _ in asked] == ["Check the translation"]
-    assert "English details: 12, 25" in asked[0][1] and "Japanese details" not in asked[0][1]
+    assert "English details: 12, 25, 2026" in asked[0][1] and "Japanese details" not in asked[0][1]
 
 
 def test_an_answer_that_loses_a_date_is_asked_about(app, monolith, monkeypatch):

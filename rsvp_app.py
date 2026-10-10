@@ -466,10 +466,10 @@ class RSVPApp(tk.Tk):
         # để tránh 2 loại nội dung email hoàn toàn khác nhau ghi đè lẫn nhau
         # khi chỉ đổi qua lại Send mode trên CÙNG 1 ngôn ngữ.
         self.gift_full_translations = {"en": "", "ja": "", "vi": "", "bilingual": ""}
-        # Bilingual translation bookkeeping: what the last Copy sent, and in
-        # which Send mode ("invite"/"gift"), until a Save uses it; and, per
-        # Send mode, what Event setup said when the saved translation was
-        # made - see _bilingual_basis().
+        # Bilingual translation bookkeeping: what the last Copy sent, in which
+        # Send mode ("invite"/"gift") and against which Event setup, and
+        # whether a Save has used it yet; and, per Send mode, what Event setup
+        # said when the saved translation was made - see _bilingual_basis().
         self._bilingual_copied = None
         self._bilingual_basis_saved = {}
         # The text each draft generator last put in its box, so a box that
@@ -2290,7 +2290,8 @@ class RSVPApp(tk.Tk):
                 "The fixed part is empty. Click '🔄 Refresh preview from Tab 1 / Tab 2' to "
                 "rebuild it, then copy again.")
             return
-        self._bilingual_copied = (self._mode_key(), note, details, self._bilingual_basis())
+        self._bilingual_copied = {"mode": self._mode_key(), "note": note, "details": details,
+                                  "basis": self._bilingual_basis(), "saved": False}
         self.clipboard_clear()
         self.clipboard_append(build_bilingual_prompt(note, details))
         shown = note if len(note) <= 300 else note[:300].rstrip() + " …"
@@ -2421,8 +2422,17 @@ class RSVPApp(tk.Tk):
             return
         ja_note, ja_details, en_note, en_details = parts
         mode = self._mode_key()
-        if self._bilingual_copied and self._bilingual_copied[0] != mode:
-            copied_label = "Gift Contribution Notice" if self._bilingual_copied[0] == "gift" else "invite"
+        copied = self._bilingual_copied
+        if copied is None:
+            # Without the Copy there is no knowing what the answer translates:
+            # an old answer left in the box would pass for the current one.
+            messagebox.showwarning(
+                "Copy the email first",
+                "Click '📋 Copy note + fixed part + prompt' first, send that to Copilot, then "
+                "paste its answer here and Save." + dedupe_note)
+            return
+        if copied["mode"] != mode:
+            copied_label = "Gift Contribution Notice" if copied["mode"] == "gift" else "invite"
             messagebox.showwarning(
                 "Copied in another Send mode",
                 f"The last Copy was the {copied_label} email, but Send mode has changed since, so "
@@ -2430,17 +2440,14 @@ class RSVPApp(tk.Tk):
                 "Switch Send mode back and Save, or copy this email and paste Copilot's new answer."
                 + dedupe_note)
             return
-        copied = self._bilingual_copied[1:] if self._bilingual_copied else None
-        now = (self._editable_box_text_for_translation(), self.txt_fixed_preview.get("1.0", "end").strip())
-        source_note, source_details = copied[:2] if copied else now
-
-        if copied and copied[2] != self._bilingual_basis():
+        if copied["basis"] != self._bilingual_basis():
             messagebox.showwarning(
                 "Event setup changed since the Copy",
                 "Event setup changed after you copied the email for Copilot, so this answer "
                 "translates the old details. Copy again, and paste Copilot's new answer."
                 + dedupe_note)
             return
+        source_note, source_details = copied["note"], copied["details"]
         if source_note and not (ja_note and en_note):
             messagebox.showwarning(
                 "Translated note missing",
@@ -2452,16 +2459,20 @@ class RSVPApp(tk.Tk):
                 + dedupe_note)
             return
 
-        if copied:
-            edited_since = now != (source_note, source_details)
-        else:
+        if copied["saved"]:
+            # Saving again (after 'Clean up spacing', say): the boxes hold the
+            # last save, so only edits made to it since are at stake.
             edited_since = self._compose_box_texts() != getattr(self, "_compose_generated", None)
+        else:
+            now = (self._editable_box_text_for_translation(),
+                   self.txt_fixed_preview.get("1.0", "end").strip())
+            edited_since = now != (source_note, source_details)
         if edited_since and not messagebox.askyesno(
                 "Replace your edits?",
-                ("The boxes changed after you copied them. " if copied else "")
-                + "Saving replaces the note box and the fixed part box with Copilot's translation, "
-                "and the text you typed into them " + ("since then " if copied else "")
-                + "is lost.\n\nSave anyway?"):
+                "The boxes changed after you " + ("saved" if copied["saved"] else "copied")
+                + " them. Saving replaces the note box and the fixed part box with Copilot's "
+                "translation, and the text you typed into them since then is lost.\n\n"
+                "Save anyway?"):
             return
 
         ja_source, en_source = split_bilingual(source_details)
@@ -2469,11 +2480,11 @@ class RSVPApp(tk.Tk):
         ja_template, en_template = self._fixed_text("ja"), self._fixed_text("en")
         gaps = [
             ("Japanese note", translation_gaps(source_note, ja_note)),
-            ("Japanese details", translation_gaps(ja_source, ja_details,
-                                                  added_in=(en_source, en_template))),
+            ("Japanese details", translation_gaps(ja_source, ja_details, template=ja_template,
+                                                  other=(en_source, en_template))),
             ("English note", translation_gaps(source_note, en_note)),
-            ("English details", translation_gaps(en_source, en_details,
-                                                 added_in=(ja_source, ja_template))),
+            ("English details", translation_gaps(en_source, en_details, template=en_template,
+                                                 other=(ja_source, ja_template))),
         ]
         gaps = [(label, missing) for label, missing in gaps if missing]
         if gaps and not messagebox.askyesno(
@@ -2486,8 +2497,8 @@ class RSVPApp(tk.Tk):
             return
 
         self._active_full_translations()["bilingual"] = text
-        self._bilingual_basis_saved[mode] = copied[2] if copied else self._bilingual_basis()
-        self._bilingual_copied = None       # used: a later Save checks the boxes as saved
+        self._bilingual_basis_saved[mode] = copied["basis"]
+        copied["saved"] = True
         self._refresh_compose_preview()
         messagebox.showinfo(
             "Saved & Applied",

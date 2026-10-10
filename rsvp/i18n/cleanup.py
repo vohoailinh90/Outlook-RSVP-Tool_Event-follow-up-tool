@@ -226,22 +226,26 @@ def _button_names(text):
     return [b for b in _BUTTONS if re.search(rf"(?<![A-Za-z]){b}(?![A-Za-z])", text)]
 
 
-def translation_gaps(source, translated, added_in=None):
+def translation_gaps(source, translated, template=None, other=None):
     """What `translated` lacks that `source` has: numbers, compared by value
     and by how often they occur (so 07 matches 7, 3,000 matches 3000, a date
     may change its order, and of two identical dates neither may go), and the
     voting-button names Yes, No and Maybe. [] when nothing is missing.
 
-    added_in=(other_source, other_template) adds the numbers typed into the
-    other language's source beyond its built-in template: a deadline added by
-    hand to one half of the fixed part must reach both translations, while the
-    halves' own differences in wording ("3 BUTTONS" in English only) do not
-    count. A deterministic check, not a judgement: a correct translation that
-    spells a number out ("three") is reported too, for a person to look at."""
+    other=(other_source, other_template) adds the numbers typed into the
+    other language's source beyond its built-in template - less those typed
+    into this source beyond `template` - so a deadline added by hand to one
+    half of the fixed part must reach both translations, also when it repeats
+    the event date, and one added to both halves counts once. The halves' own
+    differences in wording ("3 BUTTONS" in English only) do not count. A
+    deterministic check, not a judgement: a correct translation that spells a
+    number out ("three") is reported too, for a person to look at."""
     expected = _numbers(source)
-    if added_in:
-        other_source, other_template = added_in
-        expected |= _numbers(other_source) - _numbers(other_template)
+    if other:
+        other_source, other_template = other
+        added_there = _numbers(other_source) - _numbers(other_template)
+        added_here = expected - _numbers(template) if template is not None else Counter()
+        expected = expected + (added_there - added_here)
     missing = expected - _numbers(translated)
     gaps = [str(n) if k == 1 else f"{n} (×{k})" for n, k in sorted(missing.items())]
     return gaps + [b for b in _button_names(source) if b not in _button_names(translated)]
