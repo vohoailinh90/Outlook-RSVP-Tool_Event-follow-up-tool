@@ -3900,8 +3900,11 @@ class RSVPApp(tk.Tk):
         event_id = self._gift_event
         if not event_id or not self._gift_roster:
             return
+        path = self.history_path.get()
         try:
-            db.save_gift_roster(event_id, self._gift_roster, self.history_path.get())
+            had_contributors = any(info.get("checked")
+                                   for info in db.load_gift_roster(event_id, path).values())
+            db.save_gift_roster(event_id, self._gift_roster, path)
         except Exception as exc:
             if not silent:
                 raise
@@ -3909,7 +3912,8 @@ class RSVPApp(tk.Tk):
             self._report_save_failure("gift", "Gift contribution", self._unwritable_reason(exc))
             return
         self._save_failures_reported.discard("gift")
-        self._sync_event_money(event_id)
+        has_contributors = any(info.get("checked") for info in self._gift_roster.values())
+        self._sync_event_money(event_id, cleared=had_contributors and not has_contributors)
 
     def _load_gift_roster_from_db(self, event_id):
         """Đọc gift roster đã lưu trong database cho event_id, dùng bởi
@@ -4714,9 +4718,10 @@ class RSVPApp(tk.Tk):
         so the figures can only describe one event's saved data, never a mix
         of tables on screen. An event with nothing tracked here keeps
         whatever History holds (figures typed in the other copy of the app,
-        for instance) - unless `cleared`: its table was just emptied here, and
-        the figures it leaves behind would count people no longer coming. One
-        without a History row is left alone too."""
+        for instance) - unless `cleared`: its attendance table, or its last
+        gift contributor, was just removed here, and the figures left behind
+        would count money no longer there. One without a History row is left
+        alone too."""
         if self._suspend_money_sync or not event_id:
             return
         path = self.history_path.get()
@@ -4727,7 +4732,10 @@ class RSVPApp(tk.Tk):
             roster = db.load_attendance_roster(event_id, path)
             rounds = db.load_attendance_rounds(event_id, path)
             gift = db.load_gift_roster(event_id, path)
-            if not cleared and not (roster or rounds or gift or (rec.get("GiftItemPrice") or "").strip()):
+            # A gift list counts once someone is marked as contributing: its
+            # rows exist as soon as Tab 6 opens or "Send email" is ticked.
+            contributors = any(info.get("checked") for info in gift.values())
+            if not cleared and not (roster or rounds or contributors or (rec.get("GiftItemPrice") or "").strip()):
                 return
             figures = payment_rounds(roster.values(), rec.get("Round1Label") or ROUND1_DEFAULT_LABEL,
                                      rec.get("AmountPaid"), rounds)

@@ -611,3 +611,25 @@ def test_ticking_everyone_leaves_rows_already_ticked_alone(app):
     app._toggle_all_gift_column("check")
     assert (app._gift_roster["alice@example.com"]["amount"],
             app._gift_roster["bob@example.com"]["amount"]) == (1000.0, 1500.0)
+
+
+def test_choosing_whom_to_send_the_gift_report_to_keeps_typed_figures(app):
+    """Codex review of PR #12: ticking only "Send email" saved gift rows with
+    nobody contributing, which counted as tracked money and recomputed the
+    figures typed in the other copy to zero."""
+    db.save_event_record({"EventID": "OLD1", "EventName": "Old", "TotalIncome": "9,999",
+                          "Balance": "500"}, app.db_path)
+    db.save_recipients("OLD1", [("Alice Example", "alice@example.com")], app.db_path)
+    _load(app, "OLD1")
+    _select(app, app.tab_gift)
+    app._gift_roster["alice@example.com"]["send_email"] = True
+    app._save_gift_roster_to_db(silent=True)
+    assert (_row(app, "OLD1")["TotalIncome"], _row(app, "OLD1")["Balance"]) == ("9,999", "500")
+
+    app._gift_roster["alice@example.com"].update(checked=True, amount=1200.0)
+    app._save_gift_roster_to_db(silent=True)
+    assert _row(app, "OLD1")["TotalIncome"] == "1,200"
+    # Unticking the last contributor recomputes too, rather than keeping 1,200.
+    app._gift_roster["alice@example.com"].update(checked=False, amount=0.0)
+    app._save_gift_roster_to_db(silent=True)
+    assert _row(app, "OLD1")["TotalIncome"] == "0"
