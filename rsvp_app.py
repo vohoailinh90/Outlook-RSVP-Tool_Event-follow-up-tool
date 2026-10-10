@@ -156,6 +156,7 @@ from rsvp.domain import (  # noqa: F401
     merge_expanded_roster,
     format_amount,
     parse_amount_from_text,
+    parse_typed_amount,
     payment_rounds,
     remaining_amount,
     round_totals,
@@ -427,6 +428,9 @@ class RSVPApp(tk.Tk):
         # Tab 6's gift item belongs to _gift_event; setting it from the
         # database must not save it straight back.
         self._gift_item_quiet = False
+        # The event whose gift item is on screen: None until it was read, so
+        # blank boxes shown after a failed read are never saved over it.
+        self._gift_item_event = None
         # History's money columns follow every saved change on Tab 5 / Tab 6
         # (_sync_event_money()); muted while an event is loaded or cleared.
         self._suspend_money_sync = False
@@ -939,7 +943,7 @@ class RSVPApp(tk.Tk):
             record["AmountPaid"] = self.var_amount_paid.get()
         if self._attendance_event == event_id and self._round1_label:
             record["Round1Label"] = self._round1_label
-        if self._gift_event == event_id:
+        if self._gift_item_event == event_id:
             record.update(self._gift_item_fields())
         was_tracked = self._was_money_tracked(event_id)
         try:
@@ -3418,15 +3422,22 @@ class RSVPApp(tk.Tk):
     # ── Tab 6: the gift item and the money ──
 
     def _adopt_gift_item(self, event_id):
-        """Shows event_id's saved gift item (or none), without saving it back."""
+        """Shows event_id's saved gift item (or none), without saving it back.
+        When it cannot be read, the boxes are shown empty and belong to no
+        event, so typing in them saves nothing over the stored item."""
         if not hasattr(self, "var_gift_item_name"):
             return
         rec = {}
         if event_id:
             try:
                 rec = self._history_record(event_id) or {}
-            except Exception:
-                rec = {}
+            except Exception as exc:
+                messagebox.showerror(
+                    "Gift item not loaded",
+                    f"Couldn't read the gift item of '{event_id}':\n\n{exc}\n\n"
+                    "It is shown empty and will not be saved until it can be read.")
+                rec, event_id = {}, None
+        self._gift_item_event = event_id or None
         self._gift_item_quiet = True
         try:
             self.var_gift_item_name.set(rec.get("GiftItemName") or "")
@@ -3449,7 +3460,7 @@ class RSVPApp(tk.Tk):
         if self._gift_item_quiet:
             return
         self._update_gift_summary()
-        event_id = self._gift_event
+        event_id = self._gift_item_event
         if not event_id:
             return
         was_tracked = self._was_money_tracked(event_id)
@@ -3827,7 +3838,7 @@ class RSVPApp(tk.Tk):
                 f"“{text}” is not one number, so the amount was left unchanged.\n\n"
                 "Type just the figure (e.g. 1000 or 1,000), or clear the cell to reset it to 0.")
             return
-        elif text.startswith(("-", "\u2212")):
+        elif parse_typed_amount(text) < 0:
             messagebox.showwarning(
                 "Negative amount", "A contribution amount can't be negative - the amount was left unchanged.")
             return
@@ -4303,7 +4314,7 @@ class RSVPApp(tk.Tk):
         # An empty Attend stays empty (not attending is "No", not blank).
         attend_value = "Yes" if truthy else ("No" if new_value else "")
         if (col_name == "amount" or col_name.startswith("extra_")) and new_value and (
-                unclear_typed_amount(new_value) or new_value.startswith(("-", "\u2212"))):
+                unclear_typed_amount(new_value) or parse_typed_amount(new_value) < 0):
             # Reading it as 0, a negative as positive or "1 000" as 1 would
             # silently change what that person paid.
             if self._paste_refusals is not None:

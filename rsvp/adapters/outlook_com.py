@@ -1078,7 +1078,14 @@ def _expand_dl_addr_entry(ns, addr_entry, seen_people, seen_groups, depth,
             continue
         n_people += 1
         smtp = _ae_smtp(m_full)
-        if not smtp or "@" not in smtp or smtp in seen_people:
+        if not smtp or "@" not in smtp:
+            # Someone the address book gives no email address for: left out
+            # silently, the caller would save the group as these members
+            # and lose them for good. Reported, so the group's row is kept.
+            failed_groups.append(
+                f"{_safe(full, 'Name', '?')}: {_safe(m_full, 'Name', '?')} (no email address)")
+            continue
+        if smtp in seen_people:
             continue
         seen_people.add(smtp)
         name = None

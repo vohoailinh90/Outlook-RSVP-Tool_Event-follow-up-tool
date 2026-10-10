@@ -471,3 +471,10 @@ def test_a_typed_minus_on_the_gift_price_is_kept():
     assert (fig["gift_cost"], fig["gift_remaining"]) == (-500.0, 1500.0)
     figures = money.payment_rounds([], "Round 1", "", [])
     assert money.history_figures(figures, 1000.0, "-500")["TotalExpense"] == "-500"
+
+
+@pytest.mark.parametrize("text", ["¥-500", "USD -500", "US$-500", "-¥500", "−500"])
+def test_a_minus_beside_the_number_is_kept_after_a_currency_mark(text):
+    """Codex review of PR #12: "¥-500" and "USD -500" read as +500 - a refund
+    recorded as an expense."""
+    assert money.parse_typed_amount(text) == -500.0

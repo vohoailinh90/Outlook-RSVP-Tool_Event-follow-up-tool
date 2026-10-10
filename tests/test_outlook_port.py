@@ -218,3 +218,16 @@ def test_a_group_inside_itself_is_expanded_once():
     loop.Members = _Members([_Entry("Person A", smtp="a@example.com"), loop])
     people = outlook_com._expand_dl_addr_entry(_Namespace(), loop, set(), set(), 10, [], [])
     assert people == [("Person A", "a@example.com")]
+
+
+def test_a_member_without_an_email_address_is_reported():
+    """Codex review of PR #12: a member Outlook gives no SMTP address for was
+    skipped without a word, so the group was replaced by the others and that
+    person dropped from every later invitation."""
+    outlook_com = pytest.importorskip("rsvp.adapters.outlook_com")
+    team = _Entry("Team", entry_id="ID-T", members=[
+        _Entry("Person A", smtp="a@example.com"), _Entry("Person C")])
+    failed = []
+    people = outlook_com._expand_dl_addr_entry(_Namespace(), team, set(), set(), 10, failed, [])
+    assert people == [("Person A", "a@example.com")]
+    assert failed == ["Team: Person C (no email address)"]

@@ -313,13 +313,20 @@ def parse_signed_amount(text):
     return -value if match.group(1) else value
 
 
+_MINUS = ("-", "\u2212")
+
+
 def parse_typed_amount(text):
-    """An amount typed by hand, keeping a leading minus ("-500" is a refund,
-    not 500): parse_amount_from_text finds the number, the sign is read
-    from the text before it."""
+    """An amount typed by hand, keeping its minus ("-500" is a refund, not
+    500): parse_amount_from_text finds the number, the sign is read from the
+    text before it - at the very start ("-¥500") or right before the number,
+    after a currency mark ("¥-500", "USD -500")."""
     value = parse_amount_from_text(text)
-    head = str(text or "").strip()
-    return -value if value and head[:1] in ("-", "\u2212") else value
+    t = str(text or "")
+    first = _ANY_NUMBER.search(t)
+    head = t[:first.start()] if first else t
+    negative = head.strip().startswith(_MINUS) or head.rstrip().endswith(_MINUS)
+    return -value if value and negative else value
 
 
 # One number written the ways _to_float() reads: plain, comma- or

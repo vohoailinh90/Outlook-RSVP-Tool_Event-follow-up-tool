@@ -243,7 +243,7 @@ def test_a_typed_gift_amount_survives_ticking_contributed_again(app):
     assert db.load_gift_roster("EV1", app.db_path)["alice@example.com"]["manual_amount"] is True
 
 
-@pytest.mark.parametrize("typed", ["abc", "-500", "1 000"])
+@pytest.mark.parametrize("typed", ["abc", "-500", "1 000", "USD -500"])
 def test_a_gift_amount_that_is_not_a_positive_number_is_refused(app, typed):
     _start_event(app)
     _select(app, app.tab_gift)
@@ -314,7 +314,7 @@ def test_what_was_paid_out_reaches_history_with_nobody_in_the_table(app):
     assert (row["AmountPaid"], row["TotalExpense"], row["Balance"]) == ("4,000", "4,000", "-4,000")
 
 
-@pytest.mark.parametrize("typed", ["abc", "-500", "1 000", "500 + 300"])
+@pytest.mark.parametrize("typed", ["abc", "-500", "1 000", "500 + 300", "¥-500"])
 def test_an_amount_cell_refuses_what_is_not_a_paid_amount(app, typed):
     """Review finding: parse_amount_from_text read "-500" as 500 and "abc"
     as 0, silently changing what someone paid."""
@@ -676,3 +676,24 @@ def test_clearing_the_only_tracked_money_recomputes_history(app):
     app.var_gift_item_price.set("")
     app.update()
     assert (_row(app, "OLD1")["TotalExpense"], _row(app, "OLD1")["Balance"]) == ("0", "0")
+
+
+def test_a_gift_item_that_could_not_be_read_is_never_saved_over(app, monolith, monkeypatch):
+    """Codex review of PR #12: a failed read showed empty gift boxes still
+    owned by the event, and the next edit saved all four blanks over the
+    stored item."""
+    db.save_event_record({"EventID": "EV9", "EventName": "Nine", "GiftItemName": "Speaker",
+                          "GiftItemPrice": "3,570"}, app.db_path)
+    real = app._history_record
+
+    def unreadable(event_id):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(app, "_history_record", unreadable)
+    app._adopt_gift_item("EV9")
+    assert app.dialogs[-1][1] == "Gift item not loaded"
+    monkeypatch.setattr(app, "_history_record", real)
+    app.var_gift_item_link.set("https://shop.example.com/item")
+    app.update()
+    row = _row(app, "EV9")
+    assert (row["GiftItemName"], row["GiftItemPrice"], row["GiftItemLink"]) == ("Speaker", "3,570", "")
