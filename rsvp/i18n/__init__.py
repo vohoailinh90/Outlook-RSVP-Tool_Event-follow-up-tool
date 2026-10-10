@@ -21,6 +21,7 @@ from .cleanup import (  # noqa: F401
     dedupe_pasted_translation,
     detect_possible_duplicate_paste,
     cleanup_pasted_translation,
+    parse_bilingual_reply,
 )
 from .messages import (  # noqa: F401
     build_greeting,
@@ -45,6 +46,9 @@ from .messages import (  # noqa: F401
     GIFT_REPORT_LABELS,
     build_gift_report_body,
     build_editable_block,
+    join_bilingual,
+    split_bilingual,
+    build_bilingual_body,
 )
 from .tables import text_body_to_html  # noqa: F401
 
@@ -62,6 +66,7 @@ __all__ = [
     "dedupe_pasted_translation",
     "detect_possible_duplicate_paste",
     "cleanup_pasted_translation",
+    "parse_bilingual_reply",
     "build_greeting",
     "build_subject",
     "UPDATE_NOTICE",
@@ -84,4 +89,7 @@ __all__ = [
     "GIFT_REPORT_LABELS",
     "build_gift_report_body",
     "build_editable_block",
+    "join_bilingual",
+    "split_bilingual",
+    "build_bilingual_body",
 ]

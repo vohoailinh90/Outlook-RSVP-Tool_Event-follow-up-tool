@@ -124,3 +124,35 @@ def cleanup_pasted_translation(text):
     text = re.sub(r"\n{3,}", "\n\n", text)     # collapse 3+ blank lines to 1
 
     return text.strip()
+
+
+# Copilot's answer to DEFAULT_PROMPT_BILINGUAL: the note in Japanese after a
+# [JA] marker, in English after an [EN] marker. Markers are found anywhere,
+# not only at the start of a line, since the copy quirk above can glue them to
+# the words around them, and the '#', bold, 【】 and colon Copilot sometimes
+# puts around them belong to the marker.
+_REPLY_MARKER = re.compile(
+    r"(?:[#>]+[ \t]*)?(?:\*\*|__)?[\[【]\s*"
+    r"(?:(?P<ja>JA|JP|JAPANESE|日本語)|(?P<en>EN|ENGLISH|英語))"
+    r"\s*[\]】](?:\*\*|__)?[ \t]*[:：]?",
+    re.IGNORECASE)
+_EDGE_DIVIDERS = re.compile(r"\A(?:[―—–\-=_─━]{3,}\s*)+|(?:\s*[―—–\-=_─━]{3,})+\Z")
+
+
+def parse_bilingual_reply(text):
+    """(japanese, english) from Copilot's answer to DEFAULT_PROMPT_BILINGUAL,
+    or None unless both a [JA] and an [EN] part with text in it are found.
+    Anything before the first marker ("Here is the translation:") is dropped,
+    and so are divider lines Copilot draws around a part. A marker found twice
+    keeps its later part, as dedupe_pasted_translation() keeps the later copy."""
+    text = text or ""
+    markers = list(_REPLY_MARKER.finditer(text))
+    found = {}
+    for i, marker in enumerate(markers):
+        end = markers[i + 1].start() if i + 1 < len(markers) else len(text)
+        part = _EDGE_DIVIDERS.sub("", text[marker.end():end].strip()).strip()
+        if part:
+            found["ja" if marker.group("ja") else "en"] = part
+    if "ja" not in found or "en" not in found:
+        return None
+    return found["ja"], found["en"]

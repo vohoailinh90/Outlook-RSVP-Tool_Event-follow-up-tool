@@ -93,6 +93,13 @@ Content can be hand-edited; supports bilingual translation via a copy-paste brid
 Microsoft Copilot (paste a ready-made prompt, paste the translated result back into the
 app).
 
+**Bilingual (JP+EN):** the note box holds only your note, in any language; the fixed-part
+box holds the event details and voting instructions in Japanese and English, either side of
+a divider line. **📋 Copy note + prompt** sends just the note to Copilot, which answers with
+a `[JA]` part and an `[EN]` part in one go. Paste that answer back and Save: the note box then
+shows both languages, and each half of the email gets its own greeting and fixed part,
+Japanese first and English second. An empty note needs no translation at all.
+
 ### Tab 4 — Collect Responses
 **Scan Inbox** reads the Yes/No/Maybe replies from every folder of your mailbox. Individual
 votes can be manually corrected (tick "Manual edit" to open a dropdown) — manually edited
