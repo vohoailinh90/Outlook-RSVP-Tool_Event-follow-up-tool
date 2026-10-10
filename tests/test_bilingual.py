@@ -167,6 +167,11 @@ def test_angle_brackets_that_belong_to_the_text_are_kept():
     # Found by Codex review: zero was left out everywhere, so a lost budget
     # of 0 went unnoticed.
     ("Budget: 0 JPY", "予算: なし", ["0"]),
+    # Found by Codex review: a lost minus sign went unnoticed.
+    ("Balance: -500", "残高: 500", ["-500"]),
+    ("残高 ¥-3,570", "Balance ¥-3570", []),
+    ("Remaining \u22121,200", "残り －1200", []),        # typographic and full-width minus
+    ("2026-12-20, floors 10-12", "2026年12月20日、10〜12階", []),   # hyphens, not signs
     # Found by Codex review: with a set, a dropped deadline equal to the event
     # date went unnoticed.
     ("Event 10/10/2026, reply by 10/10/2026", "イベント 2026年10月10日", ["10 (×2)", "2026"]),

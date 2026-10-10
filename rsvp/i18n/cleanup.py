@@ -226,16 +226,20 @@ def parse_bilingual_reply(text):
 # Numbers and the voting buttons are what a translation must never change: a
 # date, an amount or a deadline reaches colleagues as written, and the buttons
 # Outlook shows are always Yes, No and Maybe.
-_NUMBER = re.compile(r"\d+(?:,\d{3})*")
+# A minus sign belongs to a number when it is attached to it and does not
+# follow a letter or digit, so "-500" and "¥-500" are negative while the
+# hyphens of "2026-12-20" or "10-12" are not.
+_NUMBER = re.compile(r"(?:(?<![\w-])-)?\d+(?:,\d{3})*")
 _ON_THE_HOUR = re.compile(r"(?<!\d)(\d{1,2}):00(?!\d)")
 _BUTTONS = ("Yes", "No", "Maybe")
 
 
 def _numbers(text):
-    """How often each number occurs. The ':00' of a time on the hour is not
-    counted - "18:00" becomes "18時" in a good Japanese translation - but
-    every other zero is, a budget of 0 included."""
-    text = _ON_THE_HOUR.sub(r"\1", unicodedata.normalize("NFKC", text))
+    """How often each number occurs, with its sign. The ':00' of a time on
+    the hour is not counted - "18:00" becomes "18時" in a good Japanese
+    translation - but every other zero is, a budget of 0 included."""
+    text = unicodedata.normalize("NFKC", text).replace("\u2212", "-")   # − MINUS SIGN
+    text = _ON_THE_HOUR.sub(r"\1", text)
     return Counter(int(n.replace(",", "")) for n in _NUMBER.findall(text))
 
 
