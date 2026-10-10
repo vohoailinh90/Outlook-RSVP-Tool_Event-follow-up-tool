@@ -283,8 +283,9 @@ def _normalized(text):
 # while "18:00" turned into "18:30", or PM into AM, is caught. "12:00 noon"
 # is 12:00 and "12:00 midnight" 0:00.
 _MERIDIEM = r"(?:\s*(?:([AaPp])\.?\s*[Mm]\.?|((?i:noon|midnight)))(?![A-Za-z]))"
-# A half of the day may also come first, in Japanese or as "PM 6:00".
-_CLOCK_TIME = re.compile(r"(午前|午後|(?<![A-Za-z])[AaPp]\.?[Mm]\.?)?\s*(?<!\d)(\d{1,2}):(\d{2})(?!\d)"
+# A half of the day may also come first, in Japanese or as "PM 6:00" - in
+# capitals or with dots, so the verb in "I am 12:00" is not one.
+_CLOCK_TIME = re.compile(r"(午前|午後|(?<![A-Za-z])(?:[AP]M|[AaPp]\.[Mm]\.))?\s*(?<!\d)(\d{1,2}):(\d{2})(?!\d)"
                          + _MERIDIEM + "?")
 _JA_TIME = re.compile(r"(午前|午後)?[ \t]*(?<!\d)(\d{1,2})時(?!間)(?:(\d{1,2})分|(半))?")   # 3時間 is a duration
 _HOUR_MERIDIEM = re.compile(r"(?<![\d:])(\d{1,2})" + _MERIDIEM)

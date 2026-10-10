@@ -185,6 +185,7 @@ def test_angle_brackets_that_belong_to_the_text_are_kept():
     ("Start PM 6:00", "Start AM 6:00", ["18:00"]),
     ("受付 PM6:00", "Reception 6:00 p.m.", []),
     ("TEAM 6:00", "チーム 6:00", []),
+    ("I am 12:00 sharp", "12時ちょうど", []),
     # Found by Codex review: noon and midnight were not read as halves of the day.
     ("Start 12:00 noon", "Start 12:00 midnight", ["12:00"]),
     ("Ends 12:00 midnight", "午前0時終了", []),
