@@ -352,6 +352,10 @@ def test_an_amount_in_another_currency_is_reported(copied, translated, extras):
     ("JPY 500-1,000", "500〜1,000円", []),
     ("10-20%", "10〜20パーセント", []),
     ("3,000〜5,000円", "3,000-5,000", ["3000 JPY", "5000 JPY"]),
+    # Found in review: the next amount's symbol is not a range's unit.
+    ("Date 2026-12-20 ¥500", "日付 2026/12/20 ¥500", []),
+    ("Room 3-5 ¥500", "3〜5号室 ¥500", []),
+    ("Fee 2026-12-20 $30", "料金 2026/12/20 30ドル", []),
     # Found by Codex review: dot-grouped thousands read as two numbers.
     ("Budget 3.000 EUR", "Budget 3000 EUR", []),
     ("Phí 300.000đ", "Fee 300,000 VND", []),

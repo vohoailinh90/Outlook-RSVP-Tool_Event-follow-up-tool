@@ -339,7 +339,8 @@ _CODE_FIRST = re.compile(rf"(?<![{_LATIN}])({'|'.join(_CODES)})"
 # Rewritten with a neutral "~", so the second amount takes no sign from it.
 _RANGE = r"[ \t]?[-~–—〜][ \t]?"
 _UNIT_AFTER_RANGE = re.compile(rf"(?<![\d.,])((?:{_DIGITS})){_RANGE}(?=(?:{_DIGITS})[ \t-]?"
-                               rf"({_units(lambda u: True)}))", re.IGNORECASE)
+                               rf"({_units(lambda u: True)})(?![ \t]?\d))",   # "12-20 ¥500": the ¥ is the 500's
+                               re.IGNORECASE)
 _UNIT_FIRST_RANGE = re.compile(rf"(?<![{_LATIN}\d])((?:{_units(lambda u: _is_symbol(u) and u != '%')}"
                                rf"|{'|'.join(_CODES)})[ \t]?)((?:{_DIGITS})){_RANGE}(?=\d)",
                                re.IGNORECASE)
