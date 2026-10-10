@@ -46,11 +46,12 @@ except ImportError:
     HAS_TKCALENDAR = False
 
 import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
 from rsvp.adapters import outlook_com
-from rsvp.export import legacy_excel
+from rsvp.export import legacy_excel, reports
+from rsvp.export.reports import read_gift_contribution_rows
 from rsvp.storage import db, settings
 from rsvp.ports import OutlookPort
 from rsvp.services.invite import InviteRequest, send_invite
@@ -196,39 +197,6 @@ def set_date_str(widget, date_str):
             widget.insert(0, f"{d:02d}/{m:02d}/{y}")
     except Exception:
         pass  # không parse được (định dạng lạ) — giữ nguyên giá trị đang có trên ô
-
-
-def read_gift_contribution_rows(path):
-    """Reads a Gift_Contribution_List_*.xlsx file and returns
-    list[dict(name, email, checked, amount)], matching columns by their
-    HEADER text (row 1) instead of a fixed position — so both older files
-    (Name/Email/Contributed only) and newer files (No./Name/Email/Amount/
-    Contributed) can be read back correctly."""
-    wb = openpyxl.load_workbook(path, data_only=True)
-    ws = wb.active
-    header_row = next(ws.iter_rows(min_row=1, max_row=1), ())
-    header = {(str(c.value).strip() if c.value else ""): i for i, c in enumerate(header_row)}
-    i_name = header.get("Name")
-    i_email = header.get("Email")
-    i_amount = header.get("Amount")
-    i_contrib = header.get("Contributed")
-    rows = []
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        if not row:
-            continue
-        email = row[i_email] if i_email is not None and i_email < len(row) else None
-        if not email:
-            continue  # skips blank rows and the "TOTAL COLLECTED" summary row
-        name = row[i_name] if i_name is not None and i_name < len(row) else None
-        contributed = row[i_contrib] if i_contrib is not None and i_contrib < len(row) else None
-        amount = row[i_amount] if i_amount is not None and i_amount < len(row) else None
-        rows.append({
-            "name": str(name).strip() if name else str(email).strip(),
-            "email": str(email).strip(),
-            "checked": (str(contributed).strip().lower() == "yes") if contributed is not None else False,
-            "amount": parse_amount_from_text(amount) if amount is not None else 0.0,
-        })
-    return rows
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -3082,7 +3050,7 @@ class RSVPApp(tk.Tk):
         # đóng góp ở khối nhắc nhở phía trên) — nội dung email liệt kê danh
         # sách những ai ĐÃ ĐÓNG GÓP (cột "Contributed" = Yes), đánh số lại
         # từ 1, KHÔNG đưa 2 cột checkbox ("Send email"/"Contributed") vào
-        # danh sách đó — xem _build_gift_report_workbook()/build_gift_report_body().
+        # danh sách đó — xem reports.gift_report_workbook()/build_gift_report_body().
         # Nội dung mail CHỈ là 1 thông báo TỔNG QUAN (đã thu bao nhiêu
         # người/bao nhiêu tiền), KHÔNG liệt kê từng người trong nội dung —
         # danh sách chi tiết nằm trong file Excel TỰ ĐỘNG ĐÍNH KÈM.
@@ -3273,55 +3241,13 @@ class RSVPApp(tk.Tk):
             f"Total in list now: {len(self._gift_roster)} people."
         )
 
-    def _build_gift_report_workbook(self):
-        """Dựng 1 openpyxl Workbook liệt kê CHỈ những người ĐÃ ĐÓNG GÓP
-        (self._gift_roster[...]["checked"] == True), đánh số lại từ 1 —
-        dùng làm file đính kèm của email báo cáo (xem
-        _send_gift_report_email()). KHÔNG gồm 2 cột checkbox "Send email"/
-        "Contributed" (2 cột đó chỉ có ý nghĩa thao tác trên UI, không phải
-        dữ liệu cần báo cáo cho người nhận) — chỉ còn No./Name/Email/
-        Amount."""
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = "Contributors"
-        headers = ["No.", "Name", "Email", "Amount"]
-        for i, h in enumerate(headers, start=1):
-            c = ws.cell(row=1, column=i, value=h)
-            c.font = Font(bold=True, color="FFFFFF")
-            c.fill = PatternFill("solid", fgColor="003366")
-            c.alignment = Alignment(horizontal="center")
-        row_idx = 2
-        seq = 0
-        total_amount = 0.0
-        for email, info in getattr(self, "_gift_roster", {}).items():
-            if not info.get("checked"):
-                continue
-            seq += 1
-            amount = info.get("amount", 0.0)
-            total_amount += amount
-            ws.cell(row=row_idx, column=1, value=seq)
-            ws.cell(row=row_idx, column=2, value=info.get("name") or email)
-            ws.cell(row=row_idx, column=3, value=email)
-            ws.cell(row=row_idx, column=4, value=amount or None)
-            row_idx += 1
-        total_row = row_idx + 1
-        ws.cell(row=total_row, column=2, value="TOTAL COLLECTED:").font = Font(bold=True)
-        c_amt = ws.cell(row=total_row, column=4, value=total_amount)
-        c_amt.font = Font(bold=True)
-        c_amt.number_format = "#,##0"
-        ws.column_dimensions["A"].width = 6
-        ws.column_dimensions["B"].width = 28
-        ws.column_dimensions["C"].width = 32
-        ws.column_dimensions["D"].width = 14
-        return wb
-
     def _gift_report_body_args(self):
         """Lấy đúng (guest_of_honor, event_name, contributor_count,
         total_amount) hiện tại từ Tab 1 + bảng Gift Contribution (Tab 6) —
         dùng để build nội dung email báo cáo mặc định
         (build_gift_report_body()) — nội dung chỉ là 1 THÔNG BÁO TỔNG QUAN,
         danh sách chi tiết nằm trong file Excel đính kèm (xem
-        _build_gift_report_workbook())."""
+        reports.gift_report_workbook())."""
         contributor_count = sum(
             1 for info in getattr(self, "_gift_roster", {}).values() if info.get("checked"))
         return (
@@ -3351,7 +3277,7 @@ class RSVPApp(tk.Tk):
         1 thông báo TỔNG QUAN (đã thu được bao nhiêu người/bao nhiêu tiền)
         — danh sách chi tiết từng người ĐÃ đóng góp (đánh số lại từ 1,
         KHÔNG gồm 2 cột checkbox) nằm trong file Excel TỰ ĐỘNG ĐÍNH KÈM
-        (xem _build_gift_report_workbook()). Không có Voting Buttons (dùng
+        (xem reports.gift_report_workbook()). Không có Voting Buttons (dùng
         self.outlook.send_gift_report_email(), hàm gửi thông báo thuần tuý
         + đính kèm file — KHÁC với send_voting_invite() vốn không hỗ trợ
         đính kèm)."""
@@ -3386,7 +3312,7 @@ class RSVPApp(tk.Tk):
         # worker thread), lưu vào 1 file tạm — không phải nơi lưu trữ
         # chính (dữ liệu thật vẫn ở database), chỉ để đính kèm email.
         try:
-            wb = self._build_gift_report_workbook()
+            wb = reports.gift_report_workbook(self._gift_roster)
             excel_path = os.path.join(
                 tempfile.gettempdir(), f"Gift_Contribution_Report_{event_id or 'event'}.xlsx")
             wb.save(excel_path)
@@ -3656,7 +3582,7 @@ class RSVPApp(tk.Tk):
         if not getattr(self, "_gift_roster", None):
             if not silent:
                 messagebox.showwarning("List is empty",
-                                        "No one in the list yet — click '🔄 Reload list from Tab 2' first.")
+                                        "No one in the list yet — add recipients on Tab 2 first.")
             return
 
         out_path = filedialog.asksaveasfilename(
@@ -3669,54 +3595,13 @@ class RSVPApp(tk.Tk):
             return
 
         try:
-            wb = openpyxl.Workbook()
-            ws = wb.active
-            ws.title = "Gift Contribution"
-            headers = ["No.", "Name", "Email", "Amount", "Contributed"]
-            for i, h in enumerate(headers, start=1):
-                c = ws.cell(row=1, column=i, value=h)
-                c.font = Font(bold=True, color="FFFFFF")
-                c.fill = PatternFill("solid", fgColor="003366")
-                c.alignment = Alignment(horizontal="center")
-            row_idx = 2
-            contributed_count = 0
-            total_amount = 0.0
-            for i, (email, info) in enumerate(self._gift_roster.items(), start=1):
-                amount = info.get("amount", 0.0)
-                if info["checked"]:
-                    contributed_count += 1
-                    total_amount += amount
-                ws.cell(row=row_idx, column=1, value=i)
-                ws.cell(row=row_idx, column=2, value=info["name"])
-                ws.cell(row=row_idx, column=3, value=email)
-                ws.cell(row=row_idx, column=4, value=amount or None)
-                ws.cell(row=row_idx, column=5, value="Yes" if info["checked"] else "No")
-                row_idx += 1
-
-            # Grand total row, right below the table (one blank row for
-            # readability) — so the exported file always carries the total
-            # amount collected alongside the per-person breakdown. The label
-            # goes in the NAME column (not Email) so read_gift_contribution_rows()
-            # correctly skips this row on reload (it keys off the Email
-            # column being non-empty to recognize a real person's row).
-            total_row = row_idx + 1
-            label_cell = ws.cell(row=total_row, column=2, value="TOTAL COLLECTED:")
-            label_cell.font = Font(bold=True)
-            label_cell.alignment = Alignment(horizontal="right")
-            total_cell = ws.cell(row=total_row, column=4, value=total_amount)
-            total_cell.font = Font(bold=True)
-            total_cell.number_format = "#,##0"
-
-            ws.column_dimensions["A"].width = 6
-            ws.column_dimensions["B"].width = 28
-            ws.column_dimensions["C"].width = 32
-            ws.column_dimensions["D"].width = 14
-            ws.column_dimensions["E"].width = 14
-            wb.save(out_path)
+            reports.gift_contribution_workbook(self._gift_roster).save(out_path)
         except Exception as e:
             if not silent:
                 messagebox.showerror("Error", f"Couldn't export the file:\n{e}")
             return
+        contributed_count = sum(1 for info in self._gift_roster.values() if info["checked"])
+        total_amount = sum(info.get("amount", 0.0) for info in self._gift_roster.values() if info["checked"])
 
         if not silent:
             total = len(self._gift_roster)
@@ -4264,70 +4149,10 @@ class RSVPApp(tk.Tk):
         return True
 
     def _build_attendance_workbook(self):
-        """Dựng 1 openpyxl Workbook cho báo cáo Attendance & Payment —
-        TÁCH RIÊNG từ _export_attendance_to_excel() (giữ nguyên layout cũ)
-        để dùng chung ở 2 nơi: nút "📊 Export to Excel" (lưu ra file người
-        dùng chọn) VÀ file đính kèm tự động của email cảm ơn (lưu ra file
-        tạm, xem _send_thank_you_email()) — tránh code trùng lặp giữa 2
-        chỗ. MỚI: thêm 2 dòng "Amount paid"/"Remaining amount" (tính năng
-        #3) vào cuối báo cáo, ngay dưới "Total collected amount"."""
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = "Attendance & Payment"
-        headers = ["No.", "Name", "Email", "Vote", "Actual Attend", "Free", "Amount"]
-        for i, h in enumerate(headers, start=1):
-            c = ws.cell(row=1, column=i, value=h)
-            c.font = Font(bold=True, color="FFFFFF")
-            c.fill = PatternFill("solid", fgColor="003366")
-            c.alignment = Alignment(horizontal="center")
-        row_idx = 2
-        total_attend = 0
-        total_amount = 0.0
-        for i, (email, info) in enumerate(self._attendance_roster.items(), start=1):
-            attend = (info.get("actual_attend") or "").strip()
-            amount = info.get("amount", 0.0)
-            if attend.lower() == "yes":
-                total_attend += 1
-            total_amount += amount
-            ws.cell(row=row_idx, column=1, value=i)
-            ws.cell(row=row_idx, column=2, value=info["name"])
-            ws.cell(row=row_idx, column=3, value=email)
-            ws.cell(row=row_idx, column=4, value=info.get("vote", ""))
-            ws.cell(row=row_idx, column=5, value=attend)
-            ws.cell(row=row_idx, column=6, value="Yes" if info.get("free") else "No")
-            ws.cell(row=row_idx, column=7, value=amount or None)
-            row_idx += 1
-        total_row = row_idx + 1
-        ws.cell(row=total_row, column=2, value="Total actual attend:").font = Font(bold=True)
-        ws.cell(row=total_row, column=5, value=total_attend).font = Font(bold=True)
-        amount_row = total_row + 1
-        ws.cell(row=amount_row, column=2, value="Total collected amount:").font = Font(bold=True)
-        c_amt = ws.cell(row=amount_row, column=7, value=total_amount)
-        c_amt.font = Font(bold=True)
-        c_amt.number_format = "#,##0"
-        # Remaining is computed, never re-read from the "Remaining amount"
-        # label: parse_amount_from_text drops the sign, so an overpaid
-        # "-5,000" used to be written into this report as 5,000.
-        amount_paid = parse_amount_from_text(getattr(self, "var_amount_paid", tk.StringVar(value="0")).get())
-        remaining = remaining_amount(total_amount, amount_paid)
-        paid_row = amount_row + 1
-        ws.cell(row=paid_row, column=2, value="Amount paid:").font = Font(bold=True)
-        c_paid = ws.cell(row=paid_row, column=7, value=amount_paid)
-        c_paid.font = Font(bold=True)
-        c_paid.number_format = "#,##0"
-        remaining_row = paid_row + 1
-        ws.cell(row=remaining_row, column=2, value="Remaining amount:").font = Font(bold=True)
-        c_rem = ws.cell(row=remaining_row, column=7, value=remaining)
-        c_rem.font = Font(bold=True)
-        c_rem.number_format = "#,##0"
-        ws.column_dimensions["A"].width = 6
-        ws.column_dimensions["B"].width = 26
-        ws.column_dimensions["C"].width = 30
-        ws.column_dimensions["D"].width = 10
-        ws.column_dimensions["E"].width = 14
-        ws.column_dimensions["F"].width = 10
-        ws.column_dimensions["G"].width = 14
-        return wb
+        """The Attendance & Payment report for the Export button and the
+        Thank-you email's attachment (see reports.attendance_workbook())."""
+        return reports.attendance_workbook(
+            self._attendance_roster, parse_amount_from_text(self.var_amount_paid.get()))
 
     def _export_attendance_to_excel(self):
         """Xuất bảng Attendance & Payment ra 1 file Excel — CHỈ khi bấm nút
@@ -4340,7 +4165,7 @@ class RSVPApp(tk.Tk):
             return
         if not getattr(self, "_attendance_roster", None):
             messagebox.showwarning("List is empty",
-                                    "No one in the list yet — click '🔄 Refresh list from Tab 4' first.")
+                                    "No one in the list yet — it lists the Yes/Maybe votes scanned on Tab 4.")
             return
         out_path = filedialog.asksaveasfilename(
             title="Export Attendance & Payment to Excel",
@@ -4554,12 +4379,6 @@ class RSVPApp(tk.Tk):
                 "Empty content",
                 "Change the language dropdown to regenerate the text, or type the content by hand "
                 "before sending.")
-            return
-
-        if not getattr(self, "_attendance_roster", None):
-            messagebox.showwarning("List is empty",
-                                    "No one in the Attendance & Payment table yet — click "
-                                    "'🔄 Refresh list from Tab 4' first.")
             return
 
         event_id = self.var_event_id.get().strip()
@@ -4784,11 +4603,7 @@ class RSVPApp(tk.Tk):
             wb = openpyxl.Workbook()
             ws = wb.active
             ws.title = "History"
-            for i, c in enumerate(cols, start=1):
-                cell = ws.cell(row=1, column=i, value=c)
-                cell.font = Font(bold=True, color="FFFFFF")
-                cell.fill = PatternFill("solid", fgColor="003366")
-                cell.alignment = Alignment(horizontal="center")
+            reports.write_header_row(ws, cols)
             for r, row_id in enumerate(self.tree_history.get_children(), start=2):
                 shown = dict(zip(shown_cols, self.tree_history.item(row_id, "values")))
                 record = stored.get(self._history_row_ids.get(row_id), {})
