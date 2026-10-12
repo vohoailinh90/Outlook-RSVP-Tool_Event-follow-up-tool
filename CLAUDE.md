@@ -148,7 +148,9 @@ when someone asks, so asking is part of opening one:
 - After every push that answers Codex's findings, comment `@codex review` again: it does not
   look at a new head on its own.
 - Codex answers with review comments, one finding each, or with "Didn't find any major
-  issues" (or a 👍 reaction). Keep going until it reports no findings.
+  issues" (or a 👍 reaction). Keep going until the review is clean as *Pull request
+  lifecycle* below defines it (a P2/P3 finding whose rejection with evidence stands does not
+  keep the loop going).
 - A finding is a claim to verify, not an order. If it is real, fix it with a test that fails
   without the fix. If not, reply on its thread with the reason.
 
