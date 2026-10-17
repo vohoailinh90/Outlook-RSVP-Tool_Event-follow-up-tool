@@ -22,6 +22,7 @@ Exceptions in this repository, which replace the matching rule above:
 
 - The repository's agent roster (CLAUDE.md "Agent roster") is rsvp-reviewer, rsvp-reviewer-critical and architecture-critic, and the main session implements. The coder and tester of the free-model team are not roster agents: their branch is a proposal that the main session takes over, and a roster reviewer still reviews and verifies the diff before it is merged.
 - The worker image has no Windows, pywin32 or tkinter, so on the team gates the tests that use the monolith fixture are skipped (tests/conftest.py skips them unless RSVP_REQUIRE_APP_IMPORT=1). A green team gate does not cover them: the Windows CI job sets that variable, and its result on the pushed head is the evidence. scripts/check_no_pii.py needs a git checkout and is not part of the gate.
+- Before `team push` the lead runs `python3 scripts/check_no_pii.py` in a git checkout of the proposed branch (the worker's export has no .git, so the team gate cannot run it), and a branch that fails it is not pushed: this repository is public and a pushed object cannot be recalled.
 
 Where this repository documents its own rule for one of these steps elsewhere (who merges, what gates a merge, how the review is requested, a cap on rounds), that rule governs that step; this process covers whatever the repository leaves unsaid.
 <!-- team-onboarding:end -->
